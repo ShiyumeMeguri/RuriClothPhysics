@@ -21,6 +21,7 @@ def select_team_wind(world, ctx, team_index, center_world_positions):
             for zone in zones:
                 if zone.is_addition and addition_count >= 3:
                     continue
+                zone_volume = float("inf") if zone.mode == 'GLOBAL_DIRECTION' else float(zone.zone_volume)
                 lpos = zone.world_to_local[:3, :3] @ center + zone.world_to_local[:3, 3]
                 llen = float(np.linalg.norm(lpos))
 
@@ -32,7 +33,7 @@ def select_team_wind(world, ctx, team_index, center_world_positions):
                     if llen > zone.size[0]:
                         continue
 
-                if not zone.is_addition and zone.zone_volume > min_volume:
+                if not zone.is_addition and zone_volume > min_volume:
                     continue
 
                 direction = zone.world_direction
@@ -56,7 +57,7 @@ def select_team_wind(world, ctx, team_index, center_world_positions):
                     if latest_id is not None:
                         result = [r for r in result if r[0] != latest_id]
                     result.append(info)
-                    min_volume = zone.zone_volume
+                    min_volume = zone_volume
                     latest_id = zone.zone_id
         result = result[:defs.WIND_ZONE_SLOTS]
         row["wind_count"] = len(result)

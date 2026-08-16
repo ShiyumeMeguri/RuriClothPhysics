@@ -131,6 +131,8 @@ COLLIDER_FIELDS = {
     "kind": (I4, ()),
     "center": (F4, (3,)), "size": (F4, (3,)), "axis": (F4, (3,)), "aligned": (B1, ()),
     "enabled": (B1, ()),
+    "enabled_prev": (B1, ()),
+    "active": (B1, ()),
     "input_positions": (F4, (3,)), "input_rotations": (F4, (4,)), "input_scales": (F4, (3,)),
     "frame_positions": (F4, (3,)), "frame_rotations": (F4, (4,)), "frame_scales": (F4, (3,)),
     "old_frame_positions": (F4, (3,)), "old_frame_rotations": (F4, (4,)),

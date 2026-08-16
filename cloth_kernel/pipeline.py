@@ -27,7 +27,9 @@ class Context:
         self.power = np.array(defs.simulation_power(frame_globals.simulation_frequency),
                               dtype=np.float32)
         self.intersect_frame_index = frame_globals.frame_index % defs.SELF_COLLISION_INTERSECT_DIV
-        self.frame_team_mask = world.team["enabled"] & world.team["valid"]
+        component_scale = world.team["component_world_scale"]
+        scale_alive = np.abs(component_scale).min(axis=1) >= 1e-6
+        self.frame_team_mask = world.team["enabled"] & world.team["valid"] & scale_alive
         self.frame_team_index = np.flatnonzero(self.frame_team_mask)
         self.frame_particle_index = np.flatnonzero(
             self.frame_team_mask[world.particles["team"]])

@@ -8,14 +8,25 @@ def frame_pre(world, ctx):
     ca = world.colliders
     tt = world.team
     ct = ca["team"]
-    mask = ctx.frame_team_mask[ct] & ca["enabled"]
-    index = np.flatnonzero(mask)
-    if len(index) == 0:
+    frame_columns = np.flatnonzero(ctx.frame_team_mask[ct])
+    if len(frame_columns) == 0:
         return
+    enabled_now = ca["enabled"][frame_columns]
+    rising_edge_all = enabled_now & ~ca["enabled_prev"][frame_columns]
+    scale_invalid_all = (np.abs(ca["input_scales"][frame_columns]) < 1e-6).any(axis=1)
+    ca["active"][frame_columns] = enabled_now & ~scale_invalid_all
+    ca["enabled_prev"][frame_columns] = enabled_now
+    keep = np.flatnonzero(enabled_now)
+    if len(keep) == 0:
+        return
+    index = frame_columns[keep]
     team = ct[index]
+    rising_edge = rising_edge_all[keep]
+    scale_invalid = scale_invalid_all[keep]
 
     quat = ca["input_rotations"][index]
     scl = ca["input_scales"][index]
+    scl = np.where(np.abs(scl) < 1e-6, np.float32(1e-6), scl).astype(np.float32)
     scl_sign = np.sign(np.where(scl == 0.0, 1.0, scl)).astype(np.float32)
     center = ca["center"][index]
     offset = pm.quat_rotate(quat, center * scl_sign) * scl * scl_sign
@@ -23,7 +34,7 @@ def frame_pre(world, ctx):
     ca["frame_rotations"][index] = quat
     ca["frame_scales"][index] = scl
 
-    reset = tt["reset_pending"][team]
+    reset = tt["reset_pending"][team] | rising_edge | scale_invalid
     if np.any(reset):
         r = index[reset]
         ca["old_frame_positions"][r] = ca["frame_positions"][r]
@@ -64,7 +75,7 @@ def start_step(world, ctx):
     ca = world.colliders
     tt = world.team
     ct = ca["team"]
-    mask = ctx.step_team_mask[ct] & ca["enabled"]
+    mask = ctx.step_team_mask[ct] & ca["active"]
     index = np.flatnonzero(mask)
     if len(index) == 0:
         return
@@ -169,7 +180,7 @@ def _solve_point(world, ctx):
     pair_team = ppa["team"]
     active = ctx.step_team_mask[pair_team] \
         & (tt["collision_mode"][pair_team] == defs.COLLISION_POINT) \
-        & ca["enabled"][ppa["collider"]]
+        & ca["active"][ppa["collider"]]
     pair_index = np.flatnonzero(active)
     if len(pair_index) == 0:
         return
@@ -335,7 +346,7 @@ def _solve_edge(world, ctx):
     pair_team = epa["team"]
     active = ctx.step_team_mask[pair_team] \
         & (tt["collision_mode"][pair_team] == defs.COLLISION_EDGE) \
-        & ca["enabled"][epa["collider"]]
+        & ca["active"][epa["collider"]]
     pair_index = np.flatnonzero(active)
     if len(pair_index) == 0:
         return
@@ -612,7 +623,7 @@ def _edge_capsule(pos0, pos1, r0, r1, cfr, edge_min, edge_max, ca, colliders):
 
 def end_step(world, ctx):
     ca = world.colliders
-    mask = ctx.step_team_mask[ca["team"]] & ca["enabled"]
+    mask = ctx.step_team_mask[ca["team"]] & ca["active"]
     index = np.flatnonzero(mask)
     if len(index) == 0:
         return
@@ -624,7 +635,7 @@ def frame_post(world, ctx):
     ca = world.colliders
     tt = world.team
     ct = ca["team"]
-    mask = ctx.frame_team_mask[ct] & tt["running"][ct] & ca["enabled"]
+    mask = ctx.frame_team_mask[ct] & tt["running"][ct] & ca["active"]
     index = np.flatnonzero(mask)
     if len(index) == 0:
         return
