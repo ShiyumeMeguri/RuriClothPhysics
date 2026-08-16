@@ -33,6 +33,7 @@ PHASE_DISTANCE_B = int32(1 << 7)     # S10 distance.run (second substep occurren
 PHASE_MOTION = int32(1 << 8)         # S11 motion.run (substep)
 PHASE_BENDING = int32(1 << 9)        # S8 bending.run (substep)
 PHASE_BASELINE = int32(1 << 10)      # S4 baseline.run FK (substep)
+PHASE_TEAM_STEP = int32(1 << 11)     # S1 team_time.step_update (substep, per-team)
 
 ALL_PHASES = int32(-1)
 
@@ -46,7 +47,9 @@ EPSILON = float32(1e-8)
 
 WIND_BASE_SPEED = float32(7.5)
 WIND_TURBULENCE_ANGLE = float32(45.0)
+WIND_MAX_TIME = float32(10000.0)
 DEG2RAD = float32(math.pi / 180.0)
+RAD2DEG = float32(180.0 / math.pi)
 
 FORCE_VELOCITY_ADD = int32(1)
 FORCE_VELOCITY_ADD_WITHOUT_DEPTH = int32(2)
@@ -333,6 +336,210 @@ def do_distance_gather(p, p_team, next_positions, base_positions, depth, frictio
         sc_dcorr[p, 2] = float32(0.0)
 
 
+@cuda.jit(device=True)
+def do_step_update(i, sim_dt,
+                   t_now_update, t_time, t_frame_old, t_frame_interp,
+                   t_now_wp, t_now_wr, t_old_wp, t_old_wr,
+                   t_ofwp, t_ofwr, t_ofws, t_fwp, t_fwr, t_fws,
+                   t_step_vector, t_step_rotation, t_step_mir, t_step_rir,
+                   t_local_inertia, t_lmsl, t_lrsl,
+                   t_inertia_vector, t_inertia_rotation,
+                   t_angular_velocity, t_rotation_axis,
+                   t_init_scale, t_scale_ratio,
+                   t_gravity_direction, t_gravity_dot, t_ilgd, t_neg_dir,
+                   t_gravity, t_gravity_falloff, t_gravity_ratio,
+                   t_velocity_weight, t_stab_time, t_blend_weight, t_bwp, t_distance_weight,
+                   t_wind_moving, t_frame_moving_speed, t_moving_wind_main,
+                   t_frame_moving_dir, t_moving_wind_dir, t_moving_wind_dirq,
+                   t_wind_main, t_wind_frequency, t_wind_count, t_wind_time,
+                   t_moving_wind_time):
+    nu = t_now_update[i] + sim_dt
+    t_now_update[i] = nu
+    span = t_time[i] - t_frame_old[i]
+    if span > float32(0.0):
+        interp = dmath.saturate((nu - t_frame_old[i]) / span)
+    else:
+        interp = float32(1.0)
+    t_frame_interp[i] = interp
+
+    owpx = t_now_wp[i, 0]
+    owpy = t_now_wp[i, 1]
+    owpz = t_now_wp[i, 2]
+    owrx = t_now_wr[i, 0]
+    owry = t_now_wr[i, 1]
+    owrz = t_now_wr[i, 2]
+    owrw = t_now_wr[i, 3]
+    t_old_wp[i, 0] = owpx
+    t_old_wp[i, 1] = owpy
+    t_old_wp[i, 2] = owpz
+    t_old_wr[i, 0] = owrx
+    t_old_wr[i, 1] = owry
+    t_old_wr[i, 2] = owrz
+    t_old_wr[i, 3] = owrw
+
+    t = interp
+    nwpx = dmath.lerp(t_ofwp[i, 0], t_fwp[i, 0], t)
+    nwpy = dmath.lerp(t_ofwp[i, 1], t_fwp[i, 1], t)
+    nwpz = dmath.lerp(t_ofwp[i, 2], t_fwp[i, 2], t)
+    nwrx, nwry, nwrz, nwrw = dmath.quat_slerp(
+        t_ofwr[i, 0], t_ofwr[i, 1], t_ofwr[i, 2], t_ofwr[i, 3],
+        t_fwr[i, 0], t_fwr[i, 1], t_fwr[i, 2], t_fwr[i, 3], t)
+    wsx = dmath.lerp(t_ofws[i, 0], t_fws[i, 0], t)
+    wsy = dmath.lerp(t_ofws[i, 1], t_fws[i, 1], t)
+    wsz = dmath.lerp(t_ofws[i, 2], t_fws[i, 2], t)
+    t_now_wp[i, 0] = nwpx
+    t_now_wp[i, 1] = nwpy
+    t_now_wp[i, 2] = nwpz
+    t_now_wr[i, 0] = nwrx
+    t_now_wr[i, 1] = nwry
+    t_now_wr[i, 2] = nwrz
+    t_now_wr[i, 3] = nwrw
+
+    svx = nwpx - owpx
+    svy = nwpy - owpy
+    svz = nwpz - owpz
+    iowrx, iowry, iowrz, iowrw = dmath.quat_inverse(owrx, owry, owrz, owrw)
+    srx, sry, srz, srw = dmath.quat_mul(nwrx, nwry, nwrz, nwrw,
+                                        iowrx, iowry, iowrz, iowrw)
+    step_angle = dmath.quat_angle(owrx, owry, owrz, owrw, nwrx, nwry, nwrz, nwrw)
+    t_step_vector[i, 0] = svx
+    t_step_vector[i, 1] = svy
+    t_step_vector[i, 2] = svz
+    t_step_rotation[i, 0] = srx
+    t_step_rotation[i, 1] = sry
+    t_step_rotation[i, 2] = srz
+    t_step_rotation[i, 3] = srw
+
+    li = t_local_inertia[i]
+    lmi = float32(1.0) - li
+    lri = float32(1.0) - li
+    lvx = svx * (float32(1.0) - lmi)
+    lvy = svy * (float32(1.0) - lmi)
+    lvz = svz * (float32(1.0) - lmi)
+    local_speed = dmath.length3(lvx, lvy, lvz) / sim_dt
+    limit = t_lmsl[i]
+    if (local_speed > limit) and (limit >= float32(0.0)):
+        denom = local_speed if local_speed > float32(0.0) else float32(1.0)
+        ratio = limit / denom
+        lmi = float32(1.0) + (lmi - float32(1.0)) * ratio
+    local_angle = step_angle * (float32(1.0) - lri)
+    local_angle_speed = (local_angle / sim_dt) * RAD2DEG
+    limit = t_lrsl[i]
+    if (local_angle_speed > limit) and (limit >= float32(0.0)):
+        denom = local_angle_speed if local_angle_speed > float32(0.0) else float32(1.0)
+        ratio = limit / denom
+        lri = float32(1.0) + (lri - float32(1.0)) * ratio
+    t_step_mir[i] = lmi
+    t_step_rir[i] = lri
+
+    t_inertia_vector[i, 0] = svx * lmi
+    t_inertia_vector[i, 1] = svy * lmi
+    t_inertia_vector[i, 2] = svz * lmi
+    irx, iry, irz, irw = dmath.quat_slerp(float32(0.0), float32(0.0), float32(0.0), float32(1.0),
+                                          srx, sry, srz, srw, lri)
+    t_inertia_rotation[i, 0] = irx
+    t_inertia_rotation[i, 1] = iry
+    t_inertia_rotation[i, 2] = irz
+    t_inertia_rotation[i, 3] = irw
+
+    angular_velocity = step_angle / sim_dt
+    t_angular_velocity[i] = angular_velocity
+    _ang, axx, axy, axz = dmath.quat_to_angle_axis(srx, sry, srz, srw)
+    if angular_velocity > EPSILON:
+        t_rotation_axis[i, 0] = axx
+        t_rotation_axis[i, 1] = axy
+        t_rotation_axis[i, 2] = axz
+    else:
+        t_rotation_axis[i, 0] = float32(0.0)
+        t_rotation_axis[i, 1] = float32(0.0)
+        t_rotation_axis[i, 2] = float32(0.0)
+
+    isl = dmath.length3(t_init_scale[i, 0], t_init_scale[i, 1], t_init_scale[i, 2])
+    if isl < float32(1e-30):
+        isl = float32(1e-30)
+    wsl = dmath.length3(wsx, wsy, wsz)
+    sr = wsl / isl
+    if sr < float32(1e-6):
+        sr = float32(1e-6)
+    t_scale_ratio[i] = sr
+
+    gdx = t_gravity_direction[i, 0]
+    gdy = t_gravity_direction[i, 1]
+    gdz = t_gravity_direction[i, 2]
+    gravity_dot = float32(1.0)
+    if (gdx * gdx + gdy * gdy + gdz * gdz) > EPSILON:
+        ilx = t_ilgd[i, 0]
+        ily = t_ilgd[i, 1] * t_neg_dir[i, 1]
+        ilz = t_ilgd[i, 2]
+        wfx, wfy, wfz = dmath.quat_rotate(nwrx, nwry, nwrz, nwrw, ilx, ily, ilz)
+        gdot = wfx * gdx + wfy * gdy + wfz * gdz
+        gravity_dot = dmath.saturate(gdot * float32(0.5) + float32(0.5))
+    t_gravity_dot[i] = gravity_dot
+
+    gravity_ratio = float32(1.0)
+    if (t_gravity[i] > float32(1e-6)) and (t_gravity_falloff[i] > float32(1e-6)):
+        low = dmath.saturate(float32(1.0) - t_gravity_falloff[i])
+        gravity_ratio = low + (float32(1.0) - low) * dmath.saturate(float32(1.0) - gravity_dot)
+    t_gravity_ratio[i] = gravity_ratio
+
+    vw = t_velocity_weight[i]
+    if vw < float32(1.0):
+        stab = t_stab_time[i]
+        if stab > float32(1e-6):
+            add = sim_dt / stab
+        else:
+            add = float32(1.0)
+        vw = vw + add
+        if vw > float32(1.0):
+            vw = float32(1.0)
+        t_velocity_weight[i] = vw
+    t_blend_weight[i] = dmath.saturate(vw * t_bwp[i] * t_distance_weight[i])
+
+    moving_active = t_wind_moving[i] > float32(0.01)
+    if moving_active:
+        denom = sr if sr > float32(0.0) else float32(1.0)
+        mwm = (t_frame_moving_speed[i] * t_wind_moving[i]) / denom
+    else:
+        mwm = float32(0.0)
+    t_moving_wind_main[i] = mwm
+    if moving_active:
+        mdx = -t_frame_moving_dir[i, 0]
+        mdy = -t_frame_moving_dir[i, 1]
+        mdz = -t_frame_moving_dir[i, 2]
+        t_moving_wind_dir[i, 0] = mdx
+        t_moving_wind_dir[i, 1] = mdy
+        t_moving_wind_dir[i, 2] = mdz
+        mqx, mqy, mqz, mqw = dmath.axis_quaternion(mdx, mdy, mdz)
+        t_moving_wind_dirq[i, 0] = mqx
+        t_moving_wind_dirq[i, 1] = mqy
+        t_moving_wind_dirq[i, 2] = mqz
+        t_moving_wind_dirq[i, 3] = mqw
+
+    wf = t_wind_frequency[i]
+    wc = t_wind_count[i]
+    for s in range(4):
+        main_ratio = t_wind_main[i, s] / WIND_BASE_SPEED
+        frequency = (float32(0.2) + main_ratio * float32(0.5)) * wf
+        if frequency > float32(1.5):
+            frequency = float32(1.5)
+        frequency = frequency * sim_dt
+        if s < wc:
+            nt = t_wind_time[i, s] + frequency
+            if nt > WIND_MAX_TIME:
+                nt = nt - WIND_MAX_TIME * float32(2.0)
+            t_wind_time[i, s] = nt
+    move_ratio = mwm / WIND_BASE_SPEED
+    mf = (float32(0.2) + move_ratio * float32(0.5)) * wf
+    if mf > float32(1.5):
+        mf = float32(1.5)
+    mf = mf * sim_dt
+    if moving_active:
+        mt2 = t_moving_wind_time[i] + mf
+        if mt2 > WIND_MAX_TIME:
+            mt2 = mt2 - WIND_MAX_TIME * float32(2.0)
+        t_moving_wind_time[i] = mt2
+
+
 @cuda.jit(cache=True)
 def frame_kernel(phase_mask, sub_begin, sub_end,
                  fdt, sim_dt, max_sim_count, global_time_scale,
@@ -368,6 +575,13 @@ def frame_kernel(phase_mask, sub_begin, sub_end,
                  t_old_anchor_position, t_old_anchor_rotation, t_anchor_component_local_position,
                  t_reset_pending, t_keep_teleport_pending, t_inertia_shift,
                  t_negative_scale_teleport,
+                 t_now_world_rotation, t_old_world_rotation,
+                 t_step_move_inertia_ratio, t_step_rotation_inertia_ratio,
+                 t_local_inertia, t_local_movement_speed_limit, t_local_rotation_speed_limit,
+                 t_gravity_dot, t_init_local_gravity_direction, t_gravity_falloff,
+                 t_stablization_time, t_blend_weight, t_blend_weight_param, t_distance_weight,
+                 t_frame_moving_speed, t_frame_moving_direction, t_moving_wind_direction,
+                 t_wind_frequency,
                  p_team, p_local_positions, p_local_normals, p_local_tangents,
                  p_skin_indices, p_skin_weights, p_positions, p_rotations,
                  p_next_positions, p_velocity_positions, p_step_basic_positions, p_vertex_root,
@@ -424,6 +638,38 @@ def frame_kernel(phase_mask, sub_begin, sub_end,
     n_baseline = baseline_entries.shape[0]
     num_fk_levels = fk_yes_offsets.shape[0] - 1
     for _k in range(sub_begin, sub_end):
+        # --- S1 team_time.step_update (per-team, first substep stage) ---
+        if phase_mask & PHASE_TEAM_STEP:
+            i = tid
+            while i < num_teams:
+                if team_frame_mask(t_enabled, t_valid, t_cws, i) and t_update_count[i] > _k:
+                    do_step_update(i, sim_dt,
+                                   t_now_update, t_time, t_frame_old, t_frame_interpolation,
+                                   t_now_world_position, t_now_world_rotation,
+                                   t_old_world_position, t_old_world_rotation,
+                                   t_old_frame_world_position, t_old_frame_world_rotation,
+                                   t_old_frame_world_scale, t_frame_world_position,
+                                   t_frame_world_rotation, t_frame_world_scale,
+                                   t_step_vector, t_step_rotation,
+                                   t_step_move_inertia_ratio, t_step_rotation_inertia_ratio,
+                                   t_local_inertia, t_local_movement_speed_limit,
+                                   t_local_rotation_speed_limit,
+                                   t_inertia_vector, t_inertia_rotation,
+                                   t_angular_velocity, t_rotation_axis,
+                                   t_init_scale, t_scale_ratio,
+                                   t_gravity_direction, t_gravity_dot,
+                                   t_init_local_gravity_direction, t_negative_scale_direction,
+                                   t_gravity, t_gravity_falloff, t_gravity_ratio,
+                                   t_velocity_weight, t_stablization_time, t_blend_weight,
+                                   t_blend_weight_param, t_distance_weight,
+                                   t_wind_moving, t_frame_moving_speed, t_moving_wind_main,
+                                   t_frame_moving_direction, t_moving_wind_direction,
+                                   t_moving_wind_dirq,
+                                   t_wind_main, t_wind_frequency, t_wind_count, t_wind_time,
+                                   t_moving_wind_time)
+                i += stride
+        grid.sync()
+
         # --- S3 particles.step_update PASS 1: base interpolation (all sp) + move set ---
         if phase_mask & PHASE_PARTICLES_STEP:
             p = tid
@@ -1322,6 +1568,13 @@ TEAM_KERNEL_FIELDS = (
     "old_anchor_position", "old_anchor_rotation", "anchor_component_local_position",
     "reset_pending", "keep_teleport_pending", "inertia_shift",
     "negative_scale_teleport",
+    "now_world_rotation", "old_world_rotation",
+    "step_move_inertia_ratio", "step_rotation_inertia_ratio",
+    "local_inertia", "local_movement_speed_limit", "local_rotation_speed_limit",
+    "gravity_dot", "init_local_gravity_direction", "gravity_falloff",
+    "stablization_time", "blend_weight", "blend_weight_param", "distance_weight",
+    "frame_moving_speed", "frame_moving_direction", "moving_wind_direction",
+    "wind_frequency",
 )
 
 PARTICLE_KERNEL_FIELDS = (
