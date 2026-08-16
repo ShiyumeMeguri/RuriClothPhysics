@@ -50,11 +50,11 @@ def run(world, ctx):
         idx = np.flatnonzero(is_volume)
         volume_rest = rest[idx] * scale_ratio[idx] * negative_sign[idx]
         n0, n1_, n2_, n3_ = next0[idx], next1[idx], next2[idx], next3[idx]
-        volume = (1.0 / 6.0) * pm.dot(np.cross(n1_ - n0, n2_ - n0), n3_ - n0) * defs.VOLUME_SCALE
-        grad0 = np.cross(n1_ - n2_, n3_ - n2_)
-        grad1 = np.cross(n2_ - n0, n3_ - n0)
-        grad2 = np.cross(n0 - n1_, n3_ - n1_)
-        grad3 = np.cross(n1_ - n0, n2_ - n0)
+        volume = (1.0 / 6.0) * pm.dot(pm.cross(n1_ - n0, n2_ - n0), n3_ - n0) * defs.VOLUME_SCALE
+        grad0 = pm.cross(n1_ - n2_, n3_ - n2_)
+        grad1 = pm.cross(n2_ - n0, n3_ - n0)
+        grad2 = pm.cross(n0 - n1_, n3_ - n1_)
+        grad3 = pm.cross(n1_ - n0, n2_ - n0)
         lam = (inv0[idx] * pm.length(grad0) ** 2 + inv1[idx] * pm.length(grad1) ** 2
                + inv2[idx] * pm.length(grad2) ** 2 + inv3[idx] * pm.length(grad3) ** 2)
         lam = lam * defs.VOLUME_SCALE
@@ -75,8 +75,8 @@ def run(world, ctx):
         elen = pm.length(e)
         ok = elen >= 1e-8
         inv_elen = 1.0 / np.where(elen > 1e-30, elen, 1.0)
-        nn1 = np.cross(n2_ - n0, n3_ - n0)
-        nn2 = np.cross(n3_ - n1_, n2_ - n1_)
+        nn1 = pm.cross(n2_ - n0, n3_ - n0)
+        nn2 = pm.cross(n3_ - n1_, n2_ - n1_)
         sq1 = pm.length(nn1) ** 2
         sq2 = pm.length(nn2) ** 2
         ok = ok & (sq1 != 0.0) & (sq2 != 0.0)
@@ -99,7 +99,7 @@ def run(world, ctx):
                + inv2[idx] * pm.length(d2) ** 2 + inv3[idx] * pm.length(d3) ** 2)
         ok = ok & (lam != 0.0)
 
-        dir_sign = np.sign(pm.dot(np.cross(un1, un2), e))
+        dir_sign = np.sign(pm.dot(pm.cross(un1, un2), e))
         phi = phi * dir_sign
 
         lam = np.where(ok, (rest_angle - phi) / np.where(lam != 0, lam, 1.0) * stiffness[idx], 0.0)

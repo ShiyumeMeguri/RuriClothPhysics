@@ -185,7 +185,7 @@ def _post_triangles(world, ctx):
     p0 = pa["positions"][triangles[:, 0]]
     p1 = pa["positions"][triangles[:, 1]]
     p2 = pa["positions"][triangles[:, 2]]
-    cross = np.cross(p1 - p0, p2 - p0)
+    cross = pm.cross(p1 - p0, p2 - p0)
     lengths = pm.length(cross)
     tri_normals64 = (cross / np.where(lengths > defs.EPSILON, lengths, 1.0)[:, None]).astype(np.float64)
     tri_normals64 = tri_normals64 * tt["negative_scale_triangle_sign"][tri_team][:, 0:1]
@@ -221,7 +221,7 @@ def _post_triangles(world, ctx):
     tan = tan / np.where(lt > 1e-30, lt, 1.0)[:, None]
     d = np.sum(nor * tan, axis=1)
     ok &= (d != 1.0) & (d != -1.0)
-    binormal = np.cross(nor, tan)
+    binormal = pm.cross(nor, tan)
     bl = np.linalg.norm(binormal, axis=1)
     binormal = binormal / np.where(bl > 1e-30, bl, 1.0)[:, None]
     rot = pm.look_rotation(binormal.astype(np.float32), nor.astype(np.float32))

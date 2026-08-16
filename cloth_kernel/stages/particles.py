@@ -295,7 +295,7 @@ def step_post(world, ctx):
             n = v2 / np.where(r > 1e-30, r, 1.0)[:, None]
             m = 1.0 + (1.0 - depth)
             f = m * angular * angular * r
-            u = pm.normalize(np.cross(axis, n))
+            u = pm.normalize(pm.cross(axis, n))
             f = f * pm.saturate(pm.dot(normal_velocity, u))
             add = n * (f * centrifugal * 0.02)[:, None]
             velocity = velocity + np.where(valid[:, None], add, 0.0)

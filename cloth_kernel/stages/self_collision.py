@@ -101,7 +101,7 @@ def frame_end(world, ctx):
         qp = p - q
         ac = c - a
         ab = b - a
-        n = np.cross(ab, ac)
+        n = pm.cross(ab, ac)
         d = pm.dot(qp, n)
         ok = np.abs(d) >= defs.EPSILON
 
@@ -113,7 +113,7 @@ def frame_end(world, ctx):
         ap = p2 - a
         t = pm.dot(ap, n)
         ok &= (t >= 0.0) & (t <= d2)
-        e = np.cross(qp2, ap)
+        e = pm.cross(qp2, ap)
         v = pm.dot(ac, e)
         ok &= (v >= 0.0) & (v <= d2)
         w = -pm.dot(ab, e)

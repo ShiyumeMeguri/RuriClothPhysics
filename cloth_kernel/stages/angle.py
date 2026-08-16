@@ -4,6 +4,12 @@ from .. import defs
 from .. import math as pm
 
 
+class PreparedPass:
+    __slots__ = ("v", "p", "use_limit", "use_restoration", "any_limit", "any_restoration",
+                 "c_inv_mass", "p_inv_mass", "p_move", "limit_stiffness", "max_angle",
+                 "restoration_stiffness", "restoration_attenuation")
+
+
 def run(world, ctx):
     pa = world.particles
     tt = world.team
@@ -57,35 +63,61 @@ def run(world, ctx):
             pa["albuf_restore"][v] = np.where(use_restoration[:, None], bpos - pbpos,
                                               pa["albuf_restore"][v])
 
+    prepared = []
+    for vertices_all, parents_all in world.angle_passes:
+        bucket_active = need[pa["team"][vertices_all]]
+        if not np.any(bucket_active):
+            continue
+        v = vertices_all[bucket_active]
+        p = parents_all[bucket_active]
+        vt = pa["team"][v]
+        cdepth = pa["depth"][v]
+        use_limit = tt["angle_use_limit"][vt]
+        use_restoration = tt["angle_use_restoration"][vt]
+        gravity_falloff = pm.lerp(1.0 - tt["angle_restoration_gravity_falloff"][vt], 1.0,
+                                  tt["gravity_dot"][vt])
+        restoration_stiffness = pm.evaluate_team_lut_clamp01(tt["angle_restoration_lut"], vt, cdepth)
+        restoration_stiffness = pm.saturate(restoration_stiffness * ctx.power[3])
+        entry = PreparedPass()
+        entry.v = v
+        entry.p = p
+        entry.use_limit = use_limit
+        entry.use_restoration = use_restoration
+        entry.any_limit = bool(np.any(use_limit))
+        entry.any_restoration = bool(np.any(use_restoration))
+        entry.c_inv_mass = 1.0 / (1.0 + pa["friction"][v] * defs.FRICTION_MASS)
+        entry.p_inv_mass = 1.0 / (1.0 + pa["friction"][p] * defs.FRICTION_MASS)
+        entry.p_move = pa["attr_move"][p]
+        entry.limit_stiffness = tt["angle_limit_stiffness"][vt]
+        entry.max_angle = np.radians(pm.evaluate_team_lut(tt["angle_limit_lut"], vt, cdepth))
+        entry.restoration_stiffness = restoration_stiffness * gravity_falloff
+        entry.restoration_attenuation = tt["angle_restoration_attenuation"][vt]
+        prepared.append(entry)
+
     iterations = defs.ANGLE_LIMIT_ITERATION
+    limit_rot_ratio = defs.ANGLE_LIMIT_ROTATION_RATIO
+    attenuation = defs.ANGLE_LIMIT_ATTENUATION
     for k in range(iterations):
         iteration_ratio = k / (iterations - 1)
-        limit_rot_ratio = defs.ANGLE_LIMIT_ROTATION_RATIO
         restoration_rot_ratio = np.float32(0.1 + (0.5 - 0.1) * iteration_ratio)
 
-        for vertices_all, parents_all in world.angle_passes:
-            bucket_team = pa["team"][vertices_all]
-            bucket_active = need[bucket_team]
-            if not np.any(bucket_active):
-                continue
-            v = vertices_all[bucket_active]
-            p = parents_all[bucket_active]
-            vt = pa["team"][v]
+        for entry in prepared:
+            v = entry.v
+            p = entry.p
+            c_inv_mass = entry.c_inv_mass
+            p_inv_mass = entry.p_inv_mass
+            p_move = entry.p_move
 
-            cpos = pa["next_positions"][v]
-            ppos = pa["next_positions"][p]
-            c_inv_mass = 1.0 / (1.0 + pa["friction"][v] * defs.FRICTION_MASS)
-            p_inv_mass = 1.0 / (1.0 + pa["friction"][p] * defs.FRICTION_MASS)
-            p_move = pa["attr_move"][p]
-            cdepth = pa["depth"][v]
-
-            use_limit = tt["angle_use_limit"][vt]
-            if np.any(use_limit):
-                limit_stiffness = tt["angle_limit_stiffness"][vt]
+            if entry.any_limit:
+                use_limit = entry.use_limit
+                limit_stiffness = entry.limit_stiffness
+                max_angle = entry.max_angle
                 prot = pa["albuf_rotation"][p]
                 lpos = pa["albuf_local_pos"][v]
                 lrot = pa["albuf_local_rot"][v]
 
+                cpos = pa["next_positions"][v]
+                ppos = pa["next_positions"][p]
                 v_vec = cpos - ppos
                 vlen = pm.length(v_vec)
                 skip1 = vlen < defs.EPSILON
@@ -109,7 +141,6 @@ def run(world, ctx):
                 work = work & (blen >= defs.EPSILON) & (vlen2 >= defs.EPSILON)
                 v_scaled = unit_v * vlen2[:, None]
 
-                max_angle = np.radians(pm.evaluate_team_lut(tt["angle_limit_lut"], vt, cdepth))
                 angle = pm.angle_between(v_scaled, unit_tv)
                 over = angle > max_angle
                 recovery = pm.lerp(angle, max_angle, limit_stiffness)
@@ -124,7 +155,6 @@ def run(world, ctx):
                 padd = np.where(work[:, None], padd, 0.0)
                 cadd = np.where(work[:, None], cadd, 0.0)
 
-                attenuation = defs.ANGLE_LIMIT_ATTENUATION
                 cpos = cpos + cadd
                 pa["next_positions"][v] = cpos
                 pa["velocity_positions"][v] += cadd * attenuation
@@ -144,11 +174,10 @@ def run(world, ctx):
                 nrot = pm.quat_mul(q, nrot)
                 pa["albuf_rotation"][v] = np.where(fix_ok[:, None], nrot, pa["albuf_rotation"][v])
 
-            use_restoration = tt["angle_use_restoration"][vt]
-            if np.any(use_restoration):
-                restoration_attenuation = tt["angle_restoration_attenuation"][vt]
-                gravity_falloff = pm.lerp(1.0 - tt["angle_restoration_gravity_falloff"][vt], 1.0,
-                                          tt["gravity_dot"][vt])
+            if entry.any_restoration:
+                use_restoration = entry.use_restoration
+                restoration_attenuation = entry.restoration_attenuation
+                stiffness = entry.restoration_stiffness
                 cpos = pa["next_positions"][v]
                 ppos = pa["next_positions"][p]
                 tv = pa["albuf_restore"][v]
@@ -164,10 +193,6 @@ def run(world, ctx):
                 v_vec = cpos - ppos
                 vlen = pm.length(v_vec)
                 work = use_restoration & ~snap & (vlen >= defs.EPSILON)
-
-                stiffness = pm.evaluate_team_lut_clamp01(tt["angle_restoration_lut"], vt, cdepth)
-                stiffness = pm.saturate(stiffness * ctx.power[3])
-                stiffness = stiffness * gravity_falloff
 
                 unit_v = v_vec / np.where(vlen > 1e-30, vlen, 1.0)[:, None]
                 unit_tv = tv / np.where(tvlen > 1e-30, tvlen, 1.0)[:, None]

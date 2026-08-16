@@ -7,12 +7,28 @@ VEC_FORWARD = np.array([0.0, 0.0, 1.0], dtype=np.float32)
 VEC_RIGHT = np.array([1.0, 0.0, 0.0], dtype=np.float32)
 
 
+def _pack_last_axis(components, dtype):
+    shape = np.broadcast_shapes(*(component.shape for component in components))
+    out = np.empty(shape + (len(components),), dtype=dtype)
+    for index, component in enumerate(components):
+        out[..., index] = component
+    return out
+
+
+def cross(a, b):
+    return _pack_last_axis([
+        a[..., 1] * b[..., 2] - a[..., 2] * b[..., 1],
+        a[..., 2] * b[..., 0] - a[..., 0] * b[..., 2],
+        a[..., 0] * b[..., 1] - a[..., 1] * b[..., 0],
+    ], np.result_type(a, b))
+
+
 def dot(a, b):
-    return np.sum(a * b, axis=-1)
+    return a[..., 0] * b[..., 0] + a[..., 1] * b[..., 1] + a[..., 2] * b[..., 2]
 
 
 def length(v):
-    return np.sqrt(np.sum(v * v, axis=-1))
+    return np.sqrt(dot(v, v))
 
 
 def normalize(v, fallback=None):
@@ -77,12 +93,12 @@ def quat_identity(shape_prefix=()):
 def quat_mul(a, b):
     ax, ay, az, aw = a[..., 0], a[..., 1], a[..., 2], a[..., 3]
     bx, by, bz, bw = b[..., 0], b[..., 1], b[..., 2], b[..., 3]
-    return np.stack([
+    return _pack_last_axis([
         aw * bx + ax * bw + ay * bz - az * by,
         aw * by - ax * bz + ay * bw + az * bx,
         aw * bz + ax * by - ay * bx + az * bw,
         aw * bw - ax * bx - ay * by - az * bz,
-    ], axis=-1)
+    ], np.result_type(a, b))
 
 
 def quat_conjugate(q):
@@ -104,16 +120,29 @@ def quat_normalize(q):
 
 
 def quat_rotate(q, v):
-    qv = q[..., :3]
-    qw = q[..., 3:4]
-    t = 2.0 * np.cross(qv, v)
-    return v + qw * t + np.cross(qv, t)
+    qx = q[..., 0]
+    qy = q[..., 1]
+    qz = q[..., 2]
+    qw = q[..., 3]
+    vx = v[..., 0]
+    vy = v[..., 1]
+    vz = v[..., 2]
+    tx = 2.0 * (qy * vz - qz * vy)
+    ty = 2.0 * (qz * vx - qx * vz)
+    tz = 2.0 * (qx * vy - qy * vx)
+    return _pack_last_axis([
+        vx + qw * tx + (qy * tz - qz * ty),
+        vy + qw * ty + (qz * tx - qx * tz),
+        vz + qw * tz + (qx * ty - qy * tx),
+    ], np.result_type(q, v))
 
 
 def quat_from_axis_angle(axis, angle):
     half = angle * 0.5
     s = np.sin(half)
-    return np.concatenate([axis * s[..., None], np.cos(half)[..., None]], axis=-1)
+    c = np.cos(half)
+    return _pack_last_axis([axis[..., 0] * s, axis[..., 1] * s, axis[..., 2] * s, c],
+                           np.result_type(axis, s, c))
 
 
 def quat_slerp(a, b, t):
@@ -163,15 +192,15 @@ def from_to_rotation(v_from, v_to, t=1.0, pre_normalized=False):
 
     c = clamp1(dot(v1, v2))
     angle = np.arccos(c)
-    axis = np.cross(v1, v2)
+    axis = cross(v1, v2)
 
     anti = np.abs(1.0 + c) < 1e-6
     para = np.abs(1.0 - c) < 1e-6
 
     pick_y = (v1[..., 0] > v1[..., 1]) & (v1[..., 0] > v1[..., 2])
     alt_axis = np.where(pick_y[..., None],
-                        np.cross(v1, np.broadcast_to(VEC_UP, v1.shape)),
-                        np.cross(v1, np.broadcast_to(VEC_RIGHT, v1.shape)))
+                        cross(v1, np.broadcast_to(VEC_UP, v1.shape)),
+                        cross(v1, np.broadcast_to(VEC_RIGHT, v1.shape)))
     axis = np.where(anti[..., None], alt_axis, axis)
     angle = np.where(anti, np.pi, angle)
 
@@ -191,12 +220,12 @@ def clamp_angle_vector(direction, base_direction, max_angle):
     safe_angle = np.where(angle > 1e-30, angle, 1.0)
     t = (angle - max_angle) / safe_angle
 
-    axis = np.cross(v1, v2)
+    axis = cross(v1, v2)
     anti = np.abs(1.0 + c) < 1e-6
     pick_y = (v1[..., 0] > v1[..., 1]) & (v1[..., 0] > v1[..., 2])
     alt_axis = np.where(pick_y[..., None],
-                        np.cross(v1, np.broadcast_to(VEC_UP, v1.shape)),
-                        np.cross(v1, np.broadcast_to(VEC_RIGHT, v1.shape)))
+                        cross(v1, np.broadcast_to(VEC_UP, v1.shape)),
+                        cross(v1, np.broadcast_to(VEC_RIGHT, v1.shape)))
     axis = np.where(anti[..., None], alt_axis, axis)
     rot_angle = np.where(anti, np.pi, angle)
     para = np.abs(1.0 - c) < 1e-6
@@ -218,19 +247,23 @@ def matrix3_to_quat(x_axis, y_axis, z_axis):
 
     s0 = np.sqrt(np.maximum(trace + 1.0, 0.0)) * 2.0
     s0s = np.where(s0 > 1e-30, s0, 1.0)
-    q0 = np.stack([(m21 - m12) / s0s, (m02 - m20) / s0s, (m10 - m01) / s0s, 0.25 * s0], axis=-1)
+    q0 = _pack_last_axis([(m21 - m12) / s0s, (m02 - m20) / s0s, (m10 - m01) / s0s, 0.25 * s0],
+                         np.result_type(x_axis, y_axis, z_axis))
 
     s1 = np.sqrt(np.maximum(1.0 + m00 - m11 - m22, 0.0)) * 2.0
     s1s = np.where(s1 > 1e-30, s1, 1.0)
-    q1 = np.stack([0.25 * s1, (m01 + m10) / s1s, (m02 + m20) / s1s, (m21 - m12) / s1s], axis=-1)
+    q1 = _pack_last_axis([0.25 * s1, (m01 + m10) / s1s, (m02 + m20) / s1s, (m21 - m12) / s1s],
+                         np.result_type(x_axis, y_axis, z_axis))
 
     s2 = np.sqrt(np.maximum(1.0 + m11 - m00 - m22, 0.0)) * 2.0
     s2s = np.where(s2 > 1e-30, s2, 1.0)
-    q2 = np.stack([(m01 + m10) / s2s, 0.25 * s2, (m12 + m21) / s2s, (m02 - m20) / s2s], axis=-1)
+    q2 = _pack_last_axis([(m01 + m10) / s2s, 0.25 * s2, (m12 + m21) / s2s, (m02 - m20) / s2s],
+                         np.result_type(x_axis, y_axis, z_axis))
 
     s3 = np.sqrt(np.maximum(1.0 + m22 - m00 - m11, 0.0)) * 2.0
     s3s = np.where(s3 > 1e-30, s3, 1.0)
-    q3 = np.stack([(m02 + m20) / s3s, (m12 + m21) / s3s, 0.25 * s3, (m10 - m01) / s3s], axis=-1)
+    q3 = _pack_last_axis([(m02 + m20) / s3s, (m12 + m21) / s3s, 0.25 * s3, (m10 - m01) / s3s],
+                         np.result_type(x_axis, y_axis, z_axis))
 
     cond0 = trace > 0.0
     cond1 = (~cond0) & (m00 >= m11) & (m00 >= m22)
@@ -242,9 +275,9 @@ def matrix3_to_quat(x_axis, y_axis, z_axis):
 
 def look_rotation(forward, up):
     z = normalize(forward, fallback=np.broadcast_to(VEC_FORWARD, forward.shape))
-    x = np.cross(up, z)
+    x = cross(up, z)
     x = normalize(x, fallback=np.broadcast_to(VEC_RIGHT, x.shape))
-    y = np.cross(z, x)
+    y = cross(z, x)
     return matrix3_to_quat(x, y, z)
 
 
@@ -308,12 +341,12 @@ def euler_yx(angle_x, angle_y):
     hy = angle_y * 0.5
     sx, cx = np.sin(hx), np.cos(hx)
     sy, cy = np.sin(hy), np.cos(hy)
-    return np.stack([
+    return _pack_last_axis([
         cy * sx,
         sy * cx,
         -sy * sx,
         cy * cx,
-    ], axis=-1)
+    ], np.result_type(sx, sy))
 
 
 def axis_to_euler(axis):
@@ -330,7 +363,7 @@ def axis_quaternion(direction):
 
 
 def triangle_normal(p0, p1, p2):
-    c = np.cross(p1 - p0, p2 - p0)
+    c = cross(p1 - p0, p2 - p0)
     return normalize(c, fallback=np.broadcast_to(VEC_UP, c.shape))
 
 
