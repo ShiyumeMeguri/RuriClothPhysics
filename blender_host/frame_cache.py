@@ -2,7 +2,11 @@ import zlib
 
 import numpy as np
 
+MEMORY_BUDGET_BYTES = 256 * 1024 * 1024
+
 _caches = {}
+_object_count = -1
+_clock = 0
 
 
 class FrameCache:
@@ -11,21 +15,65 @@ class FrameCache:
         self.indices = None
         self.bone_names = []
         self.frames = {}
+        self.bytes_used = 0
+        self.last_used = 0
 
     def reset(self, signature, indices, bone_names):
         self.signature = signature
         self.indices = indices
         self.bone_names = [bone_names[i] for i in indices]
         self.frames = {}
+        self.bytes_used = 0
 
     def store(self, frame, input_hash, basis):
-        self.frames[frame] = (input_hash, np.array(basis, dtype=np.float32))
+        previous = self.frames.get(frame)
+        if previous is not None:
+            self.bytes_used -= previous[1].nbytes
+        payload = np.array(basis, dtype=np.float32)
+        self.frames[frame] = (input_hash, payload)
+        self.bytes_used += payload.nbytes
+        self._touch()
+        _enforce_budget()
 
     def fetch(self, frame, input_hash):
         entry = self.frames.get(frame)
         if entry is None or entry[0] != input_hash:
             return None
+        self._touch()
         return entry[1]
+
+    def _touch(self):
+        global _clock
+        _clock += 1
+        self.last_used = _clock
+
+
+def total_bytes():
+    return sum(cache.bytes_used for cache in _caches.values())
+
+
+def _enforce_budget():
+    if total_bytes() <= MEMORY_BUDGET_BYTES:
+        return
+    order = sorted(_caches.items(), key=lambda pair: pair[1].last_used)
+    for key, cache in order:
+        _caches.pop(key, None)
+        if total_bytes() <= MEMORY_BUDGET_BYTES:
+            return
+
+
+def prune(objects):
+    """Drop caches whose owning object is gone. Only scans when the object set changed."""
+    global _object_count
+    count = len(objects)
+    if count == _object_count:
+        return
+    _object_count = count
+    if not _caches:
+        return
+    live = {obj.session_uid for obj in objects}
+    for key in [key for key in _caches if key[0] not in live]:
+        _caches.pop(key, None)
 
 
 def get(uid, config_index):
@@ -38,7 +86,9 @@ def clear_object(uid):
 
 
 def clear_all():
+    global _object_count
     _caches.clear()
+    _object_count = -1
 
 
 def frame_count(uid, config_index):

@@ -718,6 +718,7 @@ def _on_frame_change_post(scene, depsgraph=None):
         return
     frame = scene.frame_current
     fps = scene.render.fps / scene.render.fps_base
+    frame_cache.prune(bpy.data.objects)
 
     try:
         if try_replay(scene):

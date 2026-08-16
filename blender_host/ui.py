@@ -174,9 +174,11 @@ class RCP_PT_scene_settings(bpy.types.Panel):
         row = layout.row(align=True)
         cached = frame_cache.cached_range(context.object.session_uid)
         if cached is None:
-            row.label(text="缓存: 空", icon='TRASH')
+            row.label(text="缓存: 空 (仅内存, 不写入文件)", icon='TRASH')
         else:
-            row.label(text="缓存: %d-%d 帧 (共 %d)" % cached, icon='SEQUENCE')
+            row.label(text="缓存: %d-%d 帧 共 %d, %.1f MB"
+                           % (cached + (frame_cache.total_bytes() / 1048576.0,)),
+                      icon='SEQUENCE')
         row.operator("ruri_cloth_physics.cache_clear", text="清空缓存", icon='X')
 
 
