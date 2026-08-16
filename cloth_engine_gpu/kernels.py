@@ -32,6 +32,7 @@ PHASE_DISTANCE_A = int32(1 << 6)     # S6 distance.run (first substep occurrence
 PHASE_DISTANCE_B = int32(1 << 7)     # S10 distance.run (second substep occurrence)
 PHASE_MOTION = int32(1 << 8)         # S11 motion.run (substep)
 PHASE_BENDING = int32(1 << 9)        # S8 bending.run (substep)
+PHASE_BASELINE = int32(1 << 10)      # S4 baseline.run FK (substep)
 
 ALL_PHASES = int32(-1)
 
@@ -357,13 +358,14 @@ def frame_kernel(phase_mask, sub_begin, sub_end,
                  t_motion_backstop_radius, t_radius_lut, t_motion_max_distance_lut,
                  t_motion_backstop_lut,
                  t_bending_stiffness, t_negative_scale_sign,
+                 t_negative_scale_direction, t_negative_scale_quaternion, t_is_negative_scale,
                  p_team, p_local_positions, p_local_normals, p_local_tangents,
                  p_skin_indices, p_skin_weights, p_positions, p_rotations,
                  p_next_positions, p_velocity_positions, p_step_basic_positions, p_vertex_root,
                  p_old_anim_positions, p_old_anim_rotations, p_base_positions, p_base_rotations,
                  p_step_basic_rotations, p_depth, p_velocities, p_old_positions, p_friction,
                  p_vertex_root_local, p_collision_normals, p_static_friction, p_real_velocities,
-                 p_attr_move,
+                 p_attr_move, p_vertex_local_positions, p_vertex_local_rotations,
                  x_world, x_bind,
                  st_tether_particle, st_tether_team,
                  st_move_particle, st_move_team, st_fixed_particle, st_fixed_team,
@@ -372,6 +374,7 @@ def frame_kernel(phase_mask, sub_begin, sub_end,
                  st_motion_particle, st_motion_team,
                  st_bending_team, st_bending_pair, st_bending_rest, st_bending_sign,
                  csr_distance_offsets, csr_distance_order,
+                 fk_yes_offsets, fk_yes, fk_yes_parent, fk_no_offsets, fk_no, baseline_entries,
                  sc_dcorr, sc_dcorr_fixed, sc_dcount):
     grid = cg.this_grid()
     tid = cuda.grid(1)
@@ -409,6 +412,8 @@ def frame_kernel(phase_mask, sub_begin, sub_end,
     n_spring = st_spring_particle.shape[0]
     n_motion = st_motion_particle.shape[0]
     n_bending = st_bending_team.shape[0]
+    n_baseline = baseline_entries.shape[0]
+    num_fk_levels = fk_yes_offsets.shape[0] - 1
     for _k in range(sub_begin, sub_end):
         # --- S3 particles.step_update PASS 1: base interpolation (all sp) + move set ---
         if phase_mask & PHASE_PARTICLES_STEP:
@@ -659,6 +664,104 @@ def frame_kernel(phase_mask, sub_begin, sub_end,
                     p_next_positions[psi, 1] = bpy + vy
                     p_next_positions[psi, 2] = bpz + vz
                 e += stride
+        grid.sync()
+
+        # --- S4 baseline.run FK: per-level grid.sync wall (parent written at level < L) ---
+        for lvl in range(num_fk_levels):
+            if phase_mask & PHASE_BASELINE:
+                ys = fk_yes_offsets[lvl]
+                ye = fk_yes_offsets[lvl + 1]
+                i = ys + tid
+                while i < ye:
+                    v = fk_yes[i]
+                    vt = p_team[v]
+                    if team_frame_mask(t_enabled, t_valid, t_cws, vt) and t_update_count[vt] > _k \
+                            and t_animation_pose_ratio[vt] <= float32(0.99):
+                        par = fk_yes_parent[i]
+                        sr = t_scale_ratio[vt]
+                        scx = t_init_scale[vt, 0] * sr
+                        scy = t_init_scale[vt, 1] * sr
+                        scz = t_init_scale[vt, 2] * sr
+                        lsx = (p_vertex_local_positions[v, 0] * t_negative_scale_direction[vt, 0]) * scx
+                        lsy = (p_vertex_local_positions[v, 1] * t_negative_scale_direction[vt, 1]) * scy
+                        lsz = (p_vertex_local_positions[v, 2] * t_negative_scale_direction[vt, 2]) * scz
+                        prx = p_step_basic_rotations[par, 0]
+                        pry = p_step_basic_rotations[par, 1]
+                        prz = p_step_basic_rotations[par, 2]
+                        prw = p_step_basic_rotations[par, 3]
+                        rx, ry, rz = dmath.quat_rotate(prx, pry, prz, prw, lsx, lsy, lsz)
+                        p_step_basic_positions[v, 0] = rx + p_step_basic_positions[par, 0]
+                        p_step_basic_positions[v, 1] = ry + p_step_basic_positions[par, 1]
+                        p_step_basic_positions[v, 2] = rz + p_step_basic_positions[par, 2]
+                        lrx = p_vertex_local_rotations[v, 0] * t_negative_scale_quaternion[vt, 0]
+                        lry = p_vertex_local_rotations[v, 1] * t_negative_scale_quaternion[vt, 1]
+                        lrz = p_vertex_local_rotations[v, 2] * t_negative_scale_quaternion[vt, 2]
+                        lrw = p_vertex_local_rotations[v, 3] * t_negative_scale_quaternion[vt, 3]
+                        qx, qy, qz, qw = dmath.quat_mul(prx, pry, prz, prw, lrx, lry, lrz, lrw)
+                        p_step_basic_rotations[v, 0] = qx
+                        p_step_basic_rotations[v, 1] = qy
+                        p_step_basic_rotations[v, 2] = qz
+                        p_step_basic_rotations[v, 3] = qw
+                    i += stride
+            grid.sync()
+            # oracle applies each level's yes (skin from parent) BEFORE its no (negative-
+            # scale root flip); a root can be both a parent here and a no-entry, so the
+            # yes reads must complete before the no writes.
+            if phase_mask & PHASE_BASELINE:
+                ns = fk_no_offsets[lvl]
+                ne = fk_no_offsets[lvl + 1]
+                i = ns + tid
+                while i < ne:
+                    v = fk_no[i]
+                    vt = p_team[v]
+                    if team_frame_mask(t_enabled, t_valid, t_cws, vt) and t_update_count[vt] > _k \
+                            and t_animation_pose_ratio[vt] <= float32(0.99) \
+                            and t_is_negative_scale[vt] != 0:
+                        rox = p_step_basic_rotations[v, 0]
+                        roy = p_step_basic_rotations[v, 1]
+                        roz = p_step_basic_rotations[v, 2]
+                        row = p_step_basic_rotations[v, 3]
+                        nx, ny, nz = dmath.quat_to_normal(rox, roy, roz, row)
+                        dy = t_negative_scale_direction[vt, 1]
+                        dz = t_negative_scale_direction[vt, 2]
+                        nnx = nx * dy
+                        nny = ny * dy
+                        nnz = nz * dy
+                        tx, ty, tz = dmath.quat_to_tangent(rox, roy, roz, row)
+                        ttx = tx * dz
+                        tty = ty * dz
+                        ttz = tz * dz
+                        lqx, lqy, lqz, lqw = dmath.look_rotation(ttx, tty, ttz, nnx, nny, nnz)
+                        p_step_basic_rotations[v, 0] = lqx
+                        p_step_basic_rotations[v, 1] = lqy
+                        p_step_basic_rotations[v, 2] = lqz
+                        p_step_basic_rotations[v, 3] = lqw
+                    i += stride
+            grid.sync()
+        if phase_mask & PHASE_BASELINE:
+            i = tid
+            while i < n_baseline:
+                v = baseline_entries[i]
+                vt = p_team[v]
+                apr = t_animation_pose_ratio[vt]
+                if team_frame_mask(t_enabled, t_valid, t_cws, vt) and t_update_count[vt] > _k \
+                        and apr <= float32(0.99) and apr > EPSILON:
+                    p_step_basic_positions[v, 0] = dmath.lerp(p_step_basic_positions[v, 0],
+                                                             p_base_positions[v, 0], apr)
+                    p_step_basic_positions[v, 1] = dmath.lerp(p_step_basic_positions[v, 1],
+                                                             p_base_positions[v, 1], apr)
+                    p_step_basic_positions[v, 2] = dmath.lerp(p_step_basic_positions[v, 2],
+                                                             p_base_positions[v, 2], apr)
+                    qx, qy, qz, qw = dmath.quat_slerp(
+                        p_step_basic_rotations[v, 0], p_step_basic_rotations[v, 1],
+                        p_step_basic_rotations[v, 2], p_step_basic_rotations[v, 3],
+                        p_base_rotations[v, 0], p_base_rotations[v, 1],
+                        p_base_rotations[v, 2], p_base_rotations[v, 3], apr)
+                    p_step_basic_rotations[v, 0] = qx
+                    p_step_basic_rotations[v, 1] = qy
+                    p_step_basic_rotations[v, 2] = qz
+                    p_step_basic_rotations[v, 3] = qw
+                i += stride
         grid.sync()
 
         if phase_mask & PHASE_TETHER:
@@ -1136,6 +1239,7 @@ TEAM_KERNEL_FIELDS = (
     "motion_backstop_radius", "radius_lut", "motion_max_distance_lut",
     "motion_backstop_lut",
     "bending_stiffness", "negative_scale_sign",
+    "negative_scale_direction", "negative_scale_quaternion", "is_negative_scale",
 )
 
 PARTICLE_KERNEL_FIELDS = (
@@ -1145,7 +1249,7 @@ PARTICLE_KERNEL_FIELDS = (
     "old_anim_positions", "old_anim_rotations", "base_positions", "base_rotations",
     "step_basic_rotations", "depth", "velocities", "old_positions", "friction",
     "vertex_root_local", "collision_normals", "static_friction", "real_velocities",
-    "attr_move",
+    "attr_move", "vertex_local_positions", "vertex_local_rotations",
 )
 
 TRANSFORM_KERNEL_FIELDS = ("world", "bind_pose")
@@ -1173,4 +1277,10 @@ STATIC_KERNEL_FIELDS = (
 # CSR gather tables (offsets + order uploaded from a program CsrTable attribute)
 STATIC_CSR_FIELDS = (
     ("distance_csr_offsets", "distance_csr_order", "distance_csr"),
+)
+
+# direct program arrays uploaded verbatim (level tables + flat index sets)
+STATIC_DIRECT_FIELDS = (
+    "fk_yes_offsets", "fk_yes", "fk_yes_parent", "fk_no_offsets", "fk_no",
+    "baseline_entries",
 )

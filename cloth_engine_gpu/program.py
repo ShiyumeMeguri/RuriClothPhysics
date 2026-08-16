@@ -127,6 +127,15 @@ class Program:
         self.angle_passes = []            # list of (vertices, parents)
         self.postline_levels = []         # list of (entry_vertex, child_owner, child_vertex)
 
+        # flattened FK level tables (offsets[num_levels+1] + concatenated values), so a
+        # device loop over ``range(offsets.shape[0]-1)`` walks levels with a grid.sync
+        # wall between them (parent step_basic of level L was written at level < L).
+        self.fk_yes_offsets = None
+        self.fk_yes = None
+        self.fk_yes_parent = None
+        self.fk_no_offsets = None
+        self.fk_no = None
+
 
 def _arena_dump(arena, fields):
     """Dump only live rows (team != 0). Free/unallocated arena rows carry team slot 0
@@ -183,6 +192,9 @@ def build_program(world):
 
     program.fk_levels = [(np.ascontiguousarray(a, I4), np.ascontiguousarray(b, I4),
                           np.ascontiguousarray(c, I4)) for a, b, c in world.fk_levels]
+    program.fk_yes_offsets, program.fk_yes = _flatten_levels([lv[0] for lv in program.fk_levels])
+    _, program.fk_yes_parent = _flatten_levels([lv[1] for lv in program.fk_levels])
+    program.fk_no_offsets, program.fk_no = _flatten_levels([lv[2] for lv in program.fk_levels])
     program.angle_passes = [(np.ascontiguousarray(v, I4), np.ascontiguousarray(p, I4))
                             for v, p in world.angle_passes]
     program.postline_levels = [(np.ascontiguousarray(ev, I4), np.ascontiguousarray(co, I4),
@@ -190,6 +202,19 @@ def build_program(world):
     program.postline_level_csr = [build_csr(co, int(ev.shape[0]))
                                   for ev, co, cv in program.postline_levels]
     return program
+
+
+def _flatten_levels(levels):
+    """Concatenate a list of per-level int32 index arrays into (offsets, values), where
+    ``offsets[i]:offsets[i+1]`` selects level i's rows in ``values``."""
+    offsets = np.zeros(len(levels) + 1, dtype=I4)
+    parts = []
+    for i, arr in enumerate(levels):
+        a = np.ascontiguousarray(arr, I4)
+        parts.append(a)
+        offsets[i + 1] = offsets[i] + int(a.shape[0])
+    values = np.concatenate(parts).astype(I4) if parts else np.zeros(0, dtype=I4)
+    return offsets, np.ascontiguousarray(values)
 
 
 def _build_edge_pair_csr(program):
