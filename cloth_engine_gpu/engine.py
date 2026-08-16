@@ -76,6 +76,7 @@ class GpuEngine:
             self.static[name] = device.upload_readonly(getattr(self.program, name))
         np_particles = max(self.program.num_particles, 1)
         nt = max(self.program.num_teams, 1)
+        n_tri = max(self.program.num_triangle_entries, 1)
         self.scratch = {
             "dcorr": cuda.device_array((np_particles, 3), np.float32),
             "dcorr_fixed": cuda.device_array((np_particles, 3), np.int32),
@@ -86,6 +87,10 @@ class GpuEngine:
             # 3 component_world_position + 4 component_world_rotation) so the child
             # write reads a pre-gather copy of its sync_top row (mutual-sync race safe).
             "sync_snapshot": cuda.device_array((nt, 22), np.float32),
+            # F2 display._post_triangles per-triangle stash (authorised f64, mirrors the oracle's
+            # f64 normal cast + full-f64 tangent), device-resident, indexed by global triangle row.
+            "tri_normal_f64": cuda.device_array((n_tri, 3), np.float64),
+            "tri_tangent_f64": cuda.device_array((n_tri, 3), np.float64),
         }
         # Wind zones are variable-length and re-uploaded each frame; start empty so
         # zone_count=0 launches (all 17 legacy phase tests) carry safe dummy args.
@@ -183,7 +188,8 @@ class GpuEngine:
         direct_args = [self.static[name] for name in kernels.STATIC_DIRECT_FIELDS]
         scratch_args = [self.scratch["dcorr"], self.scratch["dcorr_fixed"], self.scratch["dcount"],
                         self.scratch["col_friction_fixed"], self.scratch["col_normal_fixed"],
-                        self.scratch["sync_snapshot"]]
+                        self.scratch["sync_snapshot"], self.scratch["tri_normal_f64"],
+                        self.scratch["tri_tangent_f64"]]
         zone_args = [self.zones_dev[name] for name in _ZONE_ARG_ORDER]
         blocks = self._blocks()
         kernels.frame_kernel[blocks, _THREADS](
@@ -215,7 +221,7 @@ class GpuEngine:
                           "culling_invisible", "distance_weight", "sync_target",
                           "has_anchor", "anchor_position", "anchor_rotation",
                           "force_mode", "impact_force", "time_scale")
-    _OUTPUT_PARTICLE_FIELDS = ("positions", "out_rotations", "velocities")
+    _OUTPUT_PARTICLE_FIELDS = ("positions", "out_rotations", "velocities", "display_positions")
     _OUTPUT_TEAM_FIELDS = ("wind_count", "wind_zone_id")
 
     def _upload_inputs(self, world):

@@ -43,6 +43,7 @@ PHASE_PARTICLES_PRE = int32(1 << 17)  # P2 particles.frame_pre
 PHASE_SYNC = int32(1 << 18)          # T0 team_time.resolve_sync (frame-pre, per-team)
 PHASE_CENTER = int32(1 << 19)        # C0 center.run + select_team_wind (frame-pre, per-team)
 PHASE_ANGLE = int32(1 << 20)         # S7 angle.run (substep; limit + restoration passes)
+PHASE_DISPLAY = int32(1 << 21)       # F2 display.run (frame-post; _display/_postline/_post_triangles/_output)
 
 ALL_PHASES = int32(-1)
 
@@ -1671,6 +1672,374 @@ def do_angle_restoration(v, p, vt, c_inv, p_inv, p_move, rot_ratio, power3,
         p_velocity_positions[p, 2] += paddz * r_attn
 
 
+@cuda.jit(device=True)
+def do_display_particle(p, mt, sim_dt,
+                        p_positions, p_rotations, p_old_positions, p_real_velocities,
+                        p_display_positions, p_vertex_root, p_old_anim_positions,
+                        p_old_anim_rotations, p_temp_base_positions, p_temp_base_rotations,
+                        st_update_move_mask,
+                        t_now_update, t_old_time, t_time, t_blend_weight, t_running,
+                        t_is_negative_scale, t_negative_scale_direction):
+    # mirrors stages/display._display for one particle. Register snapshot is taken BEFORE any
+    # write so the running-team old_anim capture sees the pre-move / pre-flip pose. move / fixed
+    # are the two halves of the update_move|update_fixed partition (per-particle mask), 4/5/6 hit
+    # all frame particles. No cross-thread hazard: roots are always non-move (never written here),
+    # each thread owns positions[p]/rotations[p]/temp_base[p]/display[p]/old_anim[p].
+    snap_px = p_positions[p, 0]
+    snap_py = p_positions[p, 1]
+    snap_pz = p_positions[p, 2]
+    snap_rx = p_rotations[p, 0]
+    snap_ry = p_rotations[p, 1]
+    snap_rz = p_rotations[p, 2]
+    snap_rw = p_rotations[p, 3]
+    fx = snap_px
+    fy = snap_py
+    fz = snap_pz
+    if st_update_move_mask[p] != 0:
+        sdt = sim_dt
+        fposx = p_old_positions[p, 0] + p_real_velocities[p, 0] * sdt
+        fposy = p_old_positions[p, 1] + p_real_velocities[p, 1] * sdt
+        fposz = p_old_positions[p, 2] + p_real_velocities[p, 2] * sdt
+        interval = (t_now_update[mt] + sdt) - t_old_time[mt]
+        if interval > float32(0.0):
+            tval = (t_time[mt] - t_old_time[mt]) / interval
+        else:
+            tval = float32(0.0)
+        fposx = dmath.lerp(p_display_positions[p, 0], fposx, tval)
+        fposy = dmath.lerp(p_display_positions[p, 1], fposy, tval)
+        fposz = dmath.lerp(p_display_positions[p, 2], fposz, tval)
+        root = p_vertex_root[p]
+        if root >= 0:
+            rpx = p_positions[root, 0]
+            rpy = p_positions[root, 1]
+            rpz = p_positions[root, 2]
+            original_dist = dmath.length3(rpx - snap_px, rpy - snap_py, rpz - snap_pz)
+            clamp_dist = original_dist * MAX_DISTANCE_RATIO_FUTURE_PREDICTION
+            vx, vy, vz = dmath.clamp_vector(fposx - rpx, fposy - rpy, fposz - rpz, clamp_dist)
+            fposx = rpx + vx
+            fposy = rpy + vy
+            fposz = rpz + vz
+        p_display_positions[p, 0] = fposx
+        p_display_positions[p, 1] = fposy
+        p_display_positions[p, 2] = fposz
+        blend = t_blend_weight[mt]
+        fx = dmath.lerp(snap_px, fposx, blend)
+        fy = dmath.lerp(snap_py, fposy, blend)
+        fz = dmath.lerp(snap_pz, fposz, blend)
+        p_positions[p, 0] = fx
+        p_positions[p, 1] = fy
+        p_positions[p, 2] = fz
+    else:
+        p_display_positions[p, 0] = snap_px
+        p_display_positions[p, 1] = snap_py
+        p_display_positions[p, 2] = snap_pz
+    if t_running[mt] != 0:
+        p_old_anim_positions[p, 0] = snap_px
+        p_old_anim_positions[p, 1] = snap_py
+        p_old_anim_positions[p, 2] = snap_pz
+        p_old_anim_rotations[p, 0] = snap_rx
+        p_old_anim_rotations[p, 1] = snap_ry
+        p_old_anim_rotations[p, 2] = snap_rz
+        p_old_anim_rotations[p, 3] = snap_rw
+    qx = snap_rx
+    qy = snap_ry
+    qz = snap_rz
+    qw = snap_rw
+    if t_is_negative_scale[mt] != 0:
+        ndy = t_negative_scale_direction[mt, 1]
+        ndz = t_negative_scale_direction[mt, 2]
+        nnx, nny, nnz = dmath.quat_to_normal(snap_rx, snap_ry, snap_rz, snap_rw)
+        nnx = nnx * ndy
+        nny = nny * ndy
+        nnz = nnz * ndy
+        ttx, tty, ttz = dmath.quat_to_tangent(snap_rx, snap_ry, snap_rz, snap_rw)
+        ttx = ttx * ndz
+        tty = tty * ndz
+        ttz = ttz * ndz
+        qx, qy, qz, qw = dmath.look_rotation(ttx, tty, ttz, nnx, nny, nnz)
+        p_rotations[p, 0] = qx
+        p_rotations[p, 1] = qy
+        p_rotations[p, 2] = qz
+        p_rotations[p, 3] = qw
+    p_temp_base_positions[p, 0] = fx
+    p_temp_base_positions[p, 1] = fy
+    p_temp_base_positions[p, 2] = fz
+    p_temp_base_rotations[p, 0] = qx
+    p_temp_base_rotations[p, 1] = qy
+    p_temp_base_rotations[p, 2] = qz
+    p_temp_base_rotations[p, 3] = qw
+
+
+@cuda.jit(device=True)
+def do_postline_entry(entry, et, ch_start, ch_end, postline_child_vertices,
+                      p_positions, p_rotations, p_temp_base_positions, p_temp_base_rotations,
+                      p_vertex_local_positions, p_vertex_local_rotations,
+                      p_attr_invalid, p_attr_zero_distance, p_attr_move, p_team,
+                      t_rotational_interpolation, t_root_rotation, t_blend_weight,
+                      t_animation_pose_ratio, t_negative_scale_direction,
+                      t_negative_scale_quaternion):
+    # mirrors stages/display._postline for one entry (owner). (level,rank) topology makes each
+    # entry's children a contiguous CSR run and disjoint across entries in a level, so the child
+    # rotation writes are race-free; children (level L+1) become entries at level L+1 with a
+    # grid.sync between levels making this level's writes visible. ctv_sum/cv_sum are f64
+    # (mirrors oracle np.add.reduceat over np.float64 rows), cast to f32 for the zero test / cq.
+    rx = p_rotations[entry, 0]
+    ry = p_rotations[entry, 1]
+    rz = p_rotations[entry, 2]
+    rw = p_rotations[entry, 3]
+    posx = p_positions[entry, 0]
+    posy = p_positions[entry, 1]
+    posz = p_positions[entry, 2]
+    bpx = p_temp_base_positions[entry, 0]
+    bpy = p_temp_base_positions[entry, 1]
+    bpz = p_temp_base_positions[entry, 2]
+    brx = p_temp_base_rotations[entry, 0]
+    bry = p_temp_base_rotations[entry, 1]
+    brz = p_temp_base_rotations[entry, 2]
+    brw = p_temp_base_rotations[entry, 3]
+    bix, biy, biz, biw = dmath.quat_inverse(brx, bry, brz, brw)
+    owner_valid = p_attr_invalid[entry] == 0
+    ctvx = float64(0.0)
+    ctvy = float64(0.0)
+    ctvz = float64(0.0)
+    cvx = float64(0.0)
+    cvy = float64(0.0)
+    cvz = float64(0.0)
+    has_children = ch_end > ch_start
+    for k in range(ch_start, ch_end):
+        c = postline_child_vertices[k]
+        ct = p_team[c]
+        anime_ratio = t_animation_pose_ratio[ct]
+        ndx = t_negative_scale_direction[ct, 0]
+        ndy = t_negative_scale_direction[ct, 1]
+        ndz = t_negative_scale_direction[ct, 2]
+        nqx = t_negative_scale_quaternion[ct, 0]
+        nqy = t_negative_scale_quaternion[ct, 1]
+        nqz = t_negative_scale_quaternion[ct, 2]
+        nqw = t_negative_scale_quaternion[ct, 3]
+        clpx, clpy, clpz = dmath.quat_rotate(
+            bix, biy, biz, biw, p_temp_base_positions[c, 0] - bpx,
+            p_temp_base_positions[c, 1] - bpy, p_temp_base_positions[c, 2] - bpz)
+        clrx, clry, clrz, clrw = dmath.quat_mul(
+            bix, biy, biz, biw, p_temp_base_rotations[c, 0], p_temp_base_rotations[c, 1],
+            p_temp_base_rotations[c, 2], p_temp_base_rotations[c, 3])
+        lposx = dmath.lerp(p_vertex_local_positions[c, 0] * ndx, clpx, anime_ratio)
+        lposy = dmath.lerp(p_vertex_local_positions[c, 1] * ndy, clpy, anime_ratio)
+        lposz = dmath.lerp(p_vertex_local_positions[c, 2] * ndz, clpz, anime_ratio)
+        lrx, lry, lrz, lrw = dmath.quat_slerp(
+            p_vertex_local_rotations[c, 0] * nqx, p_vertex_local_rotations[c, 1] * nqy,
+            p_vertex_local_rotations[c, 2] * nqz, p_vertex_local_rotations[c, 3] * nqw,
+            clrx, clry, clrz, clrw, anime_ratio)
+        is_c0 = p_attr_zero_distance[c] != 0
+        if is_c0:
+            tvx = float32(0.0)
+            tvy = float32(0.0)
+            tvz = float32(0.0)
+        else:
+            tvx, tvy, tvz = dmath.quat_rotate(rx, ry, rz, rw, lposx, lposy, lposz)
+        c_move = p_attr_move[c] != 0
+        vx = p_positions[c, 0] - posx
+        vy = p_positions[c, 1] - posy
+        vz = p_positions[c, 2] - posz
+        if c_move:
+            contx = vx
+            conty = vy
+            contz = vz
+        else:
+            contx = tvx
+            conty = tvy
+            contz = tvz
+        if owner_valid:
+            ctvx += float64(tvx)
+            ctvy += float64(tvy)
+            ctvz += float64(tvz)
+            cvx += float64(contx)
+            cvy += float64(conty)
+            cvz += float64(contz)
+            if c_move:
+                crx, cry, crz, crw = dmath.quat_mul(rx, ry, rz, rw, lrx, lry, lrz, lrw)
+                if not is_c0:
+                    qfx, qfy, qfz, qfw = dmath.from_to_rotation(tvx, tvy, tvz, vx, vy, vz,
+                                                                float32(1.0), False)
+                    crx, cry, crz, crw = dmath.quat_mul(qfx, qfy, qfz, qfw, crx, cry, crz, crw)
+                p_rotations[c, 0] = crx
+                p_rotations[c, 1] = cry
+                p_rotations[c, 2] = crz
+                p_rotations[c, 3] = crw
+    if has_children and owner_valid:
+        ctv32x = float32(ctvx)
+        ctv32y = float32(ctvy)
+        ctv32z = float32(ctvz)
+        cv32x = float32(cvx)
+        cv32y = float32(cvy)
+        cv32z = float32(cvz)
+        zero = (dmath.length3(ctv32x, ctv32y, ctv32z) < float32(1e-8)) \
+            or (dmath.length3(cv32x, cv32y, cv32z) < float32(1e-8))
+        if not zero:
+            if p_attr_move[entry] != 0:
+                t_ratio = t_rotational_interpolation[et]
+            else:
+                t_ratio = t_root_rotation[et]
+            cqx, cqy, cqz, cqw = dmath.from_to_rotation(ctv32x, ctv32y, ctv32z,
+                                                        cv32x, cv32y, cv32z, t_ratio, False)
+            rx, ry, rz, rw = dmath.quat_mul(cqx, cqy, cqz, cqw, rx, ry, rz, rw)
+    rx, ry, rz, rw = dmath.quat_slerp(brx, bry, brz, brw, rx, ry, rz, rw, t_blend_weight[et])
+    p_rotations[entry, 0] = rx
+    p_rotations[entry, 1] = ry
+    p_rotations[entry, 2] = rz
+    p_rotations[entry, 3] = rw
+
+
+@cuda.jit(device=True)
+def do_triangle_normal_tangent(tri, tt_team, st_triangle_particles, p_positions, p_uv,
+                               t_negative_scale_triangle_sign, tri_normal_f64, tri_tangent_f64):
+    # mirrors stages/display._post_triangles per-triangle (dtype asymmetry preserved): the NORMAL
+    # is an f32 cross+normalize cast to f64 then * sign[0]; the TANGENT is computed wholly in f64
+    # (positions + uv promoted first) via _triangle_tangent_runtime then * sign[1]. Stored by global
+    # triangle index so the owner gather (C2) needs no searchsorted.
+    i0 = st_triangle_particles[tri, 0]
+    i1 = st_triangle_particles[tri, 1]
+    i2 = st_triangle_particles[tri, 2]
+    p0x = p_positions[i0, 0]
+    p0y = p_positions[i0, 1]
+    p0z = p_positions[i0, 2]
+    p1x = p_positions[i1, 0]
+    p1y = p_positions[i1, 1]
+    p1z = p_positions[i1, 2]
+    p2x = p_positions[i2, 0]
+    p2y = p_positions[i2, 1]
+    p2z = p_positions[i2, 2]
+    cx, cy, cz = dmath.cross3(p1x - p0x, p1y - p0y, p1z - p0z,
+                              p2x - p0x, p2y - p0y, p2z - p0z)
+    lc = dmath.length3(cx, cy, cz)
+    if lc > EPSILON:
+        nnx = cx / lc
+        nny = cy / lc
+        nnz = cz / lc
+    else:
+        nnx = cx
+        nny = cy
+        nnz = cz
+    ts0 = t_negative_scale_triangle_sign[tt_team, 0]
+    tri_normal_f64[tri, 0] = float64(nnx) * float64(ts0)
+    tri_normal_f64[tri, 1] = float64(nny) * float64(ts0)
+    tri_normal_f64[tri, 2] = float64(nnz) * float64(ts0)
+    q0x = float64(p0x)
+    q0y = float64(p0y)
+    q0z = float64(p0z)
+    dbax = float64(p1x) - q0x
+    dbay = float64(p1y) - q0y
+    dbaz = float64(p1z) - q0z
+    dcax = float64(p2x) - q0x
+    dcay = float64(p2y) - q0y
+    dcaz = float64(p2z) - q0z
+    uv0x = float64(p_uv[i0, 0])
+    uv0y = float64(p_uv[i0, 1])
+    tbax = float64(p_uv[i1, 0]) - uv0x
+    tbay = float64(p_uv[i1, 1]) - uv0y
+    tcax = float64(p_uv[i2, 0]) - uv0x
+    tcay = float64(p_uv[i2, 1]) - uv0y
+    area = tbax * tcay - tbay * tcax
+    if area == float64(0.0):
+        area = float64(1.0)
+    delta = float64(-1.0) / area
+    tanx = (dbax * tcay + dcax * (-tbay)) * delta
+    tany = (dbay * tcay + dcay * (-tbay)) * delta
+    tanz = (dbaz * tcay + dcaz * (-tbay)) * delta
+    ltan = math.sqrt(tanx * tanx + tany * tany + tanz * tanz)
+    if ltan > float64(1e-30):
+        tanx = tanx / ltan
+        tany = tany / ltan
+        tanz = tanz / ltan
+    ts1 = t_negative_scale_triangle_sign[tt_team, 1]
+    tri_tangent_f64[tri, 0] = tanx * float64(ts1)
+    tri_tangent_f64[tri, 1] = tany * float64(ts1)
+    tri_tangent_f64[tri, 2] = tanz * float64(ts1)
+
+
+@cuda.jit(device=True)
+def do_v2t_owner(p, mt, seg0, seg1, csr_v2t_order, st_v2t_triangle,
+                 st_v2t_flip_normal, st_v2t_flip_tangent, tri_normal_f64, tri_tangent_f64,
+                 p_rotations, p_normal_adjustment_rotations, t_negative_scale_quaternion):
+    # mirrors stages/display._post_triangles owner reduce (f64 gather over the owner's v2t rows via
+    # the owner-keyed CSR), the ok gate, and rotation = look_rotation(binormal, nor) * adjust.
+    norx = float64(0.0)
+    nory = float64(0.0)
+    norz = float64(0.0)
+    tanx = float64(0.0)
+    tany = float64(0.0)
+    tanz = float64(0.0)
+    for k in range(seg0, seg1):
+        row = csr_v2t_order[k]
+        tri = st_v2t_triangle[row]
+        fn = float64(st_v2t_flip_normal[row])
+        ft = float64(st_v2t_flip_tangent[row])
+        norx += tri_normal_f64[tri, 0] * fn
+        nory += tri_normal_f64[tri, 1] * fn
+        norz += tri_normal_f64[tri, 2] * fn
+        tanx += tri_tangent_f64[tri, 0] * ft
+        tany += tri_tangent_f64[tri, 1] * ft
+        tanz += tri_tangent_f64[tri, 2] * ft
+    ln = math.sqrt(norx * norx + nory * nory + norz * norz)
+    lt = math.sqrt(tanx * tanx + tany * tany + tanz * tanz)
+    ok = (ln > float64(1e-6)) and (lt > float64(1e-6))
+    if ln > float64(1e-30):
+        nnx = norx / ln
+        nny = nory / ln
+        nnz = norz / ln
+    else:
+        nnx = norx
+        nny = nory
+        nnz = norz
+    if lt > float64(1e-30):
+        ntx = tanx / lt
+        nty = tany / lt
+        ntz = tanz / lt
+    else:
+        ntx = tanx
+        nty = tany
+        ntz = tanz
+    d = nnx * ntx + nny * nty + nnz * ntz
+    if d == float64(1.0) or d == float64(-1.0):
+        ok = False
+    bx = nny * ntz - nnz * nty
+    by = nnz * ntx - nnx * ntz
+    bz = nnx * nty - nny * ntx
+    bl = math.sqrt(bx * bx + by * by + bz * bz)
+    if bl > float64(1e-30):
+        bx = bx / bl
+        by = by / bl
+        bz = bz / bl
+    rrx, rry, rrz, rrw = dmath.look_rotation(float32(bx), float32(by), float32(bz),
+                                             float32(nnx), float32(nny), float32(nnz))
+    nax = p_normal_adjustment_rotations[p, 0] * t_negative_scale_quaternion[mt, 0]
+    nay = p_normal_adjustment_rotations[p, 1] * t_negative_scale_quaternion[mt, 1]
+    naz = p_normal_adjustment_rotations[p, 2] * t_negative_scale_quaternion[mt, 2]
+    naw = p_normal_adjustment_rotations[p, 3] * t_negative_scale_quaternion[mt, 3]
+    frx, fry, frz, frw = dmath.quat_mul(rrx, rry, rrz, rrw, nax, nay, naz, naw)
+    if ok:
+        p_rotations[p, 0] = frx
+        p_rotations[p, 1] = fry
+        p_rotations[p, 2] = frz
+        p_rotations[p, 3] = frw
+
+
+@cuda.jit(device=True)
+def do_output_particle(p, mt, p_rotations, p_vertex_to_transform_rotations,
+                       t_negative_scale_quaternion, p_out_rotations):
+    # mirrors stages/display._output: out = rotation * (vertex_to_transform * negative_scale_quat)
+    vqx = p_vertex_to_transform_rotations[p, 0] * t_negative_scale_quaternion[mt, 0]
+    vqy = p_vertex_to_transform_rotations[p, 1] * t_negative_scale_quaternion[mt, 1]
+    vqz = p_vertex_to_transform_rotations[p, 2] * t_negative_scale_quaternion[mt, 2]
+    vqw = p_vertex_to_transform_rotations[p, 3] * t_negative_scale_quaternion[mt, 3]
+    ox, oy, oz, ow = dmath.quat_mul(p_rotations[p, 0], p_rotations[p, 1], p_rotations[p, 2],
+                                    p_rotations[p, 3], vqx, vqy, vqz, vqw)
+    p_out_rotations[p, 0] = ox
+    p_out_rotations[p, 1] = oy
+    p_out_rotations[p, 2] = oz
+    p_out_rotations[p, 3] = ow
+
+
 @cuda.jit(cache=True)
 def frame_kernel(phase_mask, sub_begin, sub_end,
                  fdt, sim_dt, max_sim_count, global_time_scale,
@@ -1724,6 +2093,7 @@ def frame_kernel(phase_mask, sub_begin, sub_end,
                  t_angle_use_limit, t_angle_use_restoration, t_angle_limit_lut,
                  t_angle_limit_stiffness, t_angle_restoration_lut,
                  t_angle_restoration_attenuation, t_angle_restoration_gravity_falloff,
+                 t_rotational_interpolation, t_root_rotation,
                  p_team, p_local_positions, p_local_normals, p_local_tangents,
                  p_skin_indices, p_skin_weights, p_positions, p_rotations,
                  p_next_positions, p_velocity_positions, p_step_basic_positions, p_vertex_root,
@@ -1734,6 +2104,9 @@ def frame_kernel(phase_mask, sub_begin, sub_end,
                  p_old_rotations, p_display_positions, p_vertex_bind_pose_rotations,
                  p_vertex_parent, p_albuf_length, p_albuf_local_pos, p_albuf_local_rot,
                  p_albuf_restore, p_albuf_rotation,
+                 p_uv, p_attr_zero_distance, p_attr_invalid, p_temp_base_positions,
+                 p_temp_base_rotations, p_normal_adjustment_rotations,
+                 p_vertex_to_transform_rotations, p_out_rotations,
                  x_world, x_bind,
                  c_team, c_kind, c_center, c_size, c_axis, c_aligned, c_enabled,
                  c_enabled_prev, c_active, c_input_positions, c_input_rotations, c_input_scales,
@@ -1749,14 +2122,19 @@ def frame_kernel(phase_mask, sub_begin, sub_end,
                  st_bending_team, st_bending_pair, st_bending_rest, st_bending_sign,
                  st_point_pair_collider, st_edge_pair_collider, st_collision_edge,
                  st_center_fixed_particle, st_angle_buffered_particle,
+                 st_triangle_team, st_triangle_particles,
+                 st_v2t_triangle, st_v2t_flip_normal, st_v2t_flip_tangent,
                  csr_distance_offsets, csr_distance_order,
                  csr_point_pair_offsets, csr_point_pair_order,
                  csr_edge_pair_offsets, csr_edge_pair_order,
                  csr_center_fixed_offsets, csr_center_fixed_order,
+                 csr_v2t_offsets, csr_v2t_order,
                  fk_yes_offsets, fk_yes, fk_yes_parent, fk_no_offsets, fk_no, baseline_entries,
                  angle_pass_offsets, angle_pass_vertices, angle_pass_parents,
+                 postline_entry_offsets, postline_entry_vertices,
+                 postline_child_offsets, postline_child_vertices, st_display_update_move_mask,
                  sc_dcorr, sc_dcorr_fixed, sc_dcount, sc_col_friction_fixed, sc_col_normal_fixed,
-                 sc_sync,
+                 sc_sync, sc_tri_normal_f64, sc_tri_tangent_f64,
                  n_zones, z_zone_id, z_mode, z_is_addition, z_main, z_turbulence,
                  z_world_position, z_world_direction, z_world_to_local, z_size,
                  z_zone_volume, z_attenuation_lut):
@@ -3678,6 +4056,79 @@ def frame_kernel(phase_mask, sub_begin, sub_end,
 
     # ----- FRAME-POST -----
     grid.sync()
+    # F2 display.run: segment A _display (per-particle) -> B _postline (per level, per entry) ->
+    # C _post_triangles (C1 per-triangle normal/tangent, C2 per-owner v2t reduce) -> D _output.
+    # Sits at the frame-post head (the self-collision F1 slot is a G3 no-op), before F3; F3/F4
+    # are gated by their own bits so isolated PHASE_DISPLAY launches leave them untouched. Zero
+    # atomics: postline children walk the entry CSR serially, v2t rows walk the owner CSR serially,
+    # grid.sync between the four segments (and per postline level) orders every cross-thread write.
+    num_postline_levels = postline_entry_offsets.shape[0] - 1
+    num_triangles = st_triangle_team.shape[0]
+    if phase_mask & PHASE_DISPLAY:
+        p = tid
+        while p < num_particles:
+            mt = p_team[p]
+            if team_frame_mask(t_enabled, t_valid, t_cws, mt):
+                do_display_particle(p, mt, sim_dt, p_positions, p_rotations, p_old_positions,
+                                    p_real_velocities, p_display_positions, p_vertex_root,
+                                    p_old_anim_positions, p_old_anim_rotations,
+                                    p_temp_base_positions, p_temp_base_rotations,
+                                    st_display_update_move_mask, t_now_update, t_old_time, t_time,
+                                    t_blend_weight, t_running, t_is_negative_scale,
+                                    t_negative_scale_direction)
+            p += stride
+    grid.sync()
+    for lvl in range(num_postline_levels):
+        if phase_mask & PHASE_DISPLAY:
+            pl_start = postline_entry_offsets[lvl]
+            pl_end = postline_entry_offsets[lvl + 1]
+            i = pl_start + tid
+            while i < pl_end:
+                entry = postline_entry_vertices[i]
+                et = p_team[entry]
+                if team_frame_mask(t_enabled, t_valid, t_cws, et):
+                    do_postline_entry(entry, et, postline_child_offsets[i],
+                                      postline_child_offsets[i + 1], postline_child_vertices,
+                                      p_positions, p_rotations, p_temp_base_positions,
+                                      p_temp_base_rotations, p_vertex_local_positions,
+                                      p_vertex_local_rotations, p_attr_invalid,
+                                      p_attr_zero_distance, p_attr_move, p_team,
+                                      t_rotational_interpolation, t_root_rotation, t_blend_weight,
+                                      t_animation_pose_ratio, t_negative_scale_direction,
+                                      t_negative_scale_quaternion)
+                i += stride
+        grid.sync()
+    if phase_mask & PHASE_DISPLAY:
+        tri_idx = tid
+        while tri_idx < num_triangles:
+            tt_team = st_triangle_team[tri_idx]
+            if team_frame_mask(t_enabled, t_valid, t_cws, tt_team):
+                do_triangle_normal_tangent(tri_idx, tt_team, st_triangle_particles, p_positions,
+                                           p_uv, t_negative_scale_triangle_sign, sc_tri_normal_f64,
+                                           sc_tri_tangent_f64)
+            tri_idx += stride
+    grid.sync()
+    if phase_mask & PHASE_DISPLAY:
+        p = tid
+        while p < num_particles:
+            seg0 = csr_v2t_offsets[p]
+            seg1 = csr_v2t_offsets[p + 1]
+            if seg0 < seg1 and team_frame_mask(t_enabled, t_valid, t_cws, p_team[p]):
+                do_v2t_owner(p, p_team[p], seg0, seg1, csr_v2t_order, st_v2t_triangle,
+                             st_v2t_flip_normal, st_v2t_flip_tangent, sc_tri_normal_f64,
+                             sc_tri_tangent_f64, p_rotations, p_normal_adjustment_rotations,
+                             t_negative_scale_quaternion)
+            p += stride
+    grid.sync()
+    if phase_mask & PHASE_DISPLAY:
+        p = tid
+        while p < num_particles:
+            mt = p_team[p]
+            if team_frame_mask(t_enabled, t_valid, t_cws, mt):
+                do_output_particle(p, mt, p_rotations, p_vertex_to_transform_rotations,
+                                   t_negative_scale_quaternion, p_out_rotations)
+            p += stride
+    grid.sync()
     # F3 collider.frame_post (per-collider; running teams: old_frame = frame)
     if phase_mask & PHASE_COLLIDER_POST:
         ci = tid
@@ -3806,6 +4257,7 @@ TEAM_KERNEL_FIELDS = (
     "angle_use_limit", "angle_use_restoration", "angle_limit_lut",
     "angle_limit_stiffness", "angle_restoration_lut",
     "angle_restoration_attenuation", "angle_restoration_gravity_falloff",
+    "rotational_interpolation", "root_rotation",
 )
 
 PARTICLE_KERNEL_FIELDS = (
@@ -3819,6 +4271,9 @@ PARTICLE_KERNEL_FIELDS = (
     "old_rotations", "display_positions", "vertex_bind_pose_rotations",
     "vertex_parent", "albuf_length", "albuf_local_pos", "albuf_local_rot",
     "albuf_restore", "albuf_rotation",
+    "uv", "attr_zero_distance", "attr_invalid", "temp_base_positions",
+    "temp_base_rotations", "normal_adjustment_rotations",
+    "vertex_to_transform_rotations", "out_rotations",
 )
 
 TRANSFORM_KERNEL_FIELDS = ("world", "bind_pose")
@@ -3857,6 +4312,11 @@ STATIC_KERNEL_FIELDS = (
     ("collision_edge", "collision_edges", "edge"),
     ("center_fixed_particle", "center_fixed", "particle"),
     ("angle_buffered_particle", "angle_buffered", "particle"),
+    ("triangle_team", "triangles", "team"),
+    ("triangle_particles", "triangles", "triangle"),
+    ("v2t_triangle", "v2t", "triangle"),
+    ("v2t_flip_normal", "v2t", "flip_normal"),
+    ("v2t_flip_tangent", "v2t", "flip_tangent"),
 )
 
 # CSR gather tables (offsets + order uploaded from a program CsrTable attribute)
@@ -3865,6 +4325,7 @@ STATIC_CSR_FIELDS = (
     ("point_pair_csr_offsets", "point_pair_csr_order", "point_pair_csr"),
     ("edge_pair_csr_offsets", "edge_pair_csr_order", "edge_pair_csr"),
     ("center_fixed_csr_offsets", "center_fixed_csr_order", "center_fixed_csr"),
+    ("v2t_csr_offsets", "v2t_csr_order", "v2t_csr"),
 )
 
 # direct program arrays uploaded verbatim (level tables + flat index sets)
@@ -3872,4 +4333,6 @@ STATIC_DIRECT_FIELDS = (
     "fk_yes_offsets", "fk_yes", "fk_yes_parent", "fk_no_offsets", "fk_no",
     "baseline_entries",
     "angle_pass_offsets", "angle_pass_vertices", "angle_pass_parents",
+    "postline_entry_offsets", "postline_entry_vertices",
+    "postline_child_offsets", "postline_child_vertices", "display_update_move_mask",
 )

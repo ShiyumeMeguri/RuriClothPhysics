@@ -94,6 +94,7 @@ class Program:
         self.num_particles = 0
         self.num_transforms = 0
         self.num_colliders = 0
+        self.num_triangle_entries = 0
 
         # per-accumulator CSR groupings (summation-order preserving)
         self.distance_csr = None          # key = distance particle (global)
@@ -126,6 +127,18 @@ class Program:
         self.fk_levels = []               # list of (yes, yes_parent, no)
         self.angle_passes = []            # list of (vertices, parents)
         self.postline_levels = []         # list of (entry_vertex, child_owner, child_vertex)
+
+        # flattened postline (display._postline): a device loop over range(entry_offsets-1) walks
+        # levels with a grid.sync wall between them; per-entry children are a global CSR keyed by the
+        # flat entry index (child_offsets[i]:child_offsets[i+1] into child_vertices, owner-grouped).
+        self.postline_entry_offsets = None
+        self.postline_entry_vertices = None
+        self.postline_child_offsets = None
+        self.postline_child_vertices = None
+
+        # per-particle update_move mask (materialised from the update_move table): the display
+        # _display split is move (mask=1) vs fixed (mask=0), which partition all particles.
+        self.display_update_move_mask = None
 
         # flattened angle (level,rank) passes (offsets[P+1] + concatenated vertices/parents),
         # so a device loop over ``range(offsets.shape[0]-1)`` walks passes in sorted (level,rank)
@@ -185,6 +198,9 @@ def build_program(world):
     program.edges = _arena_dump(world.edges, ("team", "edge"))
     program.triangles = _arena_dump(world.triangles, ("team", "triangle"))
     program.v2t = _arena_dump(world.v2t, ("team", "owner", "triangle", "flip_normal", "flip_tangent"))
+    # display._post_triangles indexes tri_normal/tangent scratch by GLOBAL triangle-arena row; the
+    # dumped live rows form a contiguous prefix [0, num) that v2t['triangle'] addresses directly.
+    program.num_triangle_entries = int(program.triangles["team"].shape[0])
     program.point_pairs = _arena_dump(world.point_pairs, ("team", "particle", "collider"))
     program.edge_pairs = _arena_dump(world.edge_pairs, ("team", "edge", "collider"))
     program.center_fixed = _arena_dump(world.center_fixed, ("team", "particle"))
@@ -212,7 +228,49 @@ def build_program(world):
                                 np.ascontiguousarray(cv, I4)) for ev, co, cv in world.postline_levels]
     program.postline_level_csr = [build_csr(co, int(ev.shape[0]))
                                   for ev, co, cv in program.postline_levels]
+    (program.postline_entry_offsets, program.postline_entry_vertices,
+     program.postline_child_offsets, program.postline_child_vertices) = \
+        _flatten_postline(program.postline_levels, program.postline_level_csr)
+    program.display_update_move_mask = _build_update_move_mask(
+        program.update_move["particle"], n_particles)
     return program
+
+
+def _flatten_postline(levels, level_csr):
+    """Flatten per-level postline into (entry_offsets[L+1], entry_vertices, child_offsets[E+1],
+    child_vertices). ``entry_offsets`` slices each level's entries out of the concatenated
+    ``entry_vertices``; ``child_offsets`` is a GLOBAL per-entry CSR (indexed by flat entry row)
+    into ``child_vertices``, which is owner-grouped (csr.order) so each entry's children are the
+    contiguous run the oracle iterates."""
+    num_levels = len(levels)
+    entry_offsets = np.zeros(num_levels + 1, dtype=I4)
+    entry_parts = []
+    child_parts = []
+    child_offset_parts = [np.zeros(1, dtype=I4)]
+    base = 0
+    for lvl, ((ev, co, cv), csr) in enumerate(zip(levels, level_csr)):
+        entries = int(ev.shape[0])
+        entry_parts.append(np.ascontiguousarray(ev, I4))
+        entry_offsets[lvl + 1] = entry_offsets[lvl] + entries
+        order = csr.order
+        child_parts.append(cv[order] if order.shape[0] else np.zeros(0, dtype=I4))
+        # csr.offsets has length entries+1; global per-entry offsets = per-level offsets + base.
+        child_offset_parts.append((csr.offsets[1:entries + 1].astype(I4) + I4(base)))
+        base += int(csr.offsets[entries]) if entries else 0
+    entry_vertices = np.concatenate(entry_parts).astype(I4) if entry_parts else np.zeros(0, dtype=I4)
+    child_vertices = np.concatenate(child_parts).astype(I4) if child_parts else np.zeros(0, dtype=I4)
+    child_offsets = np.concatenate(child_offset_parts).astype(I4)
+    return (np.ascontiguousarray(entry_offsets), np.ascontiguousarray(entry_vertices),
+            np.ascontiguousarray(child_offsets), np.ascontiguousarray(child_vertices))
+
+
+def _build_update_move_mask(move_particles, num_particles):
+    """Per-particle uint8 mask: 1 where the particle is an update_move entry, 0 otherwise
+    (update_move / update_fixed partition all particles, so the complement is update_fixed)."""
+    mask = np.zeros(max(num_particles, 0), dtype=np.uint8)
+    if move_particles.shape[0]:
+        mask[move_particles] = 1
+    return np.ascontiguousarray(mask)
 
 
 def _flatten_levels(levels):
