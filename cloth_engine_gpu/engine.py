@@ -55,6 +55,9 @@ class GpuEngine:
                                          self.program.num_colliders)
         self.transforms = device.FieldSet(device.dump_arena(world.transforms, self.program.num_transforms),
                                           self.program.num_transforms)
+        self.static = {}
+        for kernel_name, attr, field in kernels.STATIC_KERNEL_FIELDS:
+            self.static[kernel_name] = device.upload_readonly(getattr(self.program, attr)[field])
 
     def _blocks(self):
         needed = max(self.program.num_particles, self.program.num_teams, 1)
@@ -93,10 +96,12 @@ class GpuEngine:
         team_args = [self.team.get(name) for name in kernels.TEAM_KERNEL_FIELDS]
         particle_args = [self.particles.get(name) for name in kernels.PARTICLE_KERNEL_FIELDS]
         transform_args = [self.transforms.get(name) for name in kernels.TRANSFORM_KERNEL_FIELDS]
+        static_args = [self.static[name] for name, _, _ in kernels.STATIC_KERNEL_FIELDS]
         blocks = self._blocks()
         kernels.frame_kernel[blocks, _THREADS](
             int32(phase_mask), int32(sub_begin), int32(sub_end),
-            fdt, sim_dt, msc, gts, *team_args, *particle_args, *transform_args)
+            fdt, sim_dt, msc, gts,
+            *team_args, *particle_args, *transform_args, *static_args)
 
     # ---- production API (grows as phases land) ------------------------------
     def step_frame(self, world, frame_globals):

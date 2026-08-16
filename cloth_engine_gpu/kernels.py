@@ -22,11 +22,18 @@ from . import dmath
 # phase bits (frame-pre / substep / frame-post)
 PHASE_ADVANCE = int32(1 << 0)        # T1 team_time.advance
 PHASE_BASE_POSE = int32(1 << 1)      # P0/P1 particles.compute_base_pose (skinning)
-PHASE_TEAM_POST = int32(1 << 2)      # F4 team_time.frame_post
+PHASE_TETHER = int32(1 << 2)         # S5 tether.run (substep)
+PHASE_TEAM_POST = int32(1 << 3)      # F4 team_time.frame_post
 
 ALL_PHASES = int32(-1)
 
 MAX_SIM_COUNT = 5
+
+# defs constants mirrored (device-side literals stay f32-wrapped)
+TETHER_STRETCH_LIMIT = float32(0.03)
+TETHER_STIFFNESS_WIDTH = float32(0.3)
+TETHER_VELOCITY_ATTENUATION = float32(0.7)
+EPSILON = float32(1e-8)
 
 
 @cuda.jit(device=True)
@@ -141,16 +148,61 @@ def do_base_pose(p, p_team, local_positions, local_normals, local_tangents,
     rotations[p, 3] = qw
 
 
+@cuda.jit(device=True)
+def do_tether(e, tether_particle, p_team, next_positions, velocity_positions,
+              step_basic_positions, vertex_root, t_tether_compression):
+    idx = tether_particle[e]
+    team = p_team[idx]
+    root = vertex_root[idx]
+    compression_limit = float32(1.0) - t_tether_compression[team]
+    stretch_limit = float32(1.0) + TETHER_STRETCH_LIMIT
+
+    vx = next_positions[root, 0] - next_positions[idx, 0]
+    vy = next_positions[root, 1] - next_positions[idx, 1]
+    vz = next_positions[root, 2] - next_positions[idx, 2]
+    distance = dmath.length3(vx, vy, vz)
+    cvx = step_basic_positions[idx, 0] - step_basic_positions[root, 0]
+    cvy = step_basic_positions[idx, 1] - step_basic_positions[root, 1]
+    cvz = step_basic_positions[idx, 2] - step_basic_positions[root, 2]
+    calc_distance = dmath.length3(cvx, cvy, cvz)
+
+    valid = (distance >= EPSILON) and (calc_distance != float32(0.0))
+    ratio = distance / (calc_distance if calc_distance != float32(0.0) else float32(1.0))
+    compress = valid and (ratio < compression_limit)
+    stretch = valid and (ratio > stretch_limit)
+    if not (compress or stretch):
+        return
+    if compress:
+        dist = distance - compression_limit * calc_distance
+        stiffness = dmath.saturate((compression_limit - ratio) / TETHER_STIFFNESS_WIDTH)
+    else:
+        dist = distance - stretch_limit * calc_distance
+        stiffness = dmath.saturate((ratio - stretch_limit) / TETHER_STIFFNESS_WIDTH)
+    inv = float32(1.0) / (distance if distance > float32(1e-30) else float32(1.0))
+    scale = dist * stiffness * inv
+    ax = vx * scale
+    ay = vy * scale
+    az = vz * scale
+    next_positions[idx, 0] += ax
+    next_positions[idx, 1] += ay
+    next_positions[idx, 2] += az
+    velocity_positions[idx, 0] += ax * TETHER_VELOCITY_ATTENUATION
+    velocity_positions[idx, 1] += ay * TETHER_VELOCITY_ATTENUATION
+    velocity_positions[idx, 2] += az * TETHER_VELOCITY_ATTENUATION
+
+
 @cuda.jit(cache=True)
 def frame_kernel(phase_mask, sub_begin, sub_end,
                  fdt, sim_dt, max_sim_count, global_time_scale,
                  t_enabled, t_valid, t_cws, t_time_reset,
                  t_time, t_old_time, t_now_update, t_old_update, t_frame_update, t_frame_old,
                  t_frame_dt, t_time_scale, t_now_time_scale, t_update_count, t_skip_count,
-                 t_running,
+                 t_running, t_tether_compression,
                  p_team, p_local_positions, p_local_normals, p_local_tangents,
                  p_skin_indices, p_skin_weights, p_positions, p_rotations,
-                 x_world, x_bind):
+                 p_next_positions, p_velocity_positions, p_step_basic_positions, p_vertex_root,
+                 x_world, x_bind,
+                 st_tether_particle, st_tether_team):
     grid = cg.this_grid()
     tid = cuda.grid(1)
     stride = cuda.gridsize(1)
@@ -181,7 +233,17 @@ def frame_kernel(phase_mask, sub_begin, sub_end,
     grid.sync()
 
     # ----- SUBSTEP LOOP (phases added in dependency order as ported) -----
+    n_tether = st_tether_particle.shape[0]
     for _k in range(sub_begin, sub_end):
+        if phase_mask & PHASE_TETHER:
+            e = tid
+            while e < n_tether:
+                tm = st_tether_team[e]
+                if team_frame_mask(t_enabled, t_valid, t_cws, tm) and t_update_count[tm] > _k:
+                    do_tether(e, st_tether_particle, p_team, p_next_positions,
+                              p_velocity_positions, p_step_basic_positions, p_vertex_root,
+                              t_tether_compression)
+                e += stride
         grid.sync()
 
     # ----- FRAME-POST (F4 team_time.frame_post added next) -----
@@ -194,12 +256,19 @@ TEAM_KERNEL_FIELDS = (
     "enabled", "valid", "component_world_scale", "time_reset_pending",
     "time", "old_time", "now_update_time", "old_update_time", "frame_update_time",
     "frame_old_time", "frame_delta_time", "time_scale", "now_time_scale",
-    "update_count", "skip_count", "running",
+    "update_count", "skip_count", "running", "tether_compression",
 )
 
 PARTICLE_KERNEL_FIELDS = (
     "team", "local_positions", "local_normals", "local_tangents",
     "skin_indices", "skin_weights", "positions", "rotations",
+    "next_positions", "velocity_positions", "step_basic_positions", "vertex_root",
 )
 
 TRANSFORM_KERNEL_FIELDS = ("world", "bind_pose")
+
+# static Program arrays, uploaded once; engine reads program.<attr>[<field>]
+STATIC_KERNEL_FIELDS = (
+    ("tether_particle", "tether", "particle"),
+    ("tether_team", "tether", "team"),
+)
