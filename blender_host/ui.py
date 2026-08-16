@@ -157,6 +157,7 @@ class RCP_PT_scene_settings(bpy.types.Panel):
     bl_region_type = 'WINDOW'
     bl_context = "physics"
     bl_parent_id = "RCP_PT_ruri_cloth_physics"
+    bl_order = 0
     bl_options = {'DEFAULT_CLOSED'}
 
     def draw(self, context):
@@ -208,6 +209,7 @@ class _SpringPanel(_ConfigPanel):
 class RCP_PT_config_main(_ConfigPanel, bpy.types.Panel):
     bl_label = "主设置"
     bl_parent_id = "RCP_PT_ruri_cloth_physics"
+    bl_order = 1
 
     def draw(self, context):
         layout = self.layout
@@ -267,6 +269,7 @@ class RCP_PT_config_main(_ConfigPanel, bpy.types.Panel):
 class RCP_PT_custom_skinning(_NonSpringPanel, bpy.types.Panel):
     bl_label = "自定义蒙皮"
     bl_parent_id = "RCP_PT_ruri_cloth_physics"
+    bl_order = 4
     bl_options = {'DEFAULT_CLOSED'}
 
     def draw_header(self, context):
@@ -291,6 +294,7 @@ class RCP_PT_custom_skinning(_NonSpringPanel, bpy.types.Panel):
 class RCP_PT_culling(_ConfigPanel, bpy.types.Panel):
     bl_label = "剔除"
     bl_parent_id = "RCP_PT_ruri_cloth_physics"
+    bl_order = 5
     bl_options = {'DEFAULT_CLOSED'}
 
     def draw(self, context):
@@ -310,6 +314,7 @@ class RCP_PT_culling(_ConfigPanel, bpy.types.Panel):
 class RCP_PT_parameters(_ConfigPanel, bpy.types.Panel):
     bl_label = "物理参数"
     bl_parent_id = "RCP_PT_ruri_cloth_physics"
+    bl_order = 3
     bl_idname = "RCP_PT_parameters"
 
     def draw_header_preset(self, context):
@@ -468,9 +473,9 @@ class RCP_PT_movement_limit(_NonSpringPanel, bpy.types.Panel):
 
 
 class RCP_PT_collider_collision(_ConfigPanel, bpy.types.Panel):
-    bl_label = "碰撞体碰撞"
-    bl_parent_id = "RCP_PT_parameters"
-    bl_options = {'DEFAULT_CLOSED'}
+    bl_label = "本配置的碰撞"
+    bl_parent_id = "RCP_PT_colliders"
+    bl_order = 10
 
     def draw(self, context):
         layout = self.layout
@@ -548,19 +553,31 @@ class RCP_PT_wind(_ConfigPanel, bpy.types.Panel):
 
 
 class RCP_PT_colliders(_ConfigPanel, bpy.types.Panel):
-    bl_label = "碰撞体池"
+    bl_label = "碰撞体"
+    bl_idname = "RCP_PT_colliders"
     bl_parent_id = "RCP_PT_ruri_cloth_physics"
-    bl_options = {'DEFAULT_CLOSED'}
+    bl_order = 2
 
     @classmethod
     def poll(cls, context):
         return _is_armature(context)
+
+    def draw_header(self, context):
+        self.layout.prop(context.object.ruri_cloth_physics, "show_colliders", text="")
 
     def draw(self, context):
         layout = self.layout
         _setup_layout(layout)
         obj = context.object
         settings = obj.ruri_cloth_physics
+
+        row = layout.row(align=True)
+        row.scale_y = 1.3
+        row.prop(settings, "show_colliders", toggle=True,
+                 icon='HIDE_OFF' if settings.show_colliders else 'HIDE_ON')
+        sub = row.row(align=True)
+        sub.enabled = settings.show_colliders
+        sub.prop(settings, "show_collider_gizmo", toggle=True, icon='GIZMO')
 
         row = layout.row()
         row.template_list("RCP_UL_colliders", "", settings, "colliders", settings,
@@ -581,12 +598,13 @@ class RCP_PT_colliders(_ConfigPanel, bpy.types.Panel):
         layout.separator()
         layout.prop(item, "shape")
         layout.prop_search(item, "bone", obj.data, "bones")
+        if not item.bone:
+            layout.label(text="未绑定骨骼, 将跟随骨架原点", icon='ERROR')
         layout.prop(item, "center")
         if item.shape == 'SPHERE':
             layout.prop(item, "radius")
         elif item.shape == 'CAPSULE':
             layout.prop(item, "direction")
-            layout.prop(item, "reverse_direction")
             layout.prop(item, "aligned_on_center")
             layout.prop(item, "length")
             layout.prop(item, "radius_separation")
@@ -595,11 +613,16 @@ class RCP_PT_colliders(_ConfigPanel, bpy.types.Panel):
                 layout.prop(item, "end_radius")
             else:
                 layout.prop(item, "start_radius", text="半径")
+            column = layout.column()
+            column.enabled = False
+            column.label(text="胶囊沿骨骼方向铺满 length, 始端半径在骨骼末端",
+                         icon='INFO')
 
 
 class RCP_PT_viewport_display(_ConfigPanel, bpy.types.Panel):
     bl_label = "视口显示"
     bl_parent_id = "RCP_PT_ruri_cloth_physics"
+    bl_order = 6
     bl_options = {'DEFAULT_CLOSED'}
 
     def draw_header(self, context):
@@ -620,7 +643,6 @@ class RCP_PT_viewport_display(_ConfigPanel, bpy.types.Panel):
         column.prop(gizmos, "shape")
         column.prop(gizmos, "base_line")
         column.prop(gizmos, "depth")
-        column.prop(gizmos, "collider")
         column.prop(gizmos, "animated_position")
         column.prop(gizmos, "animated_axis")
         column.prop(gizmos, "animated_shape")
@@ -684,10 +706,10 @@ _CLASSES = (
     RCP_PT_shape_restoration,
     RCP_PT_inertia,
     RCP_PT_movement_limit,
-    RCP_PT_collider_collision,
     RCP_PT_self_collision,
     RCP_PT_wind,
     RCP_PT_colliders,
+    RCP_PT_collider_collision,
     RCP_PT_viewport_display,
     RCP_PT_wind_zone,
 )

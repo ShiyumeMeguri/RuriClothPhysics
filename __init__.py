@@ -16,6 +16,7 @@ from .blender_host import (
     ui,
     runtime,
     overlay,
+    collider_gizmo,
 )
 
 _MODULES = (
@@ -26,6 +27,7 @@ _MODULES = (
     ui,
     runtime,
     overlay,
+    collider_gizmo,
 )
 
 

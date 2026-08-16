@@ -6,6 +6,7 @@ import bpy
 import gpu
 from gpu_extras.batch import batch_for_shader
 
+from . import collider_geom
 from . import runtime
 from ..cloth_kernel import defs
 from ..cloth_kernel import math as pm
@@ -18,6 +19,9 @@ COLOR_TRIANGLE = (1.0, 0.0, 0.8, 1.0)
 COLOR_ANIMATED_LINE = (0.6, 0.8, 1.0, 1.0)
 COLOR_ANIMATED_TRIANGLE = (0.8, 0.6, 1.0, 1.0)
 COLOR_COLLIDER = (1.0, 0.27, 0.0, 1.0)
+COLOR_COLLIDER_ACTIVE = (1.0, 0.85, 0.1, 1.0)
+COLOR_COLLIDER_IDLE = (0.15, 0.75, 1.0, 0.75)
+COLOR_COLLIDER_OFF = (0.45, 0.45, 0.45, 0.45)
 COLOR_INERTIA = (1.0, 0.0, 1.0, 1.0)
 COLOR_AXIS_X = (1.0, 0.2, 0.2, 1.0)
 COLOR_AXIS_Y = (0.2, 1.0, 0.2, 1.0)
@@ -130,77 +134,76 @@ def _collect_circles(collector, centers, axis_a, axis_b, radii, color, segments=
     collector.add_segments(starts, ends, color)
 
 
-def _collect_colliders(collector, world, entry):
-    binding = entry.binding
-    if binding is None or binding.count == 0:
+def _orthonormal_basis(axis):
+    reference = np.array([0.0, 0.0, 1.0]) if abs(float(axis[2])) < 0.9 \
+        else np.array([1.0, 0.0, 0.0])
+    side_a = np.cross(axis, reference)
+    length = float(np.linalg.norm(side_a))
+    side_a = side_a / length if length > 1e-12 else np.array([1.0, 0.0, 0.0])
+    return side_a, np.cross(axis, side_a)
+
+
+_SPHERE_PLANES = (
+    (np.array([1.0, 0.0, 0.0]), np.array([0.0, 1.0, 0.0])),
+    (np.array([0.0, 1.0, 0.0]), np.array([0.0, 0.0, 1.0])),
+    (np.array([0.0, 0.0, 1.0]), np.array([1.0, 0.0, 0.0])),
+)
+
+
+def _collect_sphere_wire(collector, center, radius, color, segments=24):
+    center32 = np.asarray(center, dtype=np.float32)[None]
+    radii = np.array([radius], dtype=np.float32)
+    for first, second in _SPHERE_PLANES:
+        _collect_circles(collector, center32,
+                         first.astype(np.float32)[None], second.astype(np.float32)[None],
+                         radii, color, segments)
+
+
+def collect_settings_colliders(collector, obj):
+    settings = obj.ruri_cloth_physics
+    if not settings.show_colliders or len(settings.colliders) == 0:
         return
-    ca = world.colliders
-    s = world.collider_slice(entry.team)
-    enabled = ca["enabled"][s]
-    now_positions = ca["now_positions"][s]
-    now_rotations = ca["now_rotations"][s]
-    kinds = ca["kind"][s]
-    work_radius = ca["work_radius"][s]
-    work_next = ca["work_next_pos"][s]
-    work_old = ca["work_old_pos"][s]
+    active_index = settings.active_collider_index
+    for index, item in enumerate(settings.colliders):
+        matrix = collider_geom.bone_matrix(obj, item.bone)
+        kind, first, second, start_radius, end_radius = collider_geom.solve(item, matrix)
+        if not item.enabled:
+            color = COLOR_COLLIDER_OFF
+        elif index == active_index:
+            color = COLOR_COLLIDER_ACTIVE
+        else:
+            color = COLOR_COLLIDER_IDLE
 
-    x = pm.quat_rotate(now_rotations, np.broadcast_to(pm.VEC_RIGHT, now_positions.shape).astype(np.float32))
-    y = pm.quat_rotate(now_rotations, np.broadcast_to(pm.VEC_UP, now_positions.shape).astype(np.float32))
-    z = pm.quat_rotate(now_rotations, np.broadcast_to(pm.VEC_FORWARD, now_positions.shape).astype(np.float32))
+        if kind == defs.COLLIDER_SPHERE:
+            _collect_sphere_wire(collector, first, start_radius, color)
+            continue
+        if kind == defs.COLLIDER_PLANE:
+            axis = second - first
+            side_a, side_b = _orthonormal_basis(axis)
+            size = 0.25
+            corners = [first + side_a * size + side_b * size,
+                       first - side_a * size + side_b * size,
+                       first - side_a * size - side_b * size,
+                       first + side_a * size - side_b * size]
+            for k in range(4):
+                collector.add_segments(np.asarray(corners[k], dtype=np.float32)[None],
+                                       np.asarray(corners[(k + 1) % 4], dtype=np.float32)[None],
+                                       color)
+            collector.add_segments(np.asarray(first, dtype=np.float32)[None],
+                                   np.asarray(first + axis * size * 0.5, dtype=np.float32)[None],
+                                   color)
+            continue
 
-    sphere = np.flatnonzero(enabled & (kinds == defs.COLLIDER_SPHERE))
-    if len(sphere):
-        radius = work_radius[sphere, 0]
-        radius = np.where(radius > 0.0, radius, binding.sizes[sphere, 0])
-        _collect_circles(collector, now_positions[sphere], x[sphere], y[sphere], radius,
-                         COLOR_COLLIDER)
-        _collect_circles(collector, now_positions[sphere], y[sphere], z[sphere], radius,
-                         COLOR_COLLIDER)
-        _collect_circles(collector, now_positions[sphere], z[sphere], x[sphere], radius,
-                         COLOR_COLLIDER)
-
-    capsule = np.flatnonzero(enabled & (kinds == defs.COLLIDER_CAPSULE))
-    if len(capsule):
-        start = work_next[capsule, 0]
-        end = work_next[capsule, 1]
-        sr = work_radius[capsule, 0]
-        er = work_radius[capsule, 1]
-        axis = end - start
-        length = np.linalg.norm(axis, axis=1)
-        axis = np.where((length > 1e-30)[:, None],
-                        axis / np.where(length > 1e-30, length, 1.0)[:, None], y[capsule])
-        pick = np.abs(axis[:, 1]) < 0.9
-        reference = np.where(pick[:, None], pm.VEC_UP, pm.VEC_RIGHT)
-        side_a = np.cross(axis, reference)
-        sl = np.maximum(np.linalg.norm(side_a, axis=1), 1e-30)
-        side_a = side_a / sl[:, None]
-        side_b = np.cross(axis, side_a)
-        _collect_circles(collector, start, side_a, side_b, sr, COLOR_COLLIDER)
-        _collect_circles(collector, end, side_a, side_b, er, COLOR_COLLIDER)
+        _collect_sphere_wire(collector, first, start_radius, color)
+        _collect_sphere_wire(collector, second, end_radius, color)
+        axis = second - first
+        length = float(np.linalg.norm(axis))
+        axis = axis / length if length > 1e-12 else np.array([0.0, 1.0, 0.0])
+        side_a, side_b = _orthonormal_basis(axis)
         for direction in (side_a, -side_a, side_b, -side_b):
-            collector.add_segments(start + direction * sr[:, None],
-                                   end + direction * er[:, None], COLOR_COLLIDER)
-
-    plane = np.flatnonzero(enabled & (kinds == defs.COLLIDER_PLANE))
-    if len(plane):
-        normal = work_old[plane, 0]
-        pick = np.abs(normal[:, 1]) < 0.9
-        reference = np.where(pick[:, None], pm.VEC_UP, pm.VEC_RIGHT)
-        side_a = np.cross(normal, reference)
-        sl = np.linalg.norm(side_a, axis=1)
-        side_a = np.where((sl > 1e-30)[:, None],
-                          side_a / np.where(sl > 1e-30, sl, 1.0)[:, None],
-                          np.broadcast_to(pm.VEC_RIGHT, side_a.shape))
-        side_b = np.cross(normal, side_a)
-        size = 0.25
-        pos = now_positions[plane]
-        corners = [pos + side_a * size + side_b * size,
-                   pos - side_a * size + side_b * size,
-                   pos - side_a * size - side_b * size,
-                   pos + side_a * size - side_b * size]
-        for k in range(4):
-            collector.add_segments(corners[k], corners[(k + 1) % 4], COLOR_COLLIDER)
-        collector.add_segments(pos, pos + normal * size * 0.5, COLOR_COLLIDER)
+            collector.add_segments(
+                np.asarray(first + direction * start_radius, dtype=np.float32)[None],
+                np.asarray(second + direction * end_radius, dtype=np.float32)[None], color)
 
 
 def _collect_inertia_center(collector, center, size=0.02):
@@ -226,6 +229,14 @@ def _draw_callback():
     tt = world.team
     no_depth = _Collector()
     with_depth = _Collector()
+
+    seen = set()
+    for obj in list(context.selected_objects) + ([active] if active is not None else []):
+        if obj is None or obj.type != 'ARMATURE' or obj.name in seen:
+            continue
+        seen.add(obj.name)
+        if getattr(obj, "ruri_cloth_physics", None) is not None:
+            collect_settings_colliders(no_depth, obj)
 
     for obj, index, entry in runtime.iter_entries(scene):
         settings = obj.ruri_cloth_physics
@@ -266,8 +277,6 @@ def _draw_callback():
         if gizmos.animated_shape:
             _collect_shape(collector, setup, base_positions,
                            COLOR_ANIMATED_LINE, COLOR_ANIMATED_TRIANGLE)
-        if gizmos.collider:
-            _collect_colliders(collector, world, entry)
         if gizmos.inertia_center:
             _collect_inertia_center(collector, tt["now_world_position"][entry.team])
 

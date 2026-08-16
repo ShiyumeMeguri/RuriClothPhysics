@@ -367,7 +367,6 @@ class RCPGizmoSettings(bpy.types.PropertyGroup):
     shape: BoolProperty(name="形状(线/三角)", default=False)
     base_line: BoolProperty(name="基线", default=False)
     depth: BoolProperty(name="深度着色", default=False)
-    collider: BoolProperty(name="碰撞体", default=True)
     animated_position: BoolProperty(name="动画位置", default=False)
     animated_axis: BoolProperty(name="动画轴", default=False)
     animated_shape: BoolProperty(name="动画形状", default=False)
@@ -496,7 +495,14 @@ class RCPWindZoneSettings(bpy.types.PropertyGroup):
 
 class RCPObjectSettings(bpy.types.PropertyGroup):
     live: BoolProperty(name="实时模拟", default=False,
-                       description="在播放/拖动时间轴时实时模拟Ruri 布料物理")
+                       description="在播放/拖动时间轴时实时模拟布料")
+    show_colliders: BoolProperty(
+        name="编辑碰撞体", default=False,
+        description="打开后在视口里画出全部碰撞体并显示拖拽控制器, 平时关闭不干扰视图; "
+                    "与模拟是否开启无关")
+    show_collider_gizmo: BoolProperty(
+        name="拖拽控制器", default=True,
+        description="编辑碰撞体时, 为当前碰撞体显示可拖拽的半径/长度/位置控制器")
     configs: CollectionProperty(type=RCPClothConfig)
     active_config_index: IntProperty(default=0)
     colliders: CollectionProperty(type=RCPColliderItem)
