@@ -115,9 +115,6 @@ PARTICLE_FIELDS = {
     "particle_radius": (F4, ()),
     "albuf_length": (F4, ()), "albuf_local_pos": (F4, (3,)), "albuf_local_rot": (F4, (4,)),
     "albuf_restore": (F4, (3,)), "albuf_rotation": (F4, (4,)),
-    "work_sum": (F8, (3,)), "work_sum2": (F8, (3,)), "work_count": (I8, ()),
-    "work_float": (F4, ()), "work_min": (F4, ()),
-    "self_sum": (F8, (3,)), "self_count": (I8, ()),
 }
 
 TRANSFORM_FIELDS = {
