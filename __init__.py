@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Ruri Cloth Physics",
     "author": "ShiyumeMeguri",
-    "version": (2, 0, 0),
+    "version": (3, 0, 0),
     "blender": (4, 2, 0),
     "location": "Properties > Physics > Ruri 布料物理 (Armature) / Ruri 布料物理风区 (Empty)",
     "description": "骨架骨骼的布料与弹簧物理: 粒子图微内核全场景单竞技场模拟、碰撞体、风场、自碰撞与关键帧烘焙",

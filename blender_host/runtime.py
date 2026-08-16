@@ -7,6 +7,7 @@ import bpy
 from bpy.app.handlers import persistent
 
 from . import armature
+from . import bone_binding
 from . import curve_host
 from ..cloth_kernel import compile as kernel_compile
 from ..cloth_kernel import defs
@@ -659,6 +660,7 @@ def _on_frame_change_post(scene, depsgraph=None):
 @persistent
 def _on_load_post(*args):
     clear_registry()
+    bone_binding.invalidate()
 
 
 def register():

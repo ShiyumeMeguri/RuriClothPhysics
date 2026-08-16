@@ -12,6 +12,7 @@ from bpy.props import (
     StringProperty,
 )
 
+from . import bone_binding
 from . import curve_host
 
 _CONFIG_PATH_PATTERN = re.compile(r"ruri_cloth_physics\.configs\[(\d+)\]")
@@ -133,8 +134,14 @@ RCPCheckParticleSpeed = _make_check_type("RCPCheckParticleSpeed", True, 4.0, 0.0
 RCPCheckCullingLength = _make_check_type("RCPCheckCullingLength", False, 30.0, 0.0, 100.0)
 
 
+def _bone_property(name, update, target=None):
+    getter, setter = bone_binding.make_accessors("bone_uid", update, target)
+    return StringProperty(name=name, get=getter, set=setter)
+
+
 class RCPBoneReference(bpy.types.PropertyGroup):
-    bone: StringProperty(name="骨骼", default="", update=_topology_update)
+    bone_uid: StringProperty(default="", options={'HIDDEN'})
+    bone: _bone_property("骨骼", _topology_update)
 
 
 class RCPColliderReference(bpy.types.PropertyGroup):
@@ -149,7 +156,8 @@ ATTRIBUTE_OVERRIDE_ITEMS = (
 
 
 class RCPAttributeOverride(bpy.types.PropertyGroup):
-    bone: StringProperty(name="骨骼", default="", update=_topology_update)
+    bone_uid: StringProperty(default="", options={'HIDDEN'})
+    bone: _bone_property("骨骼", _topology_update)
     attribute: EnumProperty(name="属性", items=ATTRIBUTE_OVERRIDE_ITEMS, default='MOVE',
                             update=_topology_update)
     disable_collision: BoolProperty(name="禁用碰撞", default=False, update=_topology_update)
@@ -173,7 +181,8 @@ class RCPColliderItem(bpy.types.PropertyGroup):
     enabled: BoolProperty(name="启用", default=True, update=_collider_update)
     shape: EnumProperty(name="形状", items=COLLIDER_SHAPE_ITEMS, default='SPHERE',
                         update=_collider_update)
-    bone: StringProperty(name="骨骼", default="", update=_collider_update)
+    bone_uid: StringProperty(default="", options={'HIDDEN'})
+    bone: _bone_property("骨骼", _collider_update)
     center: FloatVectorProperty(name="中心偏移", size=3, default=(0.0, 0.0, 0.0),
                                 subtype='TRANSLATION', update=_collider_update)
     radius: FloatProperty(name="半径", default=0.05, min=0.001, soft_max=0.5,
@@ -273,7 +282,8 @@ TELEPORT_MODE_ITEMS = (
 
 class RCPInertiaSettings(bpy.types.PropertyGroup):
     anchor_object: PointerProperty(name="锚对象", type=bpy.types.Object, update=_param_update)
-    anchor_bone: StringProperty(name="锚骨骼", default="", update=_param_update)
+    anchor_bone_uid: StringProperty(default="", options={'HIDDEN'})
+    anchor_bone: _bone_property("锚骨骼", _param_update, lambda self: self.anchor_object)
     anchor_inertia: FloatProperty(name="锚惯性", default=0.0, min=0.0, max=1.0,
                                   update=_param_update)
     world_inertia: FloatProperty(name="世界惯性", default=1.0, min=0.0, max=1.0,
@@ -423,8 +433,9 @@ class RCPClothConfig(bpy.types.PropertyGroup):
                                         default='NONE', update=_topology_update)
     normal_alignment_object: PointerProperty(name="对齐参考对象", type=bpy.types.Object,
                                              update=_topology_update)
-    normal_alignment_bone: StringProperty(name="对齐参考骨骼", default="",
-                                          update=_topology_update)
+    normal_alignment_bone_uid: StringProperty(default="", options={'HIDDEN'})
+    normal_alignment_bone: _bone_property("对齐参考骨骼", _topology_update,
+                                          lambda self: self.normal_alignment_object)
 
     custom_skinning_enable: BoolProperty(name="启用自定义蒙皮", default=False,
                                          update=_topology_update)
