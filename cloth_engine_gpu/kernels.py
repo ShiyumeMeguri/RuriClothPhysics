@@ -31,6 +31,7 @@ PHASE_STEP_POST = int32(1 << 5)      # S13 particles.step_post (substep)
 PHASE_DISTANCE_A = int32(1 << 6)     # S6 distance.run (first substep occurrence)
 PHASE_DISTANCE_B = int32(1 << 7)     # S10 distance.run (second substep occurrence)
 PHASE_MOTION = int32(1 << 8)         # S11 motion.run (substep)
+PHASE_BENDING = int32(1 << 9)        # S8 bending.run (substep)
 
 ALL_PHASES = int32(-1)
 
@@ -55,6 +56,12 @@ BONE_SPRING_FIX_MASS = float32(10.0)
 BONE_CLOTH_FIX_MASS = float32(50.0)
 DISTANCE_HORIZONTAL_STIFFNESS = float32(0.5)
 DISTANCE_VELOCITY_ATTENUATION = float32(0.3)
+
+VOLUME_SIGN = int32(100)
+VOLUME_SCALE = float32(1000.0)
+BENDING_FIX_INV_MASS = float32(0.01)
+ONE_SIXTH = float32(1.0 / 6.0)
+TO_FIXED = float32(1e6)
 
 
 @cuda.jit(device=True)
@@ -349,6 +356,7 @@ def frame_kernel(phase_mask, sub_begin, sub_end,
                  t_motion_use_max_distance, t_motion_use_backstop, t_motion_stiffness,
                  t_motion_backstop_radius, t_radius_lut, t_motion_max_distance_lut,
                  t_motion_backstop_lut,
+                 t_bending_stiffness, t_negative_scale_sign,
                  p_team, p_local_positions, p_local_normals, p_local_tangents,
                  p_skin_indices, p_skin_weights, p_positions, p_rotations,
                  p_next_positions, p_velocity_positions, p_step_basic_positions, p_vertex_root,
@@ -362,8 +370,9 @@ def frame_kernel(phase_mask, sub_begin, sub_end,
                  st_spring_particle, st_spring_team,
                  st_distance_target, st_distance_rest,
                  st_motion_particle, st_motion_team,
+                 st_bending_team, st_bending_pair, st_bending_rest, st_bending_sign,
                  csr_distance_offsets, csr_distance_order,
-                 sc_dcorr):
+                 sc_dcorr, sc_dcorr_fixed, sc_dcount):
     grid = cg.this_grid()
     tid = cuda.grid(1)
     stride = cuda.gridsize(1)
@@ -399,6 +408,7 @@ def frame_kernel(phase_mask, sub_begin, sub_end,
     n_fixed = st_fixed_particle.shape[0]
     n_spring = st_spring_particle.shape[0]
     n_motion = st_motion_particle.shape[0]
+    n_bending = st_bending_team.shape[0]
     for _k in range(sub_begin, sub_end):
         # --- S3 particles.step_update PASS 1: base interpolation (all sp) + move set ---
         if phase_mask & PHASE_PARTICLES_STEP:
@@ -689,6 +699,205 @@ def frame_kernel(phase_mask, sub_begin, sub_end,
                 p += stride
         grid.sync()
 
+        # --- S8 bending.run: clear -> per-pair scatter (int32 fixed-point) -> apply ---
+        if phase_mask & PHASE_BENDING:
+            p = tid
+            while p < num_particles:
+                sc_dcorr_fixed[p, 0] = int32(0)
+                sc_dcorr_fixed[p, 1] = int32(0)
+                sc_dcorr_fixed[p, 2] = int32(0)
+                sc_dcount[p] = int32(0)
+                p += stride
+        grid.sync()
+        if phase_mask & PHASE_BENDING:
+            e = tid
+            while e < n_bending:
+                team = st_bending_team[e]
+                if team_frame_mask(t_enabled, t_valid, t_cws, team) and t_update_count[team] > _k \
+                        and t_bending_stiffness[team] >= float32(1e-6):
+                    stiffness = dmath.saturate(t_bending_stiffness[team] * power1)
+                    pp0 = st_bending_pair[e, 0]
+                    pp1 = st_bending_pair[e, 1]
+                    pp2 = st_bending_pair[e, 2]
+                    pp3 = st_bending_pair[e, 3]
+                    rest = st_bending_rest[e]
+                    sgn = st_bending_sign[e]
+                    a0x = p_next_positions[pp0, 0]
+                    a0y = p_next_positions[pp0, 1]
+                    a0z = p_next_positions[pp0, 2]
+                    a1x = p_next_positions[pp1, 0]
+                    a1y = p_next_positions[pp1, 1]
+                    a1z = p_next_positions[pp1, 2]
+                    a2x = p_next_positions[pp2, 0]
+                    a2y = p_next_positions[pp2, 1]
+                    a2z = p_next_positions[pp2, 2]
+                    a3x = p_next_positions[pp3, 0]
+                    a3y = p_next_positions[pp3, 1]
+                    a3z = p_next_positions[pp3, 2]
+                    if p_attr_move[pp0] == 0:
+                        inv0 = BENDING_FIX_INV_MASS
+                    else:
+                        inv0 = dmath.calc_inverse_mass(p_friction[pp0], p_depth[pp0])
+                    if p_attr_move[pp1] == 0:
+                        inv1 = BENDING_FIX_INV_MASS
+                    else:
+                        inv1 = dmath.calc_inverse_mass(p_friction[pp1], p_depth[pp1])
+                    if p_attr_move[pp2] == 0:
+                        inv2 = BENDING_FIX_INV_MASS
+                    else:
+                        inv2 = dmath.calc_inverse_mass(p_friction[pp2], p_depth[pp2])
+                    if p_attr_move[pp3] == 0:
+                        inv3 = BENDING_FIX_INV_MASS
+                    else:
+                        inv3 = dmath.calc_inverse_mass(p_friction[pp3], p_depth[pp3])
+                    scale_ratio = t_scale_ratio[team]
+                    negative_sign = t_negative_scale_sign[team]
+                    result = False
+                    a0dx = float32(0.0)
+                    a0dy = float32(0.0)
+                    a0dz = float32(0.0)
+                    a1dx = float32(0.0)
+                    a1dy = float32(0.0)
+                    a1dz = float32(0.0)
+                    a2dx = float32(0.0)
+                    a2dy = float32(0.0)
+                    a2dz = float32(0.0)
+                    a3dx = float32(0.0)
+                    a3dy = float32(0.0)
+                    a3dz = float32(0.0)
+                    if sgn == VOLUME_SIGN:
+                        volume_rest = rest * scale_ratio * negative_sign
+                        cx, cy, cz = dmath.cross3(a1x - a0x, a1y - a0y, a1z - a0z,
+                                                  a2x - a0x, a2y - a0y, a2z - a0z)
+                        volume = ONE_SIXTH * (cx * (a3x - a0x) + cy * (a3y - a0y)
+                                              + cz * (a3z - a0z)) * VOLUME_SCALE
+                        g0x, g0y, g0z = dmath.cross3(a1x - a2x, a1y - a2y, a1z - a2z,
+                                                     a3x - a2x, a3y - a2y, a3z - a2z)
+                        g1x, g1y, g1z = dmath.cross3(a2x - a0x, a2y - a0y, a2z - a0z,
+                                                     a3x - a0x, a3y - a0y, a3z - a0z)
+                        g2x, g2y, g2z = dmath.cross3(a0x - a1x, a0y - a1y, a0z - a1z,
+                                                     a3x - a1x, a3y - a1y, a3z - a1z)
+                        g3x, g3y, g3z = dmath.cross3(a1x - a0x, a1y - a0y, a1z - a0z,
+                                                     a2x - a0x, a2y - a0y, a2z - a0z)
+                        lam = (inv0 * (g0x * g0x + g0y * g0y + g0z * g0z)
+                               + inv1 * (g1x * g1x + g1y * g1y + g1z * g1z)
+                               + inv2 * (g2x * g2x + g2y * g2y + g2z * g2z)
+                               + inv3 * (g3x * g3x + g3y * g3y + g3z * g3z))
+                        lam = lam * VOLUME_SCALE
+                        if libdevice.fabsf(lam) >= float32(1e-6):
+                            lam = stiffness * (volume_rest - volume) / lam
+                            a0dx = lam * inv0 * g0x
+                            a0dy = lam * inv0 * g0y
+                            a0dz = lam * inv0 * g0z
+                            a1dx = lam * inv1 * g1x
+                            a1dy = lam * inv1 * g1y
+                            a1dz = lam * inv1 * g1z
+                            a2dx = lam * inv2 * g2x
+                            a2dy = lam * inv2 * g2y
+                            a2dz = lam * inv2 * g2z
+                            a3dx = lam * inv3 * g3x
+                            a3dy = lam * inv3 * g3y
+                            a3dz = lam * inv3 * g3z
+                            result = True
+                    else:
+                        rest_angle = rest * float32(sgn) * negative_sign
+                        ex = a3x - a2x
+                        ey = a3y - a2y
+                        ez = a3z - a2z
+                        elen = dmath.length3(ex, ey, ez)
+                        ok = elen >= float32(1e-8)
+                        safe_elen = elen if elen > float32(1e-30) else float32(1.0)
+                        inv_elen = float32(1.0) / safe_elen
+                        nn1x, nn1y, nn1z = dmath.cross3(a2x - a0x, a2y - a0y, a2z - a0z,
+                                                        a3x - a0x, a3y - a0y, a3z - a0z)
+                        nn2x, nn2y, nn2z = dmath.cross3(a3x - a1x, a3y - a1y, a3z - a1z,
+                                                        a2x - a1x, a2y - a1y, a2z - a1z)
+                        sq1 = nn1x * nn1x + nn1y * nn1y + nn1z * nn1z
+                        sq2 = nn2x * nn2x + nn2y * nn2y + nn2z * nn2z
+                        ok = ok and (sq1 != float32(0.0)) and (sq2 != float32(0.0))
+                        safe_sq1 = sq1 if sq1 > float32(1e-30) else float32(1.0)
+                        safe_sq2 = sq2 if sq2 > float32(1e-30) else float32(1.0)
+                        nn1x = nn1x / safe_sq1
+                        nn1y = nn1y / safe_sq1
+                        nn1z = nn1z / safe_sq1
+                        nn2x = nn2x / safe_sq2
+                        nn2y = nn2y / safe_sq2
+                        nn2z = nn2z / safe_sq2
+                        d0x = nn1x * elen
+                        d0y = nn1y * elen
+                        d0z = nn1z * elen
+                        d1x = nn2x * elen
+                        d1y = nn2y * elen
+                        d1z = nn2z * elen
+                        dot03 = (a0x - a3x) * ex + (a0y - a3y) * ey + (a0z - a3z) * ez
+                        dot13 = (a1x - a3x) * ex + (a1y - a3y) * ey + (a1z - a3z) * ez
+                        d2x = dot03 * inv_elen * nn1x + dot13 * inv_elen * nn2x
+                        d2y = dot03 * inv_elen * nn1y + dot13 * inv_elen * nn2y
+                        d2z = dot03 * inv_elen * nn1z + dot13 * inv_elen * nn2z
+                        dot20 = (a2x - a0x) * ex + (a2y - a0y) * ey + (a2z - a0z) * ez
+                        dot21 = (a2x - a1x) * ex + (a2y - a1y) * ey + (a2z - a1z) * ez
+                        d3x = dot20 * inv_elen * nn1x + dot21 * inv_elen * nn2x
+                        d3y = dot20 * inv_elen * nn1y + dot21 * inv_elen * nn2y
+                        d3z = dot20 * inv_elen * nn1z + dot21 * inv_elen * nn2z
+                        un1x, un1y, un1z = dmath.normalize3(nn1x, nn1y, nn1z)
+                        un2x, un2y, un2z = dmath.normalize3(nn2x, nn2y, nn2z)
+                        dotu = dmath.clamp1(un1x * un2x + un1y * un2y + un1z * un2z)
+                        phi = libdevice.acosf(dotu)
+                        lam = (inv0 * (d0x * d0x + d0y * d0y + d0z * d0z)
+                               + inv1 * (d1x * d1x + d1y * d1y + d1z * d1z)
+                               + inv2 * (d2x * d2x + d2y * d2y + d2z * d2z)
+                               + inv3 * (d3x * d3x + d3y * d3y + d3z * d3z))
+                        ok = ok and (lam != float32(0.0))
+                        crx, cry, crz = dmath.cross3(un1x, un1y, un1z, un2x, un2y, un2z)
+                        dir_sign = dmath.fsign(crx * ex + cry * ey + crz * ez)
+                        phi = phi * dir_sign
+                        if ok:
+                            lam = (rest_angle - phi) / lam * stiffness
+                            a0dx = -inv0 * lam * d0x
+                            a0dy = -inv0 * lam * d0y
+                            a0dz = -inv0 * lam * d0z
+                            a1dx = -inv1 * lam * d1x
+                            a1dy = -inv1 * lam * d1y
+                            a1dz = -inv1 * lam * d1z
+                            a2dx = -inv2 * lam * d2x
+                            a2dy = -inv2 * lam * d2y
+                            a2dz = -inv2 * lam * d2z
+                            a3dx = -inv3 * lam * d3x
+                            a3dy = -inv3 * lam * d3y
+                            a3dz = -inv3 * lam * d3z
+                            result = True
+                    if result:
+                        cuda.atomic.add(sc_dcorr_fixed, (pp0, 0), int32(a0dx * TO_FIXED))
+                        cuda.atomic.add(sc_dcorr_fixed, (pp0, 1), int32(a0dy * TO_FIXED))
+                        cuda.atomic.add(sc_dcorr_fixed, (pp0, 2), int32(a0dz * TO_FIXED))
+                        cuda.atomic.add(sc_dcount, pp0, int32(1))
+                        cuda.atomic.add(sc_dcorr_fixed, (pp1, 0), int32(a1dx * TO_FIXED))
+                        cuda.atomic.add(sc_dcorr_fixed, (pp1, 1), int32(a1dy * TO_FIXED))
+                        cuda.atomic.add(sc_dcorr_fixed, (pp1, 2), int32(a1dz * TO_FIXED))
+                        cuda.atomic.add(sc_dcount, pp1, int32(1))
+                        cuda.atomic.add(sc_dcorr_fixed, (pp2, 0), int32(a2dx * TO_FIXED))
+                        cuda.atomic.add(sc_dcorr_fixed, (pp2, 1), int32(a2dy * TO_FIXED))
+                        cuda.atomic.add(sc_dcorr_fixed, (pp2, 2), int32(a2dz * TO_FIXED))
+                        cuda.atomic.add(sc_dcount, pp2, int32(1))
+                        cuda.atomic.add(sc_dcorr_fixed, (pp3, 0), int32(a3dx * TO_FIXED))
+                        cuda.atomic.add(sc_dcorr_fixed, (pp3, 1), int32(a3dy * TO_FIXED))
+                        cuda.atomic.add(sc_dcorr_fixed, (pp3, 2), int32(a3dz * TO_FIXED))
+                        cuda.atomic.add(sc_dcount, pp3, int32(1))
+                e += stride
+        grid.sync()
+        if phase_mask & PHASE_BENDING:
+            p = tid
+            while p < num_particles:
+                mt = p_team[p]
+                if team_frame_mask(t_enabled, t_valid, t_cws, mt) and t_update_count[mt] > _k \
+                        and p_attr_move[p] != 0 and sc_dcount[p] > 0:
+                    inv_c = float32(1.0) / float32(sc_dcount[p])
+                    p_next_positions[p, 0] += float32(sc_dcorr_fixed[p, 0]) / TO_FIXED * inv_c
+                    p_next_positions[p, 1] += float32(sc_dcorr_fixed[p, 1]) / TO_FIXED * inv_c
+                    p_next_positions[p, 2] += float32(sc_dcorr_fixed[p, 2]) / TO_FIXED * inv_c
+                p += stride
+        grid.sync()
+
         # --- S11 motion.run (per-entry independent) ---
         if phase_mask & PHASE_MOTION:
             e = tid
@@ -926,6 +1135,7 @@ TEAM_KERNEL_FIELDS = (
     "motion_use_max_distance", "motion_use_backstop", "motion_stiffness",
     "motion_backstop_radius", "radius_lut", "motion_max_distance_lut",
     "motion_backstop_lut",
+    "bending_stiffness", "negative_scale_sign",
 )
 
 PARTICLE_KERNEL_FIELDS = (
@@ -954,6 +1164,10 @@ STATIC_KERNEL_FIELDS = (
     ("distance_rest", "distance", "rest"),
     ("motion_particle", "motion", "particle"),
     ("motion_team", "motion", "team"),
+    ("bending_team", "bending", "team"),
+    ("bending_pair", "bending", "pair"),
+    ("bending_rest", "bending", "rest"),
+    ("bending_sign", "bending", "sign"),
 )
 
 # CSR gather tables (offsets + order uploaded from a program CsrTable attribute)

@@ -67,6 +67,8 @@ class GpuEngine:
         np_particles = max(self.program.num_particles, 1)
         self.scratch = {
             "dcorr": cuda.device_array((np_particles, 3), np.float32),
+            "dcorr_fixed": cuda.device_array((np_particles, 3), np.int32),
+            "dcount": cuda.device_array((np_particles,), np.int32),
         }
 
     def _blocks(self):
@@ -114,7 +116,7 @@ class GpuEngine:
         for off_name, ord_name, _ in kernels.STATIC_CSR_FIELDS:
             csr_args.append(self.static[off_name])
             csr_args.append(self.static[ord_name])
-        scratch_args = [self.scratch["dcorr"]]
+        scratch_args = [self.scratch["dcorr"], self.scratch["dcorr_fixed"], self.scratch["dcount"]]
         blocks = self._blocks()
         kernels.frame_kernel[blocks, _THREADS](
             int32(phase_mask), int32(sub_begin), int32(sub_end),
