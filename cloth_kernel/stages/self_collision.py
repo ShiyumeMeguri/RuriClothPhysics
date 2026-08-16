@@ -607,7 +607,7 @@ def _solve_contacts(world, ctx):
         rows = canonical_values[plan.gather] * gathered_active[:, None]
         counts = np.add.reduceat(gathered_active, plan.run_starts)
         sums = np.add.reduceat(rows, plan.run_starts, axis=0)
-        apply = counts > 0
+        apply = (counts > 0) & ctx.step_team_mask[pa["team"][plan.touched]]
         if np.any(apply):
             pa["next_positions"][plan.touched[apply]] += (sums[apply]
                                                           / counts[apply][:, None]).astype(np.float32)
