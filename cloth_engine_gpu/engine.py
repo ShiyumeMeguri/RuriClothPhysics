@@ -91,10 +91,12 @@ class GpuEngine:
     def launch(self, phase_mask, sub_begin, sub_end, frame_globals):
         fdt, sim_dt, msc, gts = self._frame_scalars(frame_globals)
         team_args = [self.team.get(name) for name in kernels.TEAM_KERNEL_FIELDS]
+        particle_args = [self.particles.get(name) for name in kernels.PARTICLE_KERNEL_FIELDS]
+        transform_args = [self.transforms.get(name) for name in kernels.TRANSFORM_KERNEL_FIELDS]
         blocks = self._blocks()
         kernels.frame_kernel[blocks, _THREADS](
             int32(phase_mask), int32(sub_begin), int32(sub_end),
-            fdt, sim_dt, msc, gts, *team_args)
+            fdt, sim_dt, msc, gts, *team_args, *particle_args, *transform_args)
 
     # ---- production API (grows as phases land) ------------------------------
     def step_frame(self, world, frame_globals):

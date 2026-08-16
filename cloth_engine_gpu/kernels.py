@@ -21,7 +21,8 @@ from . import dmath
 
 # phase bits (frame-pre / substep / frame-post)
 PHASE_ADVANCE = int32(1 << 0)        # T1 team_time.advance
-PHASE_TEAM_POST = int32(1 << 1)      # F4 team_time.frame_post
+PHASE_BASE_POSE = int32(1 << 1)      # P0/P1 particles.compute_base_pose (skinning)
+PHASE_TEAM_POST = int32(1 << 2)      # F4 team_time.frame_post
 
 ALL_PHASES = int32(-1)
 
@@ -91,17 +92,71 @@ def do_advance(i, fdt, sim_dt, max_sim_count, global_time_scale,
     running[i] = int32(1) if updated else int32(0)
 
 
+@cuda.jit(device=True)
+def _skin_row(world, bind, t, r, c):
+    # (world[t] @ bind[t])[r, c] in f32 (matches oracle einsum('tij,tjk->tik') rounding)
+    return (world[t, r, 0] * bind[t, 0, c] + world[t, r, 1] * bind[t, 1, c]
+            + world[t, r, 2] * bind[t, 2, c] + world[t, r, 3] * bind[t, 3, c])
+
+
+@cuda.jit(device=True)
+def do_base_pose(p, p_team, local_positions, local_normals, local_tangents,
+                 skin_indices, skin_weights, positions, rotations, world, bind):
+    wp = cuda.local.array(3, float32)
+    wn = cuda.local.array(3, float32)
+    wt = cuda.local.array(3, float32)
+    for r in range(3):
+        wp[r] = float32(0.0)
+        wn[r] = float32(0.0)
+        wt[r] = float32(0.0)
+    lx = local_positions[p, 0]
+    ly = local_positions[p, 1]
+    lz = local_positions[p, 2]
+    lnx = local_normals[p, 0]
+    lny = local_normals[p, 1]
+    lnz = local_normals[p, 2]
+    ltx = local_tangents[p, 0]
+    lty = local_tangents[p, 1]
+    ltz = local_tangents[p, 2]
+    for j in range(4):
+        w = skin_weights[p, j]
+        t = skin_indices[p, j]
+        for r in range(3):
+            s0 = _skin_row(world, bind, t, r, 0)
+            s1 = _skin_row(world, bind, t, r, 1)
+            s2 = _skin_row(world, bind, t, r, 2)
+            s3 = _skin_row(world, bind, t, r, 3)
+            wp[r] += w * (s0 * lx + s1 * ly + s2 * lz + s3)
+            wn[r] += w * (s0 * lnx + s1 * lny + s2 * lnz)
+            wt[r] += w * (s0 * ltx + s1 * lty + s2 * ltz)
+    positions[p, 0] = wp[0]
+    positions[p, 1] = wp[1]
+    positions[p, 2] = wp[2]
+    nx, ny, nz = dmath.normalize3_fb(wn[0], wn[1], wn[2], float32(0.0), float32(1.0), float32(0.0))
+    tx, ty, tz = dmath.normalize3_fb(wt[0], wt[1], wt[2], float32(0.0), float32(0.0), float32(1.0))
+    qx, qy, qz, qw = dmath.to_rotation(nx, ny, nz, tx, ty, tz)
+    rotations[p, 0] = qx
+    rotations[p, 1] = qy
+    rotations[p, 2] = qz
+    rotations[p, 3] = qw
+
+
 @cuda.jit(cache=True)
 def frame_kernel(phase_mask, sub_begin, sub_end,
                  fdt, sim_dt, max_sim_count, global_time_scale,
                  t_enabled, t_valid, t_cws, t_time_reset,
                  t_time, t_old_time, t_now_update, t_old_update, t_frame_update, t_frame_old,
                  t_frame_dt, t_time_scale, t_now_time_scale, t_update_count, t_skip_count,
-                 t_running):
+                 t_running,
+                 p_team, p_local_positions, p_local_normals, p_local_tangents,
+                 p_skin_indices, p_skin_weights, p_positions, p_rotations,
+                 x_world, x_bind):
     grid = cg.this_grid()
     tid = cuda.grid(1)
     stride = cuda.gridsize(1)
     num_teams = t_enabled.shape[0]
+
+    num_particles = p_team.shape[0]
 
     # ----- FRAME-PRE -----
     if phase_mask & PHASE_ADVANCE:
@@ -113,6 +168,16 @@ def frame_kernel(phase_mask, sub_begin, sub_end,
                            t_frame_update, t_frame_old, t_frame_dt, t_time_scale,
                            t_now_time_scale, t_update_count, t_skip_count, t_running)
             i += stride
+    grid.sync()
+
+    if phase_mask & PHASE_BASE_POSE:
+        p = tid
+        while p < num_particles:
+            if team_frame_mask(t_enabled, t_valid, t_cws, p_team[p]):
+                do_base_pose(p, p_team, p_local_positions, p_local_normals, p_local_tangents,
+                             p_skin_indices, p_skin_weights, p_positions, p_rotations,
+                             x_world, x_bind)
+            p += stride
     grid.sync()
 
     # ----- SUBSTEP LOOP (phases added in dependency order as ported) -----
@@ -131,3 +196,10 @@ TEAM_KERNEL_FIELDS = (
     "frame_old_time", "frame_delta_time", "time_scale", "now_time_scale",
     "update_count", "skip_count", "running",
 )
+
+PARTICLE_KERNEL_FIELDS = (
+    "team", "local_positions", "local_normals", "local_tangents",
+    "skin_indices", "skin_weights", "positions", "rotations",
+)
+
+TRANSFORM_KERNEL_FIELDS = ("world", "bind_pose")
