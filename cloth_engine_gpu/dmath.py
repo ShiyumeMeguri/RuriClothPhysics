@@ -247,6 +247,39 @@ def to_rotation(nx, ny, nz, tx, ty, tz):
 
 
 @cuda.jit(device=True)
+def transform_point(m, px, py, pz):
+    # (m[:3,:3] @ p + m[:3,3]); m is a f64 (>=3x4) matrix view (mirrors math.transform_points f64 path)
+    x = m[0, 0] * px + m[0, 1] * py + m[0, 2] * pz + m[0, 3]
+    y = m[1, 0] * px + m[1, 1] * py + m[1, 2] * pz + m[1, 3]
+    z = m[2, 0] * px + m[2, 1] * py + m[2, 2] * pz + m[2, 3]
+    return (float32(x), float32(y), float32(z))
+
+
+@cuda.jit(device=True)
+def transform_vector(m, vx, vy, vz):
+    x = m[0, 0] * vx + m[0, 1] * vy + m[0, 2] * vz
+    y = m[1, 0] * vx + m[1, 1] * vy + m[1, 2] * vz
+    z = m[2, 0] * vx + m[2, 1] * vy + m[2, 2] * vz
+    return (float32(x), float32(y), float32(z))
+
+
+@cuda.jit(device=True)
+def transform_rotation(m, qx, qy, qz, qw, flip_normal, flip_tangent):
+    # mirrors math.transform_rotations(rot, matrix, flip): rotate normal/tangent, flip, look_rotation
+    nx, ny, nz = quat_to_normal(qx, qy, qz, qw)
+    tx, ty, tz = quat_to_tangent(qx, qy, qz, qw)
+    nx, ny, nz = transform_vector(m, nx, ny, nz)
+    nx = nx * flip_normal
+    ny = ny * flip_normal
+    nz = nz * flip_normal
+    tx, ty, tz = transform_vector(m, tx, ty, tz)
+    tx = tx * flip_tangent
+    ty = ty * flip_tangent
+    tz = tz * flip_tangent
+    return look_rotation(tx, ty, tz, nx, ny, nz)
+
+
+@cuda.jit(device=True)
 def _alt_axis_anti(v1x, v1y, v1z):
     # anti-parallel alternate axis, mirrors math.from_to_rotation
     if v1x > v1y and v1x > v1z:

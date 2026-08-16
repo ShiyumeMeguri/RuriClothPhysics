@@ -71,6 +71,8 @@ class GpuEngine:
             "dcorr": cuda.device_array((np_particles, 3), np.float32),
             "dcorr_fixed": cuda.device_array((np_particles, 3), np.int32),
             "dcount": cuda.device_array((np_particles,), np.int32),
+            "col_friction_fixed": cuda.device_array((np_particles,), np.int32),
+            "col_normal_fixed": cuda.device_array((np_particles, 3), np.int32),
         }
 
     def _blocks(self):
@@ -98,6 +100,11 @@ class GpuEngine:
         flat = {name: self.particles.download(name) for name in names}
         device.scatter_arena(world.particles, flat, self.program.num_particles, names)
 
+    def download_colliders(self, world, names=None):
+        names = names or list(self.colliders.device.keys())
+        flat = {name: self.colliders.download(name) for name in names}
+        device.scatter_arena(world.colliders, flat, self.program.num_colliders, names)
+
     # ---- launch -------------------------------------------------------------
     def _frame_scalars(self, frame_globals):
         power = _defs.simulation_power(frame_globals.simulation_frequency)
@@ -113,18 +120,20 @@ class GpuEngine:
         team_args = [self.team.get(name) for name in kernels.TEAM_KERNEL_FIELDS]
         particle_args = [self.particles.get(name) for name in kernels.PARTICLE_KERNEL_FIELDS]
         transform_args = [self.transforms.get(name) for name in kernels.TRANSFORM_KERNEL_FIELDS]
+        collider_args = [self.colliders.get(name) for name in kernels.COLLIDER_KERNEL_FIELDS]
         static_args = [self.static[name] for name, _, _ in kernels.STATIC_KERNEL_FIELDS]
         csr_args = []
         for off_name, ord_name, _ in kernels.STATIC_CSR_FIELDS:
             csr_args.append(self.static[off_name])
             csr_args.append(self.static[ord_name])
         direct_args = [self.static[name] for name in kernels.STATIC_DIRECT_FIELDS]
-        scratch_args = [self.scratch["dcorr"], self.scratch["dcorr_fixed"], self.scratch["dcount"]]
+        scratch_args = [self.scratch["dcorr"], self.scratch["dcorr_fixed"], self.scratch["dcount"],
+                        self.scratch["col_friction_fixed"], self.scratch["col_normal_fixed"]]
         blocks = self._blocks()
         kernels.frame_kernel[blocks, _THREADS](
             int32(phase_mask), int32(sub_begin), int32(sub_end),
             fdt, sim_dt, msc, gts, pw0, pw1, pw2, pw3,
-            *team_args, *particle_args, *transform_args, *static_args,
+            *team_args, *particle_args, *transform_args, *collider_args, *static_args,
             *csr_args, *direct_args, *scratch_args)
 
     # ---- production API (grows as phases land) ------------------------------
