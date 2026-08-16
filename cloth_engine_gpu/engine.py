@@ -13,7 +13,7 @@ state, launches just phase X, and compares the readback to the oracle "after X" 
 """
 
 import numpy as np
-from numba import int32
+from numba import cuda, int32
 
 from cloth_kernel import defs as _defs
 
@@ -60,6 +60,14 @@ class GpuEngine:
         self.static = {}
         for kernel_name, attr, field in kernels.STATIC_KERNEL_FIELDS:
             self.static[kernel_name] = device.upload_readonly(getattr(self.program, attr)[field])
+        for off_name, ord_name, attr in kernels.STATIC_CSR_FIELDS:
+            csr = getattr(self.program, attr)
+            self.static[off_name] = device.upload_readonly(csr.offsets)
+            self.static[ord_name] = device.upload_readonly(csr.order)
+        np_particles = max(self.program.num_particles, 1)
+        self.scratch = {
+            "dcorr": cuda.device_array((np_particles, 3), np.float32),
+        }
 
     def _blocks(self):
         needed = max(self.program.num_particles, self.program.num_teams, 1)
@@ -102,11 +110,17 @@ class GpuEngine:
         particle_args = [self.particles.get(name) for name in kernels.PARTICLE_KERNEL_FIELDS]
         transform_args = [self.transforms.get(name) for name in kernels.TRANSFORM_KERNEL_FIELDS]
         static_args = [self.static[name] for name, _, _ in kernels.STATIC_KERNEL_FIELDS]
+        csr_args = []
+        for off_name, ord_name, _ in kernels.STATIC_CSR_FIELDS:
+            csr_args.append(self.static[off_name])
+            csr_args.append(self.static[ord_name])
+        scratch_args = [self.scratch["dcorr"]]
         blocks = self._blocks()
         kernels.frame_kernel[blocks, _THREADS](
             int32(phase_mask), int32(sub_begin), int32(sub_end),
             fdt, sim_dt, msc, gts, pw0, pw1, pw2, pw3,
-            *team_args, *particle_args, *transform_args, *static_args)
+            *team_args, *particle_args, *transform_args, *static_args,
+            *csr_args, *scratch_args)
 
     # ---- production API (grows as phases land) ------------------------------
     def step_frame(self, world, frame_globals):

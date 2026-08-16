@@ -16,7 +16,7 @@ oracle trs / matrix inverse); per-particle / per-pair phases stay strict-f32.
 
 import math
 
-from numba import cuda, float32, int32
+from numba import cuda, float32, float64, int32
 from numba.cuda import cg, libdevice
 
 from . import dmath
@@ -28,6 +28,8 @@ PHASE_TETHER = int32(1 << 2)         # S5 tether.run (substep)
 PHASE_TEAM_POST = int32(1 << 3)      # F4 team_time.frame_post
 PHASE_PARTICLES_STEP = int32(1 << 4)  # S3 particles.step_update (substep)
 PHASE_STEP_POST = int32(1 << 5)      # S13 particles.step_post (substep)
+PHASE_DISTANCE_A = int32(1 << 6)     # S6 distance.run (first substep occurrence)
+PHASE_DISTANCE_B = int32(1 << 7)     # S10 distance.run (second substep occurrence)
 
 ALL_PHASES = int32(-1)
 
@@ -47,6 +49,11 @@ FORCE_VELOCITY_ADD = int32(1)
 FORCE_VELOCITY_ADD_WITHOUT_DEPTH = int32(2)
 FORCE_VELOCITY_CHANGE = int32(3)
 FORCE_VELOCITY_CHANGE_WITHOUT_DEPTH = int32(4)
+
+BONE_SPRING_FIX_MASS = float32(10.0)
+BONE_CLOTH_FIX_MASS = float32(50.0)
+DISTANCE_HORIZONTAL_STIFFNESS = float32(0.5)
+DISTANCE_VELOCITY_ATTENUATION = float32(0.3)
 
 
 @cuda.jit(device=True)
@@ -241,6 +248,82 @@ def do_wind_blend(wind_main, time, dqx, dqy, dqz, dqw, zone_turbulence,
     return (wdx * strength, wdy * strength, wdz * strength)
 
 
+@cuda.jit(device=True)
+def do_distance_gather(p, p_team, next_positions, base_positions, depth, friction, attr_move,
+                       t_is_spring, t_animation_pose_ratio, t_init_scale, t_scale_ratio,
+                       t_distance_lut, power1, csr_offsets, csr_order,
+                       distance_target, distance_rest, sc_dcorr):
+    """Jacobi gather for one distance particle: mean correction over its distance entries
+    (f64 accumulation mirrors oracle np.add.reduceat / run_counts, then cast to f32)."""
+    mt = p_team[p]
+    fix_mass = BONE_SPRING_FIX_MASS if t_is_spring[mt] != 0 else BONE_CLOTH_FIX_MASS
+    anime_ratio = t_animation_pose_ratio[mt]
+    scale = t_init_scale[mt, 0] * t_scale_ratio[mt]
+    depth_p = depth[p]
+    fixed_p = attr_move[p] == 0
+    inv_mass_p = dmath.calc_inverse_mass_fixed(friction[p], depth_p, fixed_p, fix_mass)
+    stiffness = dmath.evaluate_team_lut_clamp01(t_distance_lut, mt, depth_p) * power1
+    npx = next_positions[p, 0]
+    npy = next_positions[p, 1]
+    npz = next_positions[p, 2]
+    bpx = base_positions[p, 0]
+    bpy = base_positions[p, 1]
+    bpz = base_positions[p, 2]
+
+    sumx = float64(0.0)
+    sumy = float64(0.0)
+    sumz = float64(0.0)
+    count_ok = 0
+    start = csr_offsets[p]
+    stop = csr_offsets[p + 1]
+    for k in range(start, stop):
+        r = csr_order[k]
+        tgt = distance_target[r]
+        rest = distance_rest[r]
+        if rest >= float32(0.0):
+            final_stiffness = dmath.saturate(stiffness)
+        else:
+            final_stiffness = dmath.saturate(stiffness * DISTANCE_HORIZONTAL_STIFFNESS)
+        fixed_t = attr_move[tgt] == 0
+        inv_mass_t = dmath.calc_inverse_mass_fixed(friction[tgt], depth[tgt], fixed_t, fix_mass)
+        vx = next_positions[tgt, 0] - npx
+        vy = next_positions[tgt, 1] - npy
+        vz = next_positions[tgt, 2] - npz
+        zero_rest = rest == float32(0.0)
+        distance = dmath.length3(vx, vy, vz)
+        ok = zero_rest or (distance >= EPSILON)
+        base_len = dmath.length3(bpx - base_positions[tgt, 0],
+                                 bpy - base_positions[tgt, 1],
+                                 bpz - base_positions[tgt, 2])
+        rest_length = dmath.lerp(libdevice.fabsf(rest) * scale, base_len, anime_ratio)
+        safe_d = distance if distance > float32(1e-30) else float32(1.0)
+        nx = vx / safe_d
+        ny = vy / safe_d
+        nz = vz / safe_d
+        a = (distance - rest_length) * final_stiffness
+        denom = inv_mass_p + inv_mass_t
+        cxr = a * nx / denom * inv_mass_p
+        cyr = a * ny / denom * inv_mass_p
+        czr = a * nz / denom * inv_mass_p
+        if zero_rest:
+            cxr = vx * float32(0.5)
+            cyr = vy * float32(0.5)
+            czr = vz * float32(0.5)
+        if ok:
+            count_ok += 1
+            sumx += float64(cxr)
+            sumy += float64(cyr)
+            sumz += float64(czr)
+    if count_ok > 0:
+        sc_dcorr[p, 0] = float32(sumx / count_ok)
+        sc_dcorr[p, 1] = float32(sumy / count_ok)
+        sc_dcorr[p, 2] = float32(sumz / count_ok)
+    else:
+        sc_dcorr[p, 0] = float32(0.0)
+        sc_dcorr[p, 1] = float32(0.0)
+        sc_dcorr[p, 2] = float32(0.0)
+
+
 @cuda.jit(cache=True)
 def frame_kernel(phase_mask, sub_begin, sub_end,
                  fdt, sim_dt, max_sim_count, global_time_scale,
@@ -261,16 +344,21 @@ def frame_kernel(phase_mask, sub_begin, sub_end,
                  t_static_friction, t_dynamic_friction, t_particle_speed_limit,
                  t_angular_velocity, t_centrifugal_acceleration, t_rotation_axis,
                  t_now_world_position,
+                 t_is_spring, t_animation_pose_ratio, t_init_scale, t_distance_lut,
                  p_team, p_local_positions, p_local_normals, p_local_tangents,
                  p_skin_indices, p_skin_weights, p_positions, p_rotations,
                  p_next_positions, p_velocity_positions, p_step_basic_positions, p_vertex_root,
                  p_old_anim_positions, p_old_anim_rotations, p_base_positions, p_base_rotations,
                  p_step_basic_rotations, p_depth, p_velocities, p_old_positions, p_friction,
                  p_vertex_root_local, p_collision_normals, p_static_friction, p_real_velocities,
+                 p_attr_move,
                  x_world, x_bind,
                  st_tether_particle, st_tether_team,
                  st_move_particle, st_move_team, st_fixed_particle, st_fixed_team,
-                 st_spring_particle, st_spring_team):
+                 st_spring_particle, st_spring_team,
+                 st_distance_target, st_distance_rest,
+                 csr_distance_offsets, csr_distance_order,
+                 sc_dcorr):
     grid = cg.this_grid()
     tid = cuda.grid(1)
     stride = cuda.gridsize(1)
@@ -568,6 +656,33 @@ def frame_kernel(phase_mask, sub_begin, sub_end,
                 e += stride
         grid.sync()
 
+        # --- S6 distance.run (first occurrence): Jacobi gather -> apply ---
+        if phase_mask & PHASE_DISTANCE_A:
+            p = tid
+            while p < num_particles:
+                mt = p_team[p]
+                if team_frame_mask(t_enabled, t_valid, t_cws, mt) and t_update_count[mt] > _k:
+                    do_distance_gather(p, p_team, p_next_positions, p_base_positions, p_depth,
+                                       p_friction, p_attr_move, t_is_spring, t_animation_pose_ratio,
+                                       t_init_scale, t_scale_ratio, t_distance_lut, power1,
+                                       csr_distance_offsets, csr_distance_order,
+                                       st_distance_target, st_distance_rest, sc_dcorr)
+                p += stride
+        grid.sync()
+        if phase_mask & PHASE_DISTANCE_A:
+            p = tid
+            while p < num_particles:
+                mt = p_team[p]
+                if team_frame_mask(t_enabled, t_valid, t_cws, mt) and t_update_count[mt] > _k:
+                    p_next_positions[p, 0] += sc_dcorr[p, 0]
+                    p_next_positions[p, 1] += sc_dcorr[p, 1]
+                    p_next_positions[p, 2] += sc_dcorr[p, 2]
+                    p_velocity_positions[p, 0] += sc_dcorr[p, 0] * DISTANCE_VELOCITY_ATTENUATION
+                    p_velocity_positions[p, 1] += sc_dcorr[p, 1] * DISTANCE_VELOCITY_ATTENUATION
+                    p_velocity_positions[p, 2] += sc_dcorr[p, 2] * DISTANCE_VELOCITY_ATTENUATION
+                p += stride
+        grid.sync()
+
         # --- S13 particles.step_post PASS 1: friction / limit / centrifugal (move set) ---
         if phase_mask & PHASE_STEP_POST:
             e = tid
@@ -735,6 +850,7 @@ TEAM_KERNEL_FIELDS = (
     "static_friction", "dynamic_friction", "particle_speed_limit",
     "angular_velocity", "centrifugal_acceleration", "rotation_axis",
     "now_world_position",
+    "is_spring", "animation_pose_ratio", "init_scale", "distance_lut",
 )
 
 PARTICLE_KERNEL_FIELDS = (
@@ -744,6 +860,7 @@ PARTICLE_KERNEL_FIELDS = (
     "old_anim_positions", "old_anim_rotations", "base_positions", "base_rotations",
     "step_basic_rotations", "depth", "velocities", "old_positions", "friction",
     "vertex_root_local", "collision_normals", "static_friction", "real_velocities",
+    "attr_move",
 )
 
 TRANSFORM_KERNEL_FIELDS = ("world", "bind_pose")
@@ -758,4 +875,11 @@ STATIC_KERNEL_FIELDS = (
     ("fixed_team", "update_fixed", "team"),
     ("spring_particle", "spring", "particle"),
     ("spring_team", "spring", "team"),
+    ("distance_target", "distance", "target"),
+    ("distance_rest", "distance", "rest"),
+)
+
+# CSR gather tables (offsets + order uploaded from a program CsrTable attribute)
+STATIC_CSR_FIELDS = (
+    ("distance_csr_offsets", "distance_csr_order", "distance_csr"),
 )
