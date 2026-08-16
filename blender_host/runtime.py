@@ -1,0 +1,676 @@
+import math
+import zlib
+
+import numpy as np
+
+import bpy
+from bpy.app.handlers import persistent
+
+from . import armature
+from . import curve_host
+from ..cloth_kernel import compile as kernel_compile
+from ..cloth_kernel import defs
+from ..cloth_kernel import io as kernel_io
+from ..cloth_kernel import pipeline
+from ..cloth_kernel import world as kernel_world
+
+_world = kernel_world.World()
+_registry = {}
+_basis_store = {}
+_last_frame = None
+
+NORMAL_AXIS_VECTORS = {
+    'RIGHT': (1.0, 0.0, 0.0),
+    'UP': (0.0, 1.0, 0.0),
+    'FORWARD': (0.0, 0.0, 1.0),
+    'INVERSE_RIGHT': (-1.0, 0.0, 0.0),
+    'INVERSE_UP': (0.0, -1.0, 0.0),
+    'INVERSE_FORWARD': (0.0, 0.0, -1.0),
+}
+
+COLLISION_MODE_VALUES = {'NONE': defs.COLLISION_NONE, 'POINT': defs.COLLISION_POINT,
+                         'EDGE': defs.COLLISION_EDGE}
+SELF_MODE_VALUES = {'NONE': defs.SELF_MODE_NONE, 'FULL_MESH': defs.SELF_MODE_FULL_MESH}
+TELEPORT_MODE_VALUES = {'NONE': defs.TELEPORT_NONE, 'RESET': defs.TELEPORT_RESET,
+                        'KEEP': defs.TELEPORT_KEEP}
+FORCE_MODE_VALUES = {'VELOCITY_ADD': defs.FORCE_VELOCITY_ADD,
+                     'VELOCITY_ADD_WITHOUT_DEPTH': defs.FORCE_VELOCITY_ADD_WITHOUT_DEPTH,
+                     'VELOCITY_CHANGE': defs.FORCE_VELOCITY_CHANGE,
+                     'VELOCITY_CHANGE_WITHOUT_DEPTH': defs.FORCE_VELOCITY_CHANGE_WITHOUT_DEPTH}
+
+
+class ColliderBinding:
+    def __init__(self):
+        self.count = 0
+        self.kinds = np.zeros(0, dtype=np.int32)
+        self.bone_names = []
+        self.centers = np.zeros((0, 3), dtype=np.float32)
+        self.sizes = np.zeros((0, 3), dtype=np.float32)
+        self.axes = np.zeros((0, 3), dtype=np.float32)
+        self.aligned = np.zeros(0, dtype=bool)
+        self.token = ()
+
+
+class RuntimeEntry:
+    def __init__(self):
+        self.team = None
+        self.setup = None
+        self.kinematics = None
+        self.binding = None
+        self.topology_token = None
+        self.collider_token = None
+        self.collider_serial = -1
+        self.params_token = None
+        self.host = None
+        self.write_mask = None
+        self.position_mask = None
+        self.culling_invisible = False
+
+
+def get_world():
+    return _world
+
+
+def clear_registry():
+    for entry in _registry.values():
+        if entry.team is not None:
+            _world.unregister_team(entry.team)
+    _registry.clear()
+    _basis_store.clear()
+    global _last_frame
+    _last_frame = None
+
+
+def get_entry(obj, config_index):
+    return _registry.get((obj.session_uid, config_index))
+
+
+def iter_entries(scene):
+    for obj in scene.objects:
+        if obj.type != 'ARMATURE':
+            continue
+        settings = getattr(obj, "ruri_cloth_physics", None)
+        if settings is None:
+            continue
+        for index in range(len(settings.configs)):
+            entry = _registry.get((obj.session_uid, index))
+            if entry is not None and entry.team is not None:
+                yield obj, index, entry
+
+
+def request_reset(obj, mode):
+    for (uid, index), entry in _registry.items():
+        if uid != obj.session_uid or entry.team is None:
+            continue
+        _world.request_reset(entry.team, mode)
+
+
+def add_force(obj, config_index, force_direction, force_velocity, force_mode='VELOCITY_ADD'):
+    entry = _registry.get((obj.session_uid, config_index))
+    if entry is None or entry.team is None:
+        return
+    direction = np.array(force_direction, dtype=np.float32)
+    length = float(np.linalg.norm(direction))
+    mode = FORCE_MODE_VALUES.get(force_mode, defs.FORCE_NONE)
+    if length <= 0.0 or force_velocity <= 0.0 or mode == defs.FORCE_NONE:
+        return
+    _world.add_force(entry.team, mode, direction / length * force_velocity)
+
+
+def notify_config_enabled_changed(obj, config_index):
+    settings = obj.ruri_cloth_physics
+    if config_index >= len(settings.configs):
+        return
+    config = settings.configs[config_index]
+    entry = _registry.get((obj.session_uid, config_index))
+    if config.enabled:
+        if entry is not None and entry.team is not None and config.disable_mode == 'RESET':
+            _world.request_reset(entry.team, 'FULL')
+    else:
+        if entry is not None and entry.setup is not None and config.disable_mode == 'RESET':
+            _restore_pose(obj, entry.setup)
+
+
+def _restore_pose(obj, setup):
+    store = _basis_store.get(obj.session_uid, {})
+    animated = armature.collect_animated_bone_names(obj)
+    pose_bones = obj.pose.bones
+    for name in setup.bone_names:
+        if name in animated:
+            continue
+        captured = store.get(name)
+        pose_bone = pose_bones.get(name)
+        if captured is not None and pose_bone is not None:
+            pose_bone.matrix_basis = captured.tolist()
+
+
+def _topology_token(config):
+    return (
+        config.cloth_type,
+        config.connection_mode,
+        tuple(item.bone for item in config.root_bones),
+        tuple((o.bone, o.attribute, o.disable_collision, o.exclude_motion)
+              for o in config.attribute_overrides),
+        tuple(item.bone for item in config.collider_collision.collision_bones),
+        config.custom_skinning_enable,
+        tuple(item.bone for item in config.skinning_bones),
+        config.normal_alignment_mode,
+        config.normal_alignment_object.name if config.normal_alignment_object else "",
+        config.normal_alignment_bone,
+        tuple(np.round(np.array(config.gravity_direction, dtype=np.float64), 6)),
+    )
+
+
+def _params_token(obj, config):
+    curves = (
+        curve_host.curve_content_token(config.damping),
+        curve_host.curve_content_token(config.radius),
+        curve_host.curve_content_token(config.distance.stiffness),
+        curve_host.curve_content_token(config.angle_restoration.stiffness),
+        curve_host.curve_content_token(config.angle_limit.limit_angle),
+        curve_host.curve_content_token(config.motion.max_distance),
+        curve_host.curve_content_token(config.motion.backstop_distance),
+        curve_host.curve_content_token(config.collider_collision.limit_distance),
+        curve_host.curve_content_token(config.self_collision.surface_thickness),
+    )
+    return (obj.ruri_cloth_physics.param_serial, curves)
+
+
+def _build_params(config):
+    is_spring = config.cloth_type == 'BONE_SPRING'
+    gravity_direction = np.array(config.gravity_direction, dtype=np.float32)
+    length = float(np.linalg.norm(gravity_direction))
+    gravity_direction = gravity_direction / length if length > defs.EPSILON \
+        else np.zeros(3, dtype=np.float32)
+
+    collision = config.collider_collision
+    if is_spring:
+        collision_mode = defs.COLLISION_POINT
+        dynamic_friction = defs.BONE_SPRING_COLLISION_FRICTION
+        static_friction = defs.BONE_SPRING_COLLISION_FRICTION
+        distance_lut = np.full(defs.CURVE_LUT_SAMPLES, defs.BONE_SPRING_DISTANCE_STIFFNESS,
+                               dtype=np.float32)
+        tether_compression = defs.BONE_SPRING_TETHER_COMPRESSION_LIMIT
+        use_max_distance = False
+        use_backstop = False
+        gravity = 0.0
+        self_mode = defs.SELF_MODE_NONE
+        sync_mode = defs.SELF_MODE_NONE
+    else:
+        collision_mode = COLLISION_MODE_VALUES[collision.mode]
+        dynamic_friction = collision.friction * defs.COLLIDER_DYNAMIC_FRICTION_RATIO
+        static_friction = collision.friction * defs.COLLIDER_STATIC_FRICTION_RATIO
+        distance_lut = curve_host.get_lut(config.distance.stiffness)
+        tether_compression = config.tether.distance_compression
+        use_max_distance = config.motion.use_max_distance
+        use_backstop = config.motion.use_backstop
+        gravity = config.gravity
+        self_mode = SELF_MODE_VALUES[config.self_collision.self_mode]
+        sync_mode = SELF_MODE_VALUES[config.self_collision.sync_mode]
+
+    inertia = config.inertia
+    return {
+        "gravity": gravity,
+        "gravity_direction": gravity_direction,
+        "gravity_falloff": config.gravity_falloff,
+        "stablization_time": config.stablization_time,
+        "blend_weight_param": config.blend_weight,
+        "damping_lut": curve_host.get_lut(config.damping) * 0.2,
+        "radius_lut": curve_host.get_lut(config.radius),
+        "normal_axis_vector": NORMAL_AXIS_VECTORS[config.normal_axis],
+        "rotational_interpolation": config.rotational_interpolation,
+        "root_rotation": config.root_rotation,
+        "animation_pose_ratio": config.animation_pose_ratio,
+        "time_scale": config.time_scale,
+        "tether_compression": tether_compression,
+        "distance_lut": distance_lut,
+        "bending_stiffness": 0.0 if is_spring else config.triangle_bending.stiffness,
+        "angle_use_restoration": config.angle_restoration.use,
+        "angle_restoration_lut": curve_host.get_lut(config.angle_restoration.stiffness) * 0.2,
+        "angle_restoration_attenuation": config.angle_restoration.velocity_attenuation,
+        "angle_restoration_gravity_falloff": 0.0 if is_spring else config.angle_restoration.gravity_falloff,
+        "angle_use_limit": config.angle_limit.use,
+        "angle_limit_lut": curve_host.get_lut(config.angle_limit.limit_angle),
+        "angle_limit_stiffness": config.angle_limit.stiffness,
+        "motion_use_max_distance": use_max_distance,
+        "motion_max_distance_lut": curve_host.get_lut(config.motion.max_distance),
+        "motion_use_backstop": use_backstop,
+        "motion_backstop_radius": config.motion.backstop_radius,
+        "motion_backstop_lut": curve_host.get_lut(config.motion.backstop_distance),
+        "motion_stiffness": config.motion.stiffness,
+        "collision_mode": collision_mode,
+        "dynamic_friction": dynamic_friction,
+        "static_friction": static_friction,
+        "limit_distance_lut": curve_host.get_lut(collision.limit_distance),
+        "self_mode": self_mode,
+        "sync_mode": sync_mode,
+        "self_thickness_lut": curve_host.get_lut(config.self_collision.surface_thickness),
+        "self_cloth_mass": config.self_collision.cloth_mass,
+        "anchor_inertia": inertia.anchor_inertia,
+        "world_inertia": inertia.world_inertia,
+        "movement_inertia_smoothing": inertia.movement_inertia_smoothing,
+        "movement_speed_limit": inertia.movement_speed_limit.value if inertia.movement_speed_limit.use else -1.0,
+        "rotation_speed_limit": inertia.rotation_speed_limit.value if inertia.rotation_speed_limit.use else -1.0,
+        "local_inertia": inertia.local_inertia,
+        "local_movement_speed_limit": inertia.local_movement_speed_limit.value if inertia.local_movement_speed_limit.use else -1.0,
+        "local_rotation_speed_limit": inertia.local_rotation_speed_limit.value if inertia.local_rotation_speed_limit.use else -1.0,
+        "depth_inertia": inertia.depth_inertia,
+        "centrifugal_acceleration": inertia.centrifugal_acceleration,
+        "particle_speed_limit": inertia.particle_speed_limit.value if inertia.particle_speed_limit.use else -1.0,
+        "teleport_mode": TELEPORT_MODE_VALUES[inertia.teleport_mode],
+        "teleport_distance": inertia.teleport_distance,
+        "teleport_rotation": inertia.teleport_rotation,
+        "wind_influence": config.wind.influence,
+        "wind_frequency": config.wind.frequency,
+        "wind_turbulence": config.wind.turbulence,
+        "wind_blend": config.wind.blend,
+        "wind_synchronization": config.wind.synchronization,
+        "wind_depth_weight": config.wind.depth_weight,
+        "wind_moving": config.wind.moving_wind,
+        "spring_power": config.spring.spring_power if (is_spring and config.spring.use_spring) else 0.0,
+        "spring_limit_distance": config.spring.limit_distance,
+        "spring_normal_limit_ratio": config.spring.normal_limit_ratio,
+        "spring_noise": config.spring.noise,
+    }
+
+
+_AXIS_VECTORS = {
+    'X': np.array([1.0, 0.0, 0.0], dtype=np.float32),
+    'Y': np.array([0.0, 1.0, 0.0], dtype=np.float32),
+    'Z': np.array([0.0, 0.0, 1.0], dtype=np.float32),
+}
+
+KIND_VALUES = {'SPHERE': defs.COLLIDER_SPHERE, 'CAPSULE': defs.COLLIDER_CAPSULE,
+               'PLANE': defs.COLLIDER_PLANE}
+
+
+def build_collider_binding(obj, config):
+    binding = ColliderBinding()
+    pool = obj.ruri_cloth_physics.colliders
+    kinds = []
+    bone_names = []
+    centers = []
+    sizes = []
+    axes = []
+    aligned = []
+    token = []
+    for reference in config.collider_collision.collider_references:
+        item = pool.get(reference.collider) if reference.collider else None
+        if item is None or not item.enabled:
+            continue
+        if item.shape == 'SPHERE':
+            kind = defs.COLLIDER_SPHERE
+            size = (item.radius, item.radius, 0.0)
+        elif item.shape == 'CAPSULE':
+            kind = defs.COLLIDER_CAPSULE
+            if item.radius_separation:
+                size = (item.start_radius, item.end_radius, item.length)
+            else:
+                size = (item.start_radius, item.start_radius, item.length)
+        else:
+            kind = defs.COLLIDER_PLANE
+            size = (0.0, 0.0, 0.0)
+        axis = _AXIS_VECTORS[item.direction] * (-1.0 if item.reverse_direction else 1.0)
+        kinds.append(kind)
+        bone_names.append(item.bone)
+        centers.append(tuple(item.center))
+        sizes.append(size)
+        axes.append(axis)
+        aligned.append(item.aligned_on_center)
+        token.append((item.name, item.shape, item.bone, tuple(item.center), size,
+                      item.direction, item.reverse_direction, item.aligned_on_center))
+
+    binding.count = len(kinds)
+    binding.kinds = np.array(kinds, dtype=np.int32)
+    binding.bone_names = bone_names
+    binding.centers = np.array(centers, dtype=np.float32).reshape(-1, 3)
+    binding.sizes = np.array(sizes, dtype=np.float32).reshape(-1, 3)
+    binding.axes = np.array(axes, dtype=np.float32).reshape(-1, 3)
+    binding.aligned = np.array(aligned, dtype=bool)
+    binding.token = tuple(token)
+    return binding
+
+
+def ensure_entry(obj, config_index, config):
+    key = (obj.session_uid, config_index)
+    entry = _registry.get(key)
+    if entry is None:
+        entry = RuntimeEntry()
+        _registry[key] = entry
+
+    token = _topology_token(config)
+    if entry.setup is None or entry.topology_token != token or config.rebuild_pending:
+        if entry.team is not None:
+            _world.unregister_team(entry.team)
+            entry.team = None
+        cache_key = (obj.session_uid, config_index, token)
+        if config.rebuild_pending:
+            kernel_compile._cache.pop(cache_key, None)
+        snapshot = armature.build_snapshot(obj, config)
+        snapshot.token = cache_key
+        snapshot.wind_seed = 1 + (zlib.crc32(obj.name.encode("utf-8")) + config_index) % 997
+        setup = kernel_compile.build_setup(snapshot)
+        entry.topology_token = token
+        config.rebuild_pending = False
+        if not setup.valid:
+            entry.setup = None
+            entry.kinematics = None
+            return entry
+        entry.setup = setup
+        entry.kinematics = armature.KinematicsHost(setup)
+        entry.binding = build_collider_binding(obj, config)
+        entry.collider_token = entry.binding.token
+        entry.collider_serial = obj.ruri_cloth_physics.collider_serial
+        entry.params_token = None
+        attrs = setup.attributes
+        invalid = ((attrs & defs.ATTR_MOVE) == 0) & ((attrs & defs.ATTR_FIXED) == 0)
+        move = (attrs & defs.ATTR_MOVE) != 0
+        entry.write_mask = ~invalid
+        entry.position_mask = (move | setup.is_spring) & ~invalid
+        params = _build_params(config)
+        entry.params_token = _params_token(obj, config)
+        entry.team = _world.register_team(setup, params, entry.binding)
+        store = _basis_store.setdefault(obj.session_uid, {})
+        animated = armature.collect_animated_bone_names(obj)
+        entry.kinematics.capture_missing_basis(obj, animated, store)
+    elif entry.team is not None:
+        if entry.collider_serial != obj.ruri_cloth_physics.collider_serial:
+            binding = build_collider_binding(obj, config)
+            if binding.token != entry.collider_token:
+                entry.binding = binding
+                entry.collider_token = binding.token
+                _world.update_colliders(entry.team, binding)
+            entry.collider_serial = obj.ruri_cloth_physics.collider_serial
+
+    if entry.team is not None:
+        token = _params_token(obj, config)
+        if entry.params_token != token:
+            _world.update_params(entry.team, _build_params(config))
+            entry.params_token = token
+    return entry
+
+
+def _component_pose(obj):
+    world = armature.read_matrix(obj.matrix_world)
+    rotation = armature.matrix_to_quat(world)
+    r3 = armature.quat_to_matrix3(rotation)
+    signed = np.diag(r3.T @ world[:3, :3])
+    return world[:3, 3].astype(np.float32), rotation.astype(np.float32), signed.astype(np.float32)
+
+
+def _anchor_world(obj, config):
+    inertia = config.inertia
+    anchor = inertia.anchor_object
+    if anchor is None:
+        return None
+    if inertia.anchor_bone and anchor.type == 'ARMATURE':
+        world = armature.evaluate_live_bone_world(anchor, inertia.anchor_bone)
+        if world is None:
+            world = armature.read_matrix(anchor.matrix_world)
+    else:
+        world = armature.read_matrix(anchor.matrix_world)
+    return (world[:3, 3].astype(np.float32),
+            armature.matrix_to_quat(world).astype(np.float32))
+
+
+def _viewer_position(scene, config):
+    reference = config.culling.distance_culling_reference_object
+    if reference is not None:
+        return armature.read_matrix(reference.matrix_world)[:3, 3]
+    try:
+        for window in bpy.context.window_manager.windows:
+            for area in window.screen.areas:
+                if area.type == 'VIEW_3D':
+                    for space in area.spaces:
+                        if space.type == 'VIEW_3D' and space.region_3d is not None:
+                            view = np.array(space.region_3d.view_matrix.inverted(),
+                                            dtype=np.float64)
+                            return view[:3, 3]
+    except (AttributeError, RuntimeError):
+        pass
+    if scene.camera is not None:
+        return armature.read_matrix(scene.camera.matrix_world)[:3, 3]
+    return None
+
+
+def _evaluate_culling(obj, entry, config, scene):
+    invisible = False
+    mode = config.culling.camera_culling_mode
+    if mode != 'OFF':
+        try:
+            visible = obj.visible_get()
+        except RuntimeError:
+            visible = True
+        if not visible:
+            invisible = True
+
+    distance_weight = 1.0
+    distance_use = config.culling.distance_culling_length.use
+    if distance_use:
+        viewer = _viewer_position(scene, config)
+        if viewer is not None:
+            component = armature.read_matrix(obj.matrix_world)[:3, 3]
+            dist = float(np.linalg.norm(component - viewer))
+            length = config.culling.distance_culling_length.value
+            if dist >= length:
+                invisible = True
+            fade = min(max(config.culling.distance_culling_fade_ratio, 0.0), 1.0) * length
+            if fade > 0.0:
+                distance_weight = 1.0 - min(max((dist - (length - fade)) / fade, 0.0), 1.0)
+            else:
+                distance_weight = 0.0 if dist >= length else 1.0
+
+    was_invisible = entry.culling_invisible
+    entry.culling_invisible = invisible
+    if invisible != was_invisible and not invisible:
+        if distance_use or mode == 'RESET':
+            _world.request_reset(entry.team, 'FULL')
+        elif mode == 'KEEP':
+            _world.request_reset(entry.team, 'KEEP')
+    return invisible, distance_weight
+
+
+def _gather_wind_zones(scene):
+    zones = []
+    for obj in scene.objects:
+        wind = getattr(obj, "ruri_cloth_physics_wind", None)
+        if wind is None or not wind.is_wind_zone or not wind.enabled:
+            continue
+        if obj.hide_viewport:
+            continue
+        zone = kernel_io.WindZoneInput()
+        zone.zone_id = obj.session_uid
+        zone.mode = wind.mode
+        zone.main = wind.main
+        zone.turbulence = wind.turbulence
+        zone.is_addition = wind.is_addition
+        world = armature.read_matrix(obj.matrix_world)
+        zone.world_position = world[:3, 3].astype(np.float32)
+        zone.world_to_local = np.linalg.inv(world)
+        zone.world_scale = armature.matrix_scale(world).astype(np.float32)
+
+        if wind.mode == 'BOX_DIRECTION':
+            zone.size = np.array(wind.size, dtype=np.float32)
+            g = zone.size * zone.world_scale
+            zone.zone_volume = float(g[0] * g[1] * g[2])
+        elif wind.mode in {'SPHERE_DIRECTION', 'SPHERE_RADIAL'}:
+            zone.size = np.full(3, wind.radius, dtype=np.float32)
+            r = wind.radius * float(zone.world_scale[0])
+            zone.zone_volume = (4.0 / 3.0) * r * r * r * math.pi
+        else:
+            zone.zone_volume = float("inf")
+
+        if wind.mode == 'SPHERE_RADIAL':
+            zone.attenuation_lut = curve_host.get_lut(wind.attenuation)
+        else:
+            from ..cloth_kernel import math as pm
+            angle_x = math.radians(wind.direction_angle_x)
+            angle_y = math.radians(wind.direction_angle_y)
+            local_q = pm.euler_yx(np.float32(angle_x), np.float32(angle_y))
+            local_dir = pm.quat_to_tangent(local_q[None])[0]
+            rotation = armature.matrix_to_quat(world).astype(np.float32)
+            zone.world_direction = pm.quat_rotate(rotation[None], local_dir[None])[0]
+            length = np.linalg.norm(zone.world_direction)
+            if length > 1e-30:
+                zone.world_direction = (zone.world_direction / length).astype(np.float32)
+        zones.append(zone)
+    return zones
+
+
+def _active_armatures(scene):
+    result = []
+    for obj in scene.objects:
+        if obj.type != 'ARMATURE':
+            continue
+        settings = getattr(obj, "ruri_cloth_physics", None)
+        if settings is None or not settings.live or len(settings.configs) == 0:
+            continue
+        result.append(obj)
+    result.sort(key=lambda o: o.name)
+    return result
+
+
+def run_frame(scene, frame_delta_time):
+    scene_settings = scene.ruri_cloth_physics
+    frame_globals = kernel_io.FrameGlobals()
+    frame_globals.frame_delta_time = frame_delta_time
+    frame_globals.simulation_frequency = int(scene_settings.simulation_frequency)
+    frame_globals.max_simulation_count = int(scene_settings.max_simulation_count)
+    frame_globals.global_time_scale = scene_settings.global_time_scale
+    frame_globals.frame_index = scene.frame_current
+    frame_globals.zones = None
+
+    collected = []
+    name_maps = {}
+    for obj in _active_armatures(scene):
+        settings = obj.ruri_cloth_physics
+        if frame_globals.zones is None:
+            frame_globals.zones = _gather_wind_zones(scene)
+
+        matrix_world = armature.read_matrix(obj.matrix_world)
+        matrix_world_inverse = np.linalg.inv(matrix_world)
+        animated = armature.collect_animated_bone_names(obj)
+        store = _basis_store.setdefault(obj.session_uid, {})
+        component_position, component_rotation, component_scale = _component_pose(obj)
+        name_map = {}
+        name_maps[obj.session_uid] = name_map
+
+        for index, config in enumerate(settings.configs):
+            if not config.enabled:
+                continue
+            entry = ensure_entry(obj, index, config)
+            if entry.setup is None or entry.team is None:
+                continue
+            invisible, distance_weight = _evaluate_culling(obj, entry, config, scene)
+            if invisible:
+                continue
+
+            setup = entry.setup
+            kin = entry.kinematics
+            basis = kin.gather_basis(obj, animated, store)
+            anim_pose = kin.compute_pose(obj, basis)
+            anim_world = kin.world_from_pose(matrix_world, anim_pose)
+
+            n = len(setup.bone_names)
+            transform_count = len(setup.transform_names)
+            transform_worlds = np.empty((transform_count, 4, 4))
+            transform_worlds[:n] = anim_world
+            for extra in range(n, transform_count):
+                world = armature.evaluate_live_bone_world(obj, setup.transform_names[extra])
+                transform_worlds[extra] = world if world is not None else matrix_world
+
+            anchor = _anchor_world(obj, config)
+            kernel_io.set_team_frame_input(_world, entry.team, component_position,
+                                           component_rotation, component_scale, anchor,
+                                           invisible, distance_weight, 0)
+            kernel_io.set_team_transform_worlds(_world, entry.team, transform_worlds)
+
+            binding = entry.binding
+            if binding.count:
+                import mathutils
+                positions = np.zeros((binding.count, 3), dtype=np.float32)
+                rotations = np.zeros((binding.count, 4), dtype=np.float32)
+                scales = np.ones((binding.count, 3), dtype=np.float32)
+                enabled = np.ones(binding.count, dtype=bool)
+                pose_bones = obj.pose.bones
+                for k in range(binding.count):
+                    name = binding.bone_names[k]
+                    pose_bone = pose_bones.get(name) if name else None
+                    if pose_bone is not None:
+                        world = obj.matrix_world @ pose_bone.matrix
+                    else:
+                        world = obj.matrix_world
+                    location, rotation, scale = world.decompose()
+                    positions[k] = (location.x, location.y, location.z)
+                    rotations[k] = (rotation.x, rotation.y, rotation.z, rotation.w)
+                    scales[k] = (scale.x, scale.y, scale.z)
+                kernel_io.set_team_collider_input(_world, entry.team, positions, rotations,
+                                                  scales, enabled)
+
+            name_map[config.name] = entry.team
+            collected.append((entry, obj, config, anim_world, matrix_world_inverse,
+                              obj.session_uid))
+
+    for entry, obj, config, anim_world, matrix_world_inverse, uid in collected:
+        partner_name = config.self_collision.sync_partner
+        partner = 0
+        if partner_name and partner_name != config.name:
+            partner = name_maps.get(uid, {}).get(partner_name, 0)
+            if partner == entry.team:
+                partner = 0
+        _world.team["sync_target"][entry.team] = partner
+
+    if frame_globals.zones is None:
+        frame_globals.zones = []
+    pipeline.run_frame(_world, frame_globals)
+
+    for entry, obj, config, anim_world, matrix_world_inverse, uid in collected:
+        out_positions, out_rotations = kernel_io.team_output(_world, entry.team)
+        entry.kinematics.write_back(obj, out_positions.astype(np.float64), out_rotations,
+                                    entry.write_mask, entry.position_mask, anim_world,
+                                    matrix_world_inverse)
+
+
+@persistent
+def _on_frame_change_post(scene, depsgraph=None):
+    global _last_frame
+    if scene is None:
+        return
+    frame = scene.frame_current
+    fps = scene.render.fps / scene.render.fps_base
+
+    if _last_frame is None or frame <= _last_frame:
+        for entry in _registry.values():
+            if entry.team is not None:
+                _world.request_reset(entry.team, 'FULL')
+        _last_frame = frame
+        delta = 1.0 / fps
+    else:
+        delta = (frame - _last_frame) / fps
+        _last_frame = frame
+
+    try:
+        run_frame(scene, delta)
+    except Exception:
+        import traceback
+        traceback.print_exc()
+
+
+@persistent
+def _on_load_post(*args):
+    clear_registry()
+
+
+def register():
+    if _on_frame_change_post not in bpy.app.handlers.frame_change_post:
+        bpy.app.handlers.frame_change_post.append(_on_frame_change_post)
+    if _on_load_post not in bpy.app.handlers.load_post:
+        bpy.app.handlers.load_post.append(_on_load_post)
+
+
+def unregister():
+    if _on_frame_change_post in bpy.app.handlers.frame_change_post:
+        bpy.app.handlers.frame_change_post.remove(_on_frame_change_post)
+    if _on_load_post in bpy.app.handlers.load_post:
+        bpy.app.handlers.load_post.remove(_on_load_post)
+    clear_registry()
