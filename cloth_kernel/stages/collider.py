@@ -272,64 +272,49 @@ def _solve_point(world, ctx):
     push = dist <= 0.0
     near = dist <= cfr
 
-    add_sum = pa["work_sum"]
-    add_normal = pa["work_sum2"]
-    add_count = pa["work_count"]
-    near_normal = pa["self_sum"]
-    near_count = pa["self_count"]
-    min_dist = pa["work_min"]
+    run_starts = np.flatnonzero(np.concatenate(([True], p[1:] != p[:-1])))
+    touched = p[run_starts]
 
-    touched = np.unique(p)
-    min_dist[touched] = np.inf
+    push_indicator = push.astype(np.float64)
+    near_indicator = near.astype(np.float64)
+    push_position_rows = (out_pos - next_pos).astype(np.float64) * push_indicator[:, None]
+    push_normal_rows = normal.astype(np.float64) * push_indicator[:, None]
+    near_normal_rows = normal.astype(np.float64) * near_indicator[:, None]
+    dist_for_min = np.where(near, dist, np.inf)
 
-    push_index = np.flatnonzero(push)
-    np.add.at(add_sum, p[push_index], out_pos[push_index] - next_pos[push_index])
-    np.add.at(add_normal, p[push_index], normal[push_index])
-    np.add.at(add_count, p[push_index], 1)
-    near_index = np.flatnonzero(near)
-    np.add.at(near_normal, p[near_index], normal[near_index])
-    np.add.at(near_count, p[near_index], 1)
-    np.minimum.at(min_dist, p[near_index], dist[near_index])
+    count = np.add.reduceat(push_indicator, run_starts)
+    position_sum = np.add.reduceat(push_position_rows, run_starts, axis=0)
+    normal_sum = np.add.reduceat(push_normal_rows, run_starts, axis=0)
+    near_normal_total = np.add.reduceat(near_normal_rows, run_starts, axis=0)
+    near_count = np.add.reduceat(near_indicator, run_starts)
+    min_dist = np.minimum.reduceat(dist_for_min, run_starts)
 
-    unique_team = pa["team"][touched]
-    unique_depth = pa["depth"][touched]
-    unique_radius = np.maximum(pm.evaluate_team_lut(tt["radius_lut"], unique_team, unique_depth),
-                               0.0001) * tt["scale_ratio"][unique_team]
-    unique_cfr = unique_radius * 1.0
+    unique_cfr = cfr[run_starts]
+    segment_is_spring = is_spring[run_starts]
 
-    count = add_count[touched]
     has_push = count > 0
-    safe_count = np.maximum(count, 1)[:, None].astype(np.float32)
-    normal_avg = (add_normal[touched] / safe_count).astype(np.float32)
+    safe_count = np.maximum(count, 1.0)[:, None].astype(np.float32)
+    normal_avg = (normal_sum / safe_count).astype(np.float32)
     normal_length = pm.length(normal_avg)
-    pos_avg = (add_sum[touched] / safe_count).astype(np.float32)
+    pos_avg = (position_sum / safe_count).astype(np.float32)
     t = np.minimum(normal_length, 1.0)
     valid_push = has_push & (normal_length >= defs.EPSILON)
     delta = np.where(valid_push[:, None], pos_avg * t[:, None], 0.0)
     pa["next_positions"][touched] += delta
 
-    near_normal_sum = near_normal[touched].astype(np.float32)
-    md = min_dist[touched]
-    has_near = (near_count[touched] > 0) & (unique_cfr > 0.0) \
+    near_normal_sum = near_normal_total.astype(np.float32)
+    has_near = (near_count > 0) & (unique_cfr > 0.0) \
         & (pm.length(near_normal_sum) ** 2 > 1e-6)
-    friction = 1.0 - pm.saturate(np.where(np.isfinite(md), md, 0.0)
+    friction = 1.0 - pm.saturate(np.where(np.isfinite(min_dist), min_dist, 0.0)
                                  / np.where(unique_cfr > 0, unique_cfr, 1.0))
     old_friction = pa["friction"][touched]
     pa["friction"][touched] = np.where(has_near, np.maximum(friction, old_friction), old_friction)
     near_out = np.where(has_near[:, None], pm.normalize(near_normal_sum), near_normal_sum)
     pa["collision_normals"][touched] = near_out
 
-    spring_touched = tt["is_spring"][unique_team]
-    if np.any(spring_touched):
-        spring_delta = np.where((has_push & spring_touched)[:, None], pos_avg, 0.0)
+    if np.any(segment_is_spring):
+        spring_delta = np.where((has_push & segment_is_spring)[:, None], pos_avg, 0.0)
         pa["velocity_positions"][touched] += spring_delta
-
-    add_sum[touched] = 0.0
-    add_normal[touched] = 0.0
-    add_count[touched] = 0
-    near_normal[touched] = 0.0
-    near_count[touched] = 0
-    min_dist[touched] = 0.0
 
 
 def _pair_overlap(box_min, box_max, ca, colliders):
@@ -410,99 +395,77 @@ def _solve_edge(world, ctx):
     push = dist <= 0.0
     near = dist <= cfr
 
-    capacity = world.collision_edges.capacity
-    edge_count = np.zeros(capacity, dtype=np.int64)
-    edge_pos0 = np.zeros((capacity, 3), dtype=np.float64)
-    edge_pos1 = np.zeros((capacity, 3), dtype=np.float64)
-    edge_normal = np.zeros((capacity, 3), dtype=np.float64)
-    edge_near_normal = np.zeros((capacity, 3), dtype=np.float64)
-    edge_min_dist = np.full(capacity, np.inf, dtype=np.float32)
-    edge_near_count = np.zeros(capacity, dtype=np.int64)
+    edge_run_starts = np.flatnonzero(np.concatenate(([True], edge_entry[1:] != edge_entry[:-1])))
+    ue0 = e0[edge_run_starts]
+    ue1 = e1[edge_run_starts]
+    ucfr = cfr[edge_run_starts]
 
-    push_index = np.flatnonzero(push)
-    np.add.at(edge_count, edge_entry[push_index], 1)
-    np.add.at(edge_pos0, edge_entry[push_index], corr0[push_index])
-    np.add.at(edge_pos1, edge_entry[push_index], corr1[push_index])
-    np.add.at(edge_normal, edge_entry[push_index], normal[push_index])
-    near_index = np.flatnonzero(near)
-    np.add.at(edge_near_normal, edge_entry[near_index], normal[near_index])
-    np.add.at(edge_near_count, edge_entry[near_index], 1)
-    np.minimum.at(edge_min_dist, edge_entry[near_index], dist[near_index])
+    push_indicator = push.astype(np.float64)
+    near_indicator = near.astype(np.float64)
+    edge_pos0_rows = corr0.astype(np.float64) * push_indicator[:, None]
+    edge_pos1_rows = corr1.astype(np.float64) * push_indicator[:, None]
+    edge_normal_rows = normal.astype(np.float64) * push_indicator[:, None]
+    edge_near_normal_rows = normal.astype(np.float64) * near_indicator[:, None]
+    dist_for_min = np.where(near, dist, np.inf)
 
-    unique_edges = np.unique(edge_entry)
-    ue = world.collision_edges["edge"][unique_edges]
-    ue0 = ue[:, 0]
-    ue1 = ue[:, 1]
-    ut = world.collision_edges["team"][unique_edges]
-    ud0 = pa["depth"][ue0]
-    ud1 = pa["depth"][ue1]
-    ur0 = pm.evaluate_team_lut(tt["radius_lut"], ut, ud0) * tt["scale_ratio"][ut]
-    ur1 = pm.evaluate_team_lut(tt["radius_lut"], ut, ud1) * tt["scale_ratio"][ut]
-    ucfr = (ur0 + ur1) * 0.5
+    count = np.add.reduceat(push_indicator, edge_run_starts)
+    edge_pos0_sum = np.add.reduceat(edge_pos0_rows, edge_run_starts, axis=0)
+    edge_pos1_sum = np.add.reduceat(edge_pos1_rows, edge_run_starts, axis=0)
+    edge_normal_sum = np.add.reduceat(edge_normal_rows, edge_run_starts, axis=0)
+    edge_near_normal_sum = np.add.reduceat(edge_near_normal_rows, edge_run_starts, axis=0)
+    edge_near_count = np.add.reduceat(near_indicator, edge_run_starts)
+    edge_min_dist = np.minimum.reduceat(dist_for_min, edge_run_starts)
 
-    count = edge_count[unique_edges]
     has_push = count > 0
-    safe_count = np.maximum(count, 1)[:, None].astype(np.float32)
-    normal_avg = (edge_normal[unique_edges] / safe_count).astype(np.float32)
+    safe_count = np.maximum(count, 1.0)[:, None].astype(np.float32)
+    normal_avg = (edge_normal_sum / safe_count).astype(np.float32)
     normal_length = pm.length(normal_avg)
     t = np.minimum(normal_length, 1.0)
     valid = has_push & (normal_length > defs.EPSILON)
     scale = np.where(valid, t, 0.0)[:, None] / safe_count
-    delta0 = edge_pos0[unique_edges].astype(np.float32) * scale
-    delta1 = edge_pos1[unique_edges].astype(np.float32) * scale
+    delta0 = edge_pos0_sum.astype(np.float32) * scale
+    delta1 = edge_pos1_sum.astype(np.float32) * scale
 
-    sum_pos = pa["work_sum"]
-    sum_count = pa["work_count"]
-    valid_index = np.flatnonzero(valid)
-    if len(valid_index):
-        np.add.at(sum_pos, ue0[valid_index], delta0[valid_index])
-        np.add.at(sum_count, ue0[valid_index], 1)
-        np.add.at(sum_pos, ue1[valid_index], delta1[valid_index])
-        np.add.at(sum_count, ue1[valid_index], 1)
-
-    near_normal_sum = edge_near_normal[unique_edges].astype(np.float32)
-    md = edge_min_dist[unique_edges]
-    has_near = (edge_near_count[unique_edges] > 0) & (ucfr > 0.0) \
+    near_normal_sum = edge_near_normal_sum.astype(np.float32)
+    has_near = (edge_near_count > 0) & (ucfr > 0.0) \
         & (pm.length(near_normal_sum) ** 2 > 1e-6)
-    friction = 1.0 - pm.saturate(np.where(np.isfinite(md), md, 0.0)
+    friction = 1.0 - pm.saturate(np.where(np.isfinite(edge_min_dist), edge_min_dist, 0.0)
                                  / np.where(ucfr > 0, ucfr, 1.0))
     near_out = np.where(has_near[:, None], pm.normalize(near_normal_sum), 0.0)
 
-    sum_friction = pa["work_float"]
-    sum_normal = pa["self_sum"]
-    near_edges = np.flatnonzero(has_near)
-    if len(near_edges):
-        move0 = pa["attr_move"][ue0[near_edges]]
-        move1 = pa["attr_move"][ue1[near_edges]]
-        f = friction[near_edges]
-        nn = near_out[near_edges]
-        m0 = np.flatnonzero(move0)
-        m1 = np.flatnonzero(move1)
-        if len(m0):
-            np.maximum.at(sum_friction, ue0[near_edges][m0], f[m0])
-            np.add.at(sum_normal, ue0[near_edges][m0], nn[m0])
-        if len(m1):
-            np.maximum.at(sum_friction, ue1[near_edges][m1], f[m1])
-            np.add.at(sum_normal, ue1[near_edges][m1], nn[m1])
+    move0 = pa["attr_move"][ue0]
+    move1 = pa["attr_move"][ue1]
+    mask0 = has_near & move0
+    mask1 = has_near & move1
 
-    endpoints = np.unique(np.concatenate([ue0, ue1]))
-    touched = endpoints[sum_count[endpoints] > 0]
-    if len(touched):
-        pa["next_positions"][touched] += (sum_pos[touched]
-                                          / sum_count[touched][:, None]).astype(np.float32)
-    better = sum_friction[endpoints] > pa["friction"][endpoints]
+    endpoint_targets = np.concatenate((ue0, ue1))
+    endpoint_delta = np.concatenate((delta0, delta1)).astype(np.float64)
+    endpoint_count_rows = np.concatenate((valid, valid)).astype(np.float64)
+    endpoint_friction_rows = np.concatenate((np.where(mask0, friction, 0.0),
+                                             np.where(mask1, friction, 0.0)))
+    endpoint_normal_rows = np.concatenate((np.where(mask0[:, None], near_out, 0.0),
+                                           np.where(mask1[:, None], near_out, 0.0))).astype(np.float64)
+
+    order = np.argsort(endpoint_targets, kind="stable")
+    sorted_endpoints = endpoint_targets[order]
+    endpoint_run_starts = np.flatnonzero(np.concatenate(([True], sorted_endpoints[1:] != sorted_endpoints[:-1])))
+    endpoints = sorted_endpoints[endpoint_run_starts]
+    endpoint_count = np.add.reduceat(endpoint_count_rows[order], endpoint_run_starts)
+    endpoint_position_sum = np.add.reduceat(endpoint_delta[order], endpoint_run_starts, axis=0)
+    endpoint_friction = np.maximum.reduceat(endpoint_friction_rows[order], endpoint_run_starts).astype(np.float32)
+    endpoint_normal_sum = np.add.reduceat(endpoint_normal_rows[order], endpoint_run_starts, axis=0)
+
+    apply = endpoint_count > 0
+    if np.any(apply):
+        pa["next_positions"][endpoints[apply]] += (endpoint_position_sum[apply]
+                                                   / endpoint_count[apply][:, None]).astype(np.float32)
+    better = endpoint_friction > pa["friction"][endpoints]
     if np.any(better):
-        b = endpoints[better]
-        pa["friction"][b] = sum_friction[b]
-    normal_valid = pm.length(sum_normal[endpoints]) ** 2 > 0.0
+        pa["friction"][endpoints[better]] = endpoint_friction[better]
+    normal_valid = pm.length(endpoint_normal_sum) ** 2 > 0.0
     if np.any(normal_valid):
         nv = endpoints[normal_valid]
-        pa["collision_normals"][nv] = pm.normalize(sum_normal[nv]).astype(np.float32)
-
-    sum_pos[endpoints] = 0.0
-    sum_count[endpoints] = 0
-    sum_friction[endpoints] = 0.0
-    sum_normal[endpoints] = 0.0
+        pa["collision_normals"][nv] = pm.normalize(endpoint_normal_sum[normal_valid]).astype(np.float32)
 
 
 def _edge_aabb_overlap(edge_min, edge_max, ca, colliders):

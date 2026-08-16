@@ -51,16 +51,14 @@ def run(world, ctx):
     corr = np.where(zero_rest[:, None], v * 0.5, corr)
     corr = np.where(ok[:, None], corr, 0.0)
 
-    add_sum = pa["work_sum"]
-    add_count = pa["work_count"]
     idx = np.flatnonzero(ok)
-    np.add.at(add_sum, p[idx], corr[idx])
-    np.add.at(add_count, p[idx], 1)
-
-    touched = np.unique(p[idx])
-    if len(touched):
-        mean = (add_sum[touched] / add_count[touched][:, None]).astype(np.float32)
-        pa["next_positions"][touched] += mean
-        pa["velocity_positions"][touched] += mean * defs.DISTANCE_VELOCITY_ATTENUATION
-        add_sum[touched] = 0.0
-        add_count[touched] = 0
+    if len(idx) == 0:
+        return
+    particle_run = p[idx]
+    correction_run = corr[idx].astype(np.float64)
+    run_starts = np.flatnonzero(np.concatenate(([True], particle_run[1:] != particle_run[:-1])))
+    run_counts = np.diff(np.concatenate((run_starts, [len(particle_run)])))
+    touched = particle_run[run_starts]
+    mean = (np.add.reduceat(correction_run, run_starts, axis=0) / run_counts[:, None]).astype(np.float32)
+    pa["next_positions"][touched] += mean
+    pa["velocity_positions"][touched] += mean * defs.DISTANCE_VELOCITY_ATTENUATION

@@ -109,17 +109,19 @@ def run(world, ctx):
         add3[idx] = -inv3[idx][:, None] * lam[:, None] * d3
         result[idx] = ok
 
-    sum_pos = pa["work_sum"]
-    sum_count = pa["work_count"]
     idx = np.flatnonzero(result)
-    for corner, add in ((p0, add0), (p1, add1), (p2, add2), (p3, add3)):
-        np.add.at(sum_pos, corner[idx], add[idx])
-        np.add.at(sum_count, corner[idx], 1)
-    touched = np.unique(np.concatenate([p0[idx], p1[idx], p2[idx], p3[idx]])) if len(idx) else \
-        np.zeros(0, dtype=np.int64)
-    if len(touched):
-        apply = touched[pa["attr_move"][touched]]
-        if len(apply):
-            pa["next_positions"][apply] += (sum_pos[apply] / sum_count[apply][:, None]).astype(np.float32)
-        sum_pos[touched] = 0.0
-        sum_count[touched] = 0
+    if len(idx) == 0:
+        return
+    corner_targets = pairs[idx].reshape(-1)
+    corner_values = np.stack((add0[idx], add1[idx], add2[idx], add3[idx]), axis=1).reshape(-1, 3).astype(np.float64)
+    order = np.argsort(corner_targets, kind="stable")
+    sorted_targets = corner_targets[order]
+    sorted_values = corner_values[order]
+    run_starts = np.flatnonzero(np.concatenate(([True], sorted_targets[1:] != sorted_targets[:-1])))
+    run_counts = np.diff(np.concatenate((run_starts, [len(sorted_targets)])))
+    touched = sorted_targets[run_starts]
+    mean = (np.add.reduceat(sorted_values, run_starts, axis=0) / run_counts[:, None]).astype(np.float32)
+    movable = pa["attr_move"][touched]
+    apply = touched[movable]
+    if len(apply):
+        pa["next_positions"][apply] += mean[movable]

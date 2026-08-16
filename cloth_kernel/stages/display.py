@@ -135,9 +135,12 @@ def _postline(world, ctx):
             owner_valid = ~entry_invalid[o]
             ctv_sum = np.zeros((len(entry_vertex), 3), dtype=np.float64)
             cv_sum = np.zeros((len(entry_vertex), 3), dtype=np.float64)
-            gate = owner_valid
-            np.add.at(ctv_sum, o[gate], tv[gate])
-            np.add.at(cv_sum, o[gate], contribution[gate])
+            gated_owner = o[owner_valid]
+            if len(gated_owner):
+                run_starts = np.flatnonzero(np.concatenate(([True], gated_owner[1:] != gated_owner[:-1])))
+                touched_owner = gated_owner[run_starts]
+                ctv_sum[touched_owner] = np.add.reduceat(tv[owner_valid].astype(np.float64), run_starts, axis=0)
+                cv_sum[touched_owner] = np.add.reduceat(contribution[owner_valid].astype(np.float64), run_starts, axis=0)
 
             write = c_move & owner_valid
             if np.any(write):
@@ -196,12 +199,6 @@ def _post_triangles(world, ctx):
                                                uv2.astype(np.float64))
     tri_tangents64 = tri_tangents64 * tt["negative_scale_triangle_sign"][tri_team][:, 1:2]
 
-    capacity = world.triangles.capacity
-    normals_full = np.zeros((capacity, 3), dtype=np.float64)
-    tangents_full = np.zeros((capacity, 3), dtype=np.float64)
-    normals_full[tri_index] = tri_normals64
-    tangents_full[tri_index] = tri_tangents64
-
     entry_index = np.flatnonzero(frame_mask[va["team"]])
     if len(entry_index) == 0:
         return
@@ -210,15 +207,13 @@ def _post_triangles(world, ctx):
     flip_normal = va["flip_normal"][entry_index].astype(np.float64)
     flip_tangent = va["flip_tangent"][entry_index].astype(np.float64)
 
-    particle_capacity = world.particles.capacity
-    nor_sum = np.zeros((particle_capacity, 3), dtype=np.float64)
-    tan_sum = np.zeros((particle_capacity, 3), dtype=np.float64)
-    np.add.at(nor_sum, owner, normals_full[triangle] * flip_normal[:, None])
-    np.add.at(tan_sum, owner, tangents_full[triangle] * flip_tangent[:, None])
-
-    owners = np.unique(owner)
-    nor = nor_sum[owners]
-    tan = tan_sum[owners]
+    triangle_position = np.searchsorted(tri_index, triangle)
+    normal_rows = tri_normals64[triangle_position] * flip_normal[:, None]
+    tangent_rows = tri_tangents64[triangle_position] * flip_tangent[:, None]
+    run_starts = np.flatnonzero(np.concatenate(([True], owner[1:] != owner[:-1])))
+    owners = owner[run_starts]
+    nor = np.add.reduceat(normal_rows, run_starts, axis=0)
+    tan = np.add.reduceat(tangent_rows, run_starts, axis=0)
     ln = np.linalg.norm(nor, axis=1)
     lt = np.linalg.norm(tan, axis=1)
     ok = (ln > 1e-6) & (lt > 1e-6)

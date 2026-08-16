@@ -391,6 +391,8 @@ def _detect_contacts(world, ctx):
         for field in list(table.keys()):
             table[field] = table[field][keep]
 
+    world.contacts["SCATTER"] = _build_scatter_plan(world)
+
 
 def _update_contacts(world, ctx, first):
     pa = world.particles
@@ -461,133 +463,154 @@ def _update_contacts(world, ctx, first):
         pt["enable"] = ok
 
 
-def _solve_contacts(world, ctx):
+class _ScatterPlan:
+    __slots__ = ("gather", "run_starts", "touched",
+                 "edge_my", "edge_target", "inv_my", "inv_target",
+                 "point_particle", "triangle_particles", "inv_point", "inv_triangle")
+
+    def __init__(self):
+        self.gather = None
+        self.run_starts = None
+        self.touched = None
+        self.edge_my = None
+        self.edge_target = None
+        self.inv_my = None
+        self.inv_target = None
+        self.point_particle = None
+        self.triangle_particles = None
+        self.inv_point = None
+        self.inv_triangle = None
+
+
+def _build_scatter_plan(world):
     ee = world.contacts["EE"]
     pt = world.contacts["PT"]
     if ee is None and pt is None:
+        return None
+    plan = _ScatterPlan()
+    target_blocks = []
+    blocked_blocks = []
+    if ee is not None:
+        edge_my = world.self_edges["particles"][ee["my"]][:, :2]
+        edge_target = world.self_edges["particles"][ee["target"]][:, :2]
+        plan.edge_my = edge_my
+        plan.edge_target = edge_target
+        plan.inv_my = world.self_edges["inv_mass"][ee["my"]][:, :2]
+        plan.inv_target = world.self_edges["inv_mass"][ee["target"]][:, :2]
+        blocked_my = world.self_edges["fix"][ee["my"]][:, :2] \
+            | world.self_edges["intersect"][ee["my"]][:, :2]
+        blocked_target = world.self_edges["fix"][ee["target"]][:, :2] \
+            | world.self_edges["intersect"][ee["target"]][:, :2]
+        target_blocks.extend((edge_my[:, 0], edge_my[:, 1], edge_target[:, 0], edge_target[:, 1]))
+        blocked_blocks.extend((blocked_my[:, 0], blocked_my[:, 1],
+                               blocked_target[:, 0], blocked_target[:, 1]))
+    if pt is not None:
+        point_particle = world.self_points["particles"][pt["my"]][:, 0]
+        triangle_particles = world.self_triangles["particles"][pt["target"]]
+        plan.point_particle = point_particle
+        plan.triangle_particles = triangle_particles
+        plan.inv_point = world.self_points["inv_mass"][pt["my"]][:, 0]
+        plan.inv_triangle = world.self_triangles["inv_mass"][pt["target"]]
+        blocked_point = world.self_points["fix"][pt["my"]][:, 0] \
+            | world.self_points["intersect"][pt["my"]][:, 0]
+        blocked_triangle = world.self_triangles["fix"][pt["target"]] \
+            | world.self_triangles["intersect"][pt["target"]]
+        target_blocks.extend((point_particle, triangle_particles[:, 0],
+                              triangle_particles[:, 1], triangle_particles[:, 2]))
+        blocked_blocks.extend((blocked_point, blocked_triangle[:, 0],
+                               blocked_triangle[:, 1], blocked_triangle[:, 2]))
+    targets = np.concatenate(target_blocks)
+    blocked = np.concatenate(blocked_blocks)
+    canonical_index = np.flatnonzero(~blocked)
+    if len(canonical_index) == 0:
+        return None
+    order = np.argsort(targets[canonical_index], kind="stable")
+    gather = canonical_index[order]
+    sorted_targets = targets[gather]
+    run_starts = np.flatnonzero(np.concatenate(([True], sorted_targets[1:] != sorted_targets[:-1])))
+    plan.gather = gather
+    plan.run_starts = run_starts
+    plan.touched = sorted_targets[run_starts]
+    return plan
+
+
+def _solve_contacts(world, ctx):
+    plan = world.contacts.get("SCATTER")
+    if plan is None:
         return
     pa = world.particles
-    sum_buffer = pa["self_sum"]
-    count_buffer = pa["self_count"]
-
-    candidates = []
-    if ee is not None:
-        candidates.append(world.self_edges["particles"][ee["my"]][:, :2].reshape(-1))
-        candidates.append(world.self_edges["particles"][ee["target"]][:, :2].reshape(-1))
-    if pt is not None:
-        candidates.append(world.self_points["particles"][pt["my"]][:, 0])
-        candidates.append(world.self_triangles["particles"][pt["target"]].reshape(-1))
-    candidates = np.unique(np.concatenate(candidates)) if candidates else np.zeros(0, np.int64)
-    if len(candidates) == 0:
-        return
+    ee = world.contacts["EE"]
+    pt = world.contacts["PT"]
 
     for _ in range(defs.SELF_COLLISION_SOLVER_ITERATION):
-        if ee is not None and len(ee["my"]):
-            active = np.flatnonzero(ee["enable"])
-            if len(active):
-                thickness = ee["thickness"][active]
-                my_prim = ee["my"][active]
-                target_prim = ee["target"][active]
-                e0 = world.self_edges["particles"][my_prim][:, :2]
-                e1 = world.self_edges["particles"][target_prim][:, :2]
-                s = ee["s"][active][:, None]
-                t = ee["t"][active][:, None]
-                n = ee["n"][active]
-                a = pm.lerp(pa["next_positions"][e0[:, 0]], pa["next_positions"][e0[:, 1]], s)
-                b = pm.lerp(pa["next_positions"][e1[:, 0]], pa["next_positions"][e1[:, 1]], t)
-                l = pm.dot(n, a - b)
-                hit = np.flatnonzero(l <= thickness)
-                if len(hit):
-                    c = thickness[hit] - l[hit]
-                    s_h = s[hit, 0]
-                    t_h = t[hit, 0]
-                    n_h = n[hit]
-                    b0 = 1.0 - s_h
-                    b1 = s_h
-                    b2 = 1.0 - t_h
-                    b3 = t_h
-                    im = world.self_edges["inv_mass"][my_prim[hit]]
-                    im2 = world.self_edges["inv_mass"][target_prim[hit]]
-                    denominator = (im[:, 0] * b0 * b0 + im[:, 1] * b1 * b1
-                                   + im2[:, 0] * b2 * b2 + im2[:, 1] * b3 * b3)
-                    ok = denominator != 0.0
-                    scale = np.where(ok, c / np.where(ok, denominator, 1.0), 0.0)
-                    corr_a0 = n_h * (scale * im[:, 0] * b0)[:, None]
-                    corr_a1 = n_h * (scale * im[:, 1] * b1)[:, None]
-                    corr_b0 = -n_h * (scale * im2[:, 0] * b2)[:, None]
-                    corr_b1 = -n_h * (scale * im2[:, 1] * b3)[:, None]
+        value_blocks = []
+        active_blocks = []
+        if ee is not None:
+            e0 = plan.edge_my
+            e1 = plan.edge_target
+            s = ee["s"]
+            t = ee["t"]
+            n = ee["n"]
+            thickness = ee["thickness"]
+            a = pm.lerp(pa["next_positions"][e0[:, 0]], pa["next_positions"][e0[:, 1]], s[:, None])
+            b = pm.lerp(pa["next_positions"][e1[:, 0]], pa["next_positions"][e1[:, 1]], t[:, None])
+            l = pm.dot(n, a - b)
+            c = thickness - l
+            b0 = 1.0 - s
+            b1 = s
+            b2 = 1.0 - t
+            b3 = t
+            im = plan.inv_my
+            im2 = plan.inv_target
+            denominator = (im[:, 0] * b0 * b0 + im[:, 1] * b1 * b1
+                           + im2[:, 0] * b2 * b2 + im2[:, 1] * b3 * b3)
+            ok_ee = ee["enable"] & (l <= thickness) & (denominator != 0.0)
+            safe_denominator = np.where(denominator != 0.0, denominator, 1.0)
+            scale = np.where(ok_ee, c / safe_denominator, 0.0)
+            corr_a0 = n * (scale * im[:, 0] * b0)[:, None]
+            corr_a1 = n * (scale * im[:, 1] * b1)[:, None]
+            corr_b0 = -n * (scale * im2[:, 0] * b2)[:, None]
+            corr_b1 = -n * (scale * im2[:, 1] * b3)[:, None]
+            value_blocks.extend((corr_a0, corr_a1, corr_b0, corr_b1))
+            active_blocks.extend((ok_ee, ok_ee, ok_ee, ok_ee))
+        if pt is not None:
+            point_particle = plan.point_particle
+            tri = plan.triangle_particles
+            sign = pt["sign"]
+            thickness = pt["thickness"]
+            next_p = pa["next_positions"][point_particle]
+            t0 = pa["next_positions"][tri[:, 0]]
+            t1 = pa["next_positions"][tri[:, 1]]
+            t2 = pa["next_positions"][tri[:, 2]]
+            tn = pm.triangle_normal(t0, t1, t2)
+            n = tn * sign[:, None]
+            dist = pm.dot(n, next_p - t0)
+            _, uvw = pm.closest_pt_point_triangle(next_p, t0, t1, t2)
+            c = dist - thickness
+            im_p = plan.inv_point
+            im_t = plan.inv_triangle
+            denominator = im_p + (im_t[:, 0] * uvw[:, 0] ** 2 + im_t[:, 1] * uvw[:, 1] ** 2
+                                  + im_t[:, 2] * uvw[:, 2] ** 2)
+            ok_pt = pt["enable"] & (dist < thickness) & (denominator != 0.0)
+            safe_denominator = np.where(denominator != 0.0, denominator, 1.0)
+            scale = np.where(ok_pt, c / safe_denominator, 0.0)
+            corr_p = -n * (scale * im_p)[:, None]
+            corr_t0 = n * (scale * im_t[:, 0] * uvw[:, 0])[:, None]
+            corr_t1 = n * (scale * im_t[:, 1] * uvw[:, 1])[:, None]
+            corr_t2 = n * (scale * im_t[:, 2] * uvw[:, 2])[:, None]
+            value_blocks.extend((corr_p, corr_t0, corr_t1, corr_t2))
+            active_blocks.extend((ok_pt, ok_pt, ok_pt, ok_pt))
 
-                    my_fix = world.self_edges["fix"][my_prim[hit]][:, :2] \
-                        | world.self_edges["intersect"][my_prim[hit]][:, :2]
-                    target_fix = world.self_edges["fix"][target_prim[hit]][:, :2] \
-                        | world.self_edges["intersect"][target_prim[hit]][:, :2]
-
-                    for axis, corr, fix in ((0, corr_a0, my_fix[:, 0]), (1, corr_a1, my_fix[:, 1])):
-                        write = np.flatnonzero(~fix)
-                        if len(write):
-                            np.add.at(sum_buffer, e0[hit][write, axis], corr[write])
-                            np.add.at(count_buffer, e0[hit][write, axis], 1)
-                    for axis, corr, fix in ((0, corr_b0, target_fix[:, 0]),
-                                            (1, corr_b1, target_fix[:, 1])):
-                        write = np.flatnonzero(~fix)
-                        if len(write):
-                            np.add.at(sum_buffer, e1[hit][write, axis], corr[write])
-                            np.add.at(count_buffer, e1[hit][write, axis], 1)
-
-        if pt is not None and len(pt["my"]):
-            active = np.flatnonzero(pt["enable"])
-            if len(active):
-                thickness = pt["thickness"][active]
-                point_prim = pt["my"][active]
-                tri_prim = pt["target"][active]
-                p = world.self_points["particles"][point_prim][:, 0]
-                tri = world.self_triangles["particles"][tri_prim]
-                sign = pt["sign"][active]
-
-                next_p = pa["next_positions"][p]
-                t0 = pa["next_positions"][tri[:, 0]]
-                t1 = pa["next_positions"][tri[:, 1]]
-                t2 = pa["next_positions"][tri[:, 2]]
-                tn = pm.triangle_normal(t0, t1, t2)
-                n = tn * sign[:, None]
-                dist = pm.dot(n, next_p - t0)
-                hit = np.flatnonzero(dist < thickness)
-                if len(hit):
-                    _, uvw = pm.closest_pt_point_triangle(next_p[hit], t0[hit], t1[hit], t2[hit])
-                    c = dist[hit] - thickness[hit]
-                    im_p = world.self_points["inv_mass"][point_prim[hit], 0]
-                    im_t = world.self_triangles["inv_mass"][tri_prim[hit]]
-                    denominator = im_p + (im_t[:, 0] * uvw[:, 0] ** 2 + im_t[:, 1] * uvw[:, 1] ** 2
-                                          + im_t[:, 2] * uvw[:, 2] ** 2)
-                    ok = denominator != 0.0
-                    scale = np.where(ok, c / np.where(ok, denominator, 1.0), 0.0)
-                    n_h = n[hit]
-                    corr_p = -n_h * (scale * im_p)[:, None]
-                    corr_t0 = n_h * (scale * im_t[:, 0] * uvw[:, 0])[:, None]
-                    corr_t1 = n_h * (scale * im_t[:, 1] * uvw[:, 1])[:, None]
-                    corr_t2 = n_h * (scale * im_t[:, 2] * uvw[:, 2])[:, None]
-
-                    p_fix = world.self_points["fix"][point_prim[hit], 0] \
-                        | world.self_points["intersect"][point_prim[hit], 0]
-                    t_fix = world.self_triangles["fix"][tri_prim[hit]] \
-                        | world.self_triangles["intersect"][tri_prim[hit]]
-
-                    write = np.flatnonzero(~p_fix)
-                    if len(write):
-                        np.add.at(sum_buffer, p[hit][write], corr_p[write])
-                        np.add.at(count_buffer, p[hit][write], 1)
-                    for axis, corr in ((0, corr_t0), (1, corr_t1), (2, corr_t2)):
-                        write = np.flatnonzero(~t_fix[:, axis])
-                        if len(write):
-                            np.add.at(sum_buffer, tri[hit][write, axis], corr[write])
-                            np.add.at(count_buffer, tri[hit][write, axis], 1)
-
-        touched = candidates[count_buffer[candidates] > 0]
-        if len(touched):
-            pa["next_positions"][touched] += (sum_buffer[touched]
-                                              / count_buffer[touched][:, None]).astype(np.float32)
-        sum_buffer[candidates] = 0.0
-        count_buffer[candidates] = 0
+        canonical_values = np.concatenate(value_blocks).astype(np.float64)
+        canonical_active = np.concatenate(active_blocks)
+        gathered_active = canonical_active[plan.gather].astype(np.float64)
+        rows = canonical_values[plan.gather] * gathered_active[:, None]
+        counts = np.add.reduceat(gathered_active, plan.run_starts)
+        sums = np.add.reduceat(rows, plan.run_starts, axis=0)
+        apply = counts > 0
+        if np.any(apply):
+            pa["next_positions"][plan.touched[apply]] += (sums[apply]
+                                                          / counts[apply][:, None]).astype(np.float32)
 
 
 def _detect_intersect(world, ctx):
