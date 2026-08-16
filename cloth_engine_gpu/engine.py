@@ -24,6 +24,14 @@ from .program import build_program
 _MAX_COOP_BLOCKS = 544
 _THREADS = 128
 
+# Stable int mapping for WindZoneInput.mode strings (device-side zone arrays).
+_ZONE_MODE = {"GLOBAL_DIRECTION": 0, "BOX_DIRECTION": 1,
+              "SPHERE_DIRECTION": 2, "SPHERE_RADIAL": 3}
+# Ordered zone SoA field names appended to the launch after the scratch args.
+_ZONE_ARG_ORDER = ("zone_id", "mode", "is_addition", "main", "turbulence",
+                   "world_position", "world_direction", "world_to_local",
+                   "size", "zone_volume", "attenuation_lut")
+
 
 class GpuEngine:
     def __init__(self, world):
@@ -67,13 +75,59 @@ class GpuEngine:
         for name in kernels.STATIC_DIRECT_FIELDS:
             self.static[name] = device.upload_readonly(getattr(self.program, name))
         np_particles = max(self.program.num_particles, 1)
+        nt = max(self.program.num_teams, 1)
         self.scratch = {
             "dcorr": cuda.device_array((np_particles, 3), np.float32),
             "dcorr_fixed": cuda.device_array((np_particles, 3), np.int32),
             "dcount": cuda.device_array((np_particles,), np.int32),
             "col_friction_fixed": cuda.device_array((np_particles,), np.int32),
             "col_normal_fixed": cuda.device_array((np_particles, 3), np.int32),
+            # T0 resolve_sync gather snapshot: 22 scalars/team (7 time + 8 param +
+            # 3 component_world_position + 4 component_world_rotation) so the child
+            # write reads a pre-gather copy of its sync_top row (mutual-sync race safe).
+            "sync_snapshot": cuda.device_array((nt, 22), np.float32),
         }
+        # Wind zones are variable-length and re-uploaded each frame; start empty so
+        # zone_count=0 launches (all 17 legacy phase tests) carry safe dummy args.
+        self.n_zones = 0
+        self.zones_dev = self._make_zone_arrays([])
+
+    # ---- wind-zone per-frame upload -----------------------------------------
+    def _make_zone_arrays(self, zones):
+        n = max(len(zones), 1)
+        host = {
+            "zone_id": np.zeros(n, np.int32),
+            "mode": np.zeros(n, np.int32),
+            "is_addition": np.zeros(n, np.uint8),
+            "main": np.zeros(n, np.float32),
+            "turbulence": np.zeros(n, np.float32),
+            "world_position": np.zeros((n, 3), np.float32),
+            "world_direction": np.zeros((n, 3), np.float32),
+            "world_to_local": np.zeros((n, 4, 4), np.float64),
+            "size": np.zeros((n, 3), np.float32),
+            "zone_volume": np.zeros(n, np.float32),
+            "attenuation_lut": np.zeros((n, 16), np.float32),
+        }
+        for k, zone in enumerate(zones):
+            host["zone_id"][k] = zone.zone_id
+            host["mode"][k] = _ZONE_MODE.get(zone.mode, 0)
+            host["is_addition"][k] = 1 if zone.is_addition else 0
+            host["main"][k] = zone.main
+            host["turbulence"][k] = zone.turbulence
+            host["world_position"][k] = zone.world_position
+            host["world_direction"][k] = zone.world_direction
+            host["world_to_local"][k] = zone.world_to_local
+            host["size"][k] = zone.size
+            # GLOBAL_DIRECTION uses inf volume so it never loses the min-volume race.
+            host["zone_volume"][k] = np.inf if zone.mode == "GLOBAL_DIRECTION" \
+                else float(zone.zone_volume)
+            if zone.attenuation_lut is not None:
+                host["attenuation_lut"][k] = zone.attenuation_lut
+        return {name: device.upload_readonly(host[name]) for name in _ZONE_ARG_ORDER}
+
+    def upload_zones(self, zones):
+        self.n_zones = len(zones)
+        self.zones_dev = self._make_zone_arrays(zones)
 
     def _blocks(self):
         needed = max(self.program.num_particles, self.program.num_teams, 1)
@@ -128,18 +182,21 @@ class GpuEngine:
             csr_args.append(self.static[ord_name])
         direct_args = [self.static[name] for name in kernels.STATIC_DIRECT_FIELDS]
         scratch_args = [self.scratch["dcorr"], self.scratch["dcorr_fixed"], self.scratch["dcount"],
-                        self.scratch["col_friction_fixed"], self.scratch["col_normal_fixed"]]
+                        self.scratch["col_friction_fixed"], self.scratch["col_normal_fixed"],
+                        self.scratch["sync_snapshot"]]
+        zone_args = [self.zones_dev[name] for name in _ZONE_ARG_ORDER]
         blocks = self._blocks()
         kernels.frame_kernel[blocks, _THREADS](
             int32(phase_mask), int32(sub_begin), int32(sub_end),
             fdt, sim_dt, msc, gts, pw0, pw1, pw2, pw3,
             *team_args, *particle_args, *transform_args, *collider_args, *static_args,
-            *csr_args, *direct_args, *scratch_args)
+            *csr_args, *direct_args, *scratch_args, int32(self.n_zones), *zone_args)
 
     # ---- production API (grows as phases land) ------------------------------
     def step_frame(self, world, frame_globals):
         self.load(world)
         self._upload_inputs(world)
+        self.upload_zones(frame_globals.zones)
         self.launch(kernels.ALL_PHASES, 0, kernels.MAX_SIM_COUNT, frame_globals)
         self._download_outputs(world)
 
@@ -147,6 +204,7 @@ class GpuEngine:
         # segmented launch for per-substep assertions: (pre,0,0) then per-k, then post.
         self.load(world)
         self._upload_inputs(world)
+        self.upload_zones(frame_globals.zones)
         self.launch(kernels.ALL_PHASES, 0, kernels.MAX_SIM_COUNT, frame_globals)
         self._download_outputs(world)
 

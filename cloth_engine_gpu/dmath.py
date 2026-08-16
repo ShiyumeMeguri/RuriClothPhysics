@@ -10,7 +10,7 @@ Transcendentals go through ``libdevice`` f32 variants (sinf/cosf/...), matching 
 oracle's numpy float32 transcendentals to within a few ULP.
 """
 
-from numba import cuda, float32, int32
+from numba import cuda, float32, float64, int32
 from numba.cuda import libdevice
 
 
@@ -648,3 +648,106 @@ def evaluate_team_lut(luts, team, time):
 @cuda.jit(device=True)
 def evaluate_team_lut_clamp01(luts, team, time):
     return saturate(evaluate_team_lut(luts, team, time))
+
+
+# ---------------------------------------------------------------------------
+# f64 TRS matrix helpers (authorised per-team f64 path; mirror math.trs and the
+# oracle's np.linalg.inv of a full-rank TRS via the analytic component inverse
+# M = T*R*S -> M^-1 = S^-1 * R^T * T^-1). Callers pass cuda.local.array((4,4), f64).
+# ---------------------------------------------------------------------------
+
+@cuda.jit(device=True)
+def quat_to_matrix3_f32(x, y, z, w):
+    # mirrors math.quat_to_matrix3 (row-major 3x3), f32 throughout so the f32->f64
+    # promotion point matches the oracle (quat_to_matrix3(quat).astype(np.float64)).
+    xx = x * x
+    yy = y * y
+    zz = z * z
+    xy = x * y
+    xz = x * z
+    yz = y * z
+    wx = w * x
+    wy = w * y
+    wz = w * z
+    m00 = float32(1.0) - float32(2.0) * (yy + zz)
+    m01 = float32(2.0) * (xy - wz)
+    m02 = float32(2.0) * (xz + wy)
+    m10 = float32(2.0) * (xy + wz)
+    m11 = float32(1.0) - float32(2.0) * (xx + zz)
+    m12 = float32(2.0) * (yz - wx)
+    m20 = float32(2.0) * (xz - wy)
+    m21 = float32(2.0) * (yz + wx)
+    m22 = float32(1.0) - float32(2.0) * (xx + yy)
+    return (m00, m01, m02, m10, m11, m12, m20, m21, m22)
+
+
+@cuda.jit(device=True)
+def trs_build_f64(out, px, py, pz, qx, qy, qz, qw, sx, sy, sz):
+    # r = quat_to_matrix3(quat).astype(f64) * scale[..., None, :]; m[:3,3] = position
+    m00, m01, m02, m10, m11, m12, m20, m21, m22 = quat_to_matrix3_f32(qx, qy, qz, qw)
+    s0 = float64(sx)
+    s1 = float64(sy)
+    s2 = float64(sz)
+    out[0, 0] = float64(m00) * s0
+    out[0, 1] = float64(m01) * s1
+    out[0, 2] = float64(m02) * s2
+    out[1, 0] = float64(m10) * s0
+    out[1, 1] = float64(m11) * s1
+    out[1, 2] = float64(m12) * s2
+    out[2, 0] = float64(m20) * s0
+    out[2, 1] = float64(m21) * s1
+    out[2, 2] = float64(m22) * s2
+    out[0, 3] = float64(px)
+    out[1, 3] = float64(py)
+    out[2, 3] = float64(pz)
+    out[3, 0] = float64(0.0)
+    out[3, 1] = float64(0.0)
+    out[3, 2] = float64(0.0)
+    out[3, 3] = float64(1.0)
+
+
+@cuda.jit(device=True)
+def trs_inverse_f64(out, px, py, pz, qx, qy, qz, qw, sx, sy, sz):
+    # analytic inverse: M^-1[:3,:3] = diag(1/s) @ R^T ; M^-1[:3,3] = -diag(1/s) @ R^T @ t
+    m00, m01, m02, m10, m11, m12, m20, m21, m22 = quat_to_matrix3_f32(qx, qy, qz, qw)
+    inv0 = float64(1.0) / float64(sx)
+    inv1 = float64(1.0) / float64(sy)
+    inv2 = float64(1.0) / float64(sz)
+    r00 = float64(m00)
+    r01 = float64(m01)
+    r02 = float64(m02)
+    r10 = float64(m10)
+    r11 = float64(m11)
+    r12 = float64(m12)
+    r20 = float64(m20)
+    r21 = float64(m21)
+    r22 = float64(m22)
+    out[0, 0] = inv0 * r00
+    out[0, 1] = inv0 * r10
+    out[0, 2] = inv0 * r20
+    out[1, 0] = inv1 * r01
+    out[1, 1] = inv1 * r11
+    out[1, 2] = inv1 * r21
+    out[2, 0] = inv2 * r02
+    out[2, 1] = inv2 * r12
+    out[2, 2] = inv2 * r22
+    tx = float64(px)
+    ty = float64(py)
+    tz = float64(pz)
+    out[0, 3] = -inv0 * (r00 * tx + r10 * ty + r20 * tz)
+    out[1, 3] = -inv1 * (r01 * tx + r11 * ty + r21 * tz)
+    out[2, 3] = -inv2 * (r02 * tx + r12 * ty + r22 * tz)
+    out[3, 0] = float64(0.0)
+    out[3, 1] = float64(0.0)
+    out[3, 2] = float64(0.0)
+    out[3, 3] = float64(1.0)
+
+
+@cuda.jit(device=True)
+def mat4_mul_f64(out, a, b):
+    for i in range(4):
+        for j in range(4):
+            acc = float64(0.0)
+            for k in range(4):
+                acc += a[i, k] * b[k, j]
+            out[i, j] = acc
