@@ -16,7 +16,7 @@ oracle trs / matrix inverse); per-particle / per-pair phases stay strict-f32.
 
 import math
 
-from numba import cuda, float32, float64, int32
+from numba import cuda, float32, float64, int8, int32
 from numba.cuda import cg, libdevice
 
 from . import dmath
@@ -40,10 +40,20 @@ PHASE_COLLIDER_SOLVE = int32(1 << 14)  # S9 collider.solve point+edge (substep)
 PHASE_COLLIDER_END = int32(1 << 15)  # S14 collider.end_step (substep)
 PHASE_COLLIDER_POST = int32(1 << 16)  # F3 collider.frame_post
 PHASE_PARTICLES_PRE = int32(1 << 17)  # P2 particles.frame_pre
+PHASE_SYNC = int32(1 << 18)          # T0 team_time.resolve_sync (frame-pre, per-team)
+PHASE_CENTER = int32(1 << 19)        # C0 center.run + select_team_wind (frame-pre, per-team)
 
 ALL_PHASES = int32(-1)
 
 MAX_SIM_COUNT = 5
+
+# wind-zone mode enum (mirror engine._ZONE_MODE) + slot count
+WIND_ZONE_SLOTS = 4
+ZONE_GLOBAL = int32(0)
+ZONE_BOX = int32(1)
+ZONE_SPHERE_DIR = int32(2)
+ZONE_SPHERE_RADIAL = int32(3)
+TELEPORT_RESET = int32(1)
 
 # defs constants mirrored (device-side literals stay f32-wrapped)
 TETHER_STRETCH_LIMIT = float32(0.03)
@@ -1476,6 +1486,11 @@ def frame_kernel(phase_mask, sub_begin, sub_end,
                  t_collision_mode, t_limit_distance_lut, t_negative_scale_matrix,
                  t_negative_scale_change, t_frame_component_shift_vector,
                  t_frame_component_shift_rotation,
+                 t_sync_target, t_sync_top, t_negative_scale_triangle_sign,
+                 t_smoothing_velocity, t_has_anchor, t_had_anchor, t_anchor_inertia,
+                 t_world_inertia, t_movement_inertia_smoothing, t_movement_speed_limit,
+                 t_rotation_speed_limit, t_teleport_mode, t_teleport_distance,
+                 t_teleport_rotation, t_culling_invisible, t_wind_direction, t_wind_zone_id,
                  p_team, p_local_positions, p_local_normals, p_local_tangents,
                  p_skin_indices, p_skin_weights, p_positions, p_rotations,
                  p_next_positions, p_velocity_positions, p_step_basic_positions, p_vertex_root,
@@ -1483,7 +1498,7 @@ def frame_kernel(phase_mask, sub_begin, sub_end,
                  p_step_basic_rotations, p_depth, p_velocities, p_old_positions, p_friction,
                  p_vertex_root_local, p_collision_normals, p_static_friction, p_real_velocities,
                  p_attr_move, p_vertex_local_positions, p_vertex_local_rotations,
-                 p_old_rotations, p_display_positions,
+                 p_old_rotations, p_display_positions, p_vertex_bind_pose_rotations,
                  x_world, x_bind,
                  c_team, c_kind, c_center, c_size, c_axis, c_aligned, c_enabled,
                  c_enabled_prev, c_active, c_input_positions, c_input_rotations, c_input_scales,
@@ -1498,11 +1513,17 @@ def frame_kernel(phase_mask, sub_begin, sub_end,
                  st_motion_particle, st_motion_team,
                  st_bending_team, st_bending_pair, st_bending_rest, st_bending_sign,
                  st_point_pair_collider, st_edge_pair_collider, st_collision_edge,
+                 st_center_fixed_particle,
                  csr_distance_offsets, csr_distance_order,
                  csr_point_pair_offsets, csr_point_pair_order,
                  csr_edge_pair_offsets, csr_edge_pair_order,
+                 csr_center_fixed_offsets, csr_center_fixed_order,
                  fk_yes_offsets, fk_yes, fk_yes_parent, fk_no_offsets, fk_no, baseline_entries,
-                 sc_dcorr, sc_dcorr_fixed, sc_dcount, sc_col_friction_fixed, sc_col_normal_fixed):
+                 sc_dcorr, sc_dcorr_fixed, sc_dcount, sc_col_friction_fixed, sc_col_normal_fixed,
+                 sc_sync,
+                 n_zones, z_zone_id, z_mode, z_is_addition, z_main, z_turbulence,
+                 z_world_position, z_world_direction, z_world_to_local, z_size,
+                 z_zone_volume, z_attenuation_lut):
     grid = cg.this_grid()
     tid = cuda.grid(1)
     stride = cuda.gridsize(1)
@@ -1512,6 +1533,86 @@ def frame_kernel(phase_mask, sub_begin, sub_end,
     num_colliders = c_team.shape[0]
 
     # ----- FRAME-PRE -----
+    # T0 team_time.resolve_sync (per ENABLED team; gate = enabled only, not the
+    # frame mask). Pass a: resolve sync_top by climbing sync_target (<=8 hops).
+    if phase_mask & PHASE_SYNC:
+        i = tid
+        while i < num_teams:
+            if t_enabled[i] != 0:
+                target = t_sync_target[i]
+                if target <= 0 or t_valid[target] == 0 or t_enabled[target] == 0:
+                    t_sync_top[i] = int32(0)
+                else:
+                    top = target
+                    for _h in range(8):
+                        upper = t_sync_target[top]
+                        if upper <= 0 or upper == i or t_valid[upper] == 0 or t_enabled[upper] == 0:
+                            break
+                        top = upper
+                    t_sync_top[i] = top
+            i += stride
+    grid.sync()
+    # Pass b: snapshot each child's sync_top row (the gather RHS) into sc_sync so
+    # the write pass reads pre-gather values (mutual-sync A<->B swap is race-safe).
+    if phase_mask & PHASE_SYNC:
+        i = tid
+        while i < num_teams:
+            if t_enabled[i] != 0 and t_sync_top[i] > 0:
+                top = t_sync_top[i]
+                sc_sync[i, 0] = t_time[top]
+                sc_sync[i, 1] = t_old_time[top]
+                sc_sync[i, 2] = t_now_update[top]
+                sc_sync[i, 3] = t_old_update[top]
+                sc_sync[i, 4] = t_frame_update[top]
+                sc_sync[i, 5] = t_frame_old[top]
+                sc_sync[i, 6] = t_time_scale[top]
+                sc_sync[i, 7] = t_anchor_inertia[top]
+                sc_sync[i, 8] = t_world_inertia[top]
+                sc_sync[i, 9] = t_movement_inertia_smoothing[top]
+                sc_sync[i, 10] = t_movement_speed_limit[top]
+                sc_sync[i, 11] = t_rotation_speed_limit[top]
+                sc_sync[i, 12] = float32(t_teleport_mode[top])
+                sc_sync[i, 13] = t_teleport_distance[top]
+                sc_sync[i, 14] = t_teleport_rotation[top]
+                sc_sync[i, 15] = t_component_world_position[top, 0]
+                sc_sync[i, 16] = t_component_world_position[top, 1]
+                sc_sync[i, 17] = t_component_world_position[top, 2]
+                sc_sync[i, 18] = t_component_world_rotation[top, 0]
+                sc_sync[i, 19] = t_component_world_rotation[top, 1]
+                sc_sync[i, 20] = t_component_world_rotation[top, 2]
+                sc_sync[i, 21] = t_component_world_rotation[top, 3]
+            i += stride
+    grid.sync()
+    # Pass c: write children from the snapshot.
+    if phase_mask & PHASE_SYNC:
+        i = tid
+        while i < num_teams:
+            if t_enabled[i] != 0 and t_sync_top[i] > 0:
+                t_time[i] = sc_sync[i, 0]
+                t_old_time[i] = sc_sync[i, 1]
+                t_now_update[i] = sc_sync[i, 2]
+                t_old_update[i] = sc_sync[i, 3]
+                t_frame_update[i] = sc_sync[i, 4]
+                t_frame_old[i] = sc_sync[i, 5]
+                t_time_scale[i] = sc_sync[i, 6]
+                t_anchor_inertia[i] = sc_sync[i, 7]
+                t_world_inertia[i] = sc_sync[i, 8]
+                t_movement_inertia_smoothing[i] = sc_sync[i, 9]
+                t_movement_speed_limit[i] = sc_sync[i, 10]
+                t_rotation_speed_limit[i] = sc_sync[i, 11]
+                t_teleport_mode[i] = int8(sc_sync[i, 12])
+                t_teleport_distance[i] = sc_sync[i, 13]
+                t_teleport_rotation[i] = sc_sync[i, 14]
+                t_component_world_position[i, 0] = sc_sync[i, 15]
+                t_component_world_position[i, 1] = sc_sync[i, 16]
+                t_component_world_position[i, 2] = sc_sync[i, 17]
+                t_component_world_rotation[i, 0] = sc_sync[i, 18]
+                t_component_world_rotation[i, 1] = sc_sync[i, 19]
+                t_component_world_rotation[i, 2] = sc_sync[i, 20]
+                t_component_world_rotation[i, 3] = sc_sync[i, 21]
+            i += stride
+    grid.sync()
+
     if phase_mask & PHASE_ADVANCE:
         i = tid
         while i < num_teams:
@@ -1531,6 +1632,700 @@ def frame_kernel(phase_mask, sub_begin, sub_end,
                              p_skin_indices, p_skin_weights, p_positions, p_rotations,
                              x_world, x_bind)
             p += stride
+    grid.sync()
+
+    # C0 center.run + select_team_wind (per-team; authorised internal f64 for the
+    # trs/analytic-inverse matrix path and the fixed-centre gather; mirrors
+    # stages/center.py + stages/wind.select_team_wind, f32 elsewhere).
+    if phase_mask & PHASE_CENTER:
+        mat_a = cuda.local.array((4, 4), float64)
+        mat_b = cuda.local.array((4, 4), float64)
+        mat_c = cuda.local.array((4, 4), float64)
+        res_zone_id = cuda.local.array(8, int32)
+        res_time = cuda.local.array(8, float32)
+        res_main = cuda.local.array(8, float32)
+        res_dx = cuda.local.array(8, float32)
+        res_dy = cuda.local.array(8, float32)
+        res_dz = cuda.local.array(8, float32)
+        res_turb = cuda.local.array(8, float32)
+        old_zid = cuda.local.array(4, int32)
+        old_wt = cuda.local.array(4, float32)
+        i = tid
+        while i < num_teams:
+            if team_frame_mask(t_enabled, t_valid, t_cws, i):
+                cpx = t_component_world_position[i, 0]
+                cpy = t_component_world_position[i, 1]
+                cpz = t_component_world_position[i, 2]
+                crx = t_component_world_rotation[i, 0]
+                cry = t_component_world_rotation[i, 1]
+                crz = t_component_world_rotation[i, 2]
+                crw = t_component_world_rotation[i, 3]
+                csx = t_cws[i, 0]
+                csy = t_cws[i, 1]
+                csz = t_cws[i, 2]
+
+                # --- negative scale ---
+                init_scale_len = float64(dmath.length3(
+                    t_init_scale[i, 0], t_init_scale[i, 1], t_init_scale[i, 2]))
+                if init_scale_len < float64(1e-30):
+                    init_scale_len = float64(1e-30)
+                csr_ratio = float64(dmath.length3(csx, csy, csz)) / init_scale_len
+
+                old_dx = t_negative_scale_direction[i, 0]
+                old_dy = t_negative_scale_direction[i, 1]
+                old_dz = t_negative_scale_direction[i, 2]
+                sxv = float32(1.0) if csx == float32(0.0) else csx
+                syv = float32(1.0) if csy == float32(0.0) else csy
+                szv = float32(1.0) if csz == float32(0.0) else csz
+                dir_x = dmath.fsign(sxv)
+                dir_y = dmath.fsign(syv)
+                dir_z = dmath.fsign(szv)
+                t_negative_scale_direction[i, 0] = dir_x
+                t_negative_scale_direction[i, 1] = dir_y
+                t_negative_scale_direction[i, 2] = dir_z
+                t_negative_scale_change[i, 0] = old_dx * dir_x
+                t_negative_scale_change[i, 1] = old_dy * dir_y
+                t_negative_scale_change[i, 2] = old_dz * dir_z
+                is_negative = (csx < float32(0.0)) or (csy < float32(0.0)) or (csz < float32(0.0))
+                t_is_negative_scale[i] = int32(1) if is_negative else int32(0)
+                t_negative_scale_sign[i] = float32(-1.0) if is_negative else float32(1.0)
+                if is_negative:
+                    t_negative_scale_quaternion[i, 0] = -dir_x
+                    t_negative_scale_quaternion[i, 1] = -dir_y
+                    t_negative_scale_quaternion[i, 2] = -dir_z
+                    t_negative_scale_quaternion[i, 3] = float32(1.0)
+                    ts0 = float32(-1.0) if (csx < float32(0.0) or csz < float32(0.0)) else float32(1.0)
+                    ts1 = float32(-1.0) if (csx < float32(0.0)) else float32(1.0)
+                    t_negative_scale_triangle_sign[i, 0] = ts0
+                    t_negative_scale_triangle_sign[i, 1] = ts1
+                else:
+                    t_negative_scale_quaternion[i, 0] = float32(1.0)
+                    t_negative_scale_quaternion[i, 1] = float32(1.0)
+                    t_negative_scale_quaternion[i, 2] = float32(1.0)
+                    t_negative_scale_quaternion[i, 3] = float32(1.0)
+                    t_negative_scale_triangle_sign[i, 0] = float32(1.0)
+                    t_negative_scale_triangle_sign[i, 1] = float32(1.0)
+                teleport = (old_dx != dir_x) or (old_dy != dir_y) or (old_dz != dir_z)
+                t_negative_scale_teleport[i] = int32(1) if teleport else int32(0)
+
+                # --- teleport: negative_component applied to old_* and smoothing ---
+                if teleport:
+                    dmath.trs_build_f64(mat_a, cpx, cpy, cpz, crx, cry, crz, crw, csx, csy, csz)
+                    ocpx = t_old_component_world_position[i, 0]
+                    ocpy = t_old_component_world_position[i, 1]
+                    ocpz = t_old_component_world_position[i, 2]
+                    ocrx = t_old_component_world_rotation[i, 0]
+                    ocry = t_old_component_world_rotation[i, 1]
+                    ocrz = t_old_component_world_rotation[i, 2]
+                    ocrw = t_old_component_world_rotation[i, 3]
+                    ocsx = t_old_component_world_scale[i, 0]
+                    ocsy = t_old_component_world_scale[i, 1]
+                    ocsz = t_old_component_world_scale[i, 2]
+                    dmath.trs_inverse_f64(mat_b, ocpx, ocpy, ocpz, ocrx, ocry, ocrz, ocrw, ocsx, ocsy, ocsz)
+                    dmath.mat4_mul_f64(mat_c, mat_a, mat_b)
+                    nx, ny, nz = dmath.transform_point(mat_c, ocpx, ocpy, ocpz)
+                    t_old_component_world_position[i, 0] = nx
+                    t_old_component_world_position[i, 1] = ny
+                    t_old_component_world_position[i, 2] = nz
+                    t_old_component_world_scale[i, 0] = csx
+                    t_old_component_world_scale[i, 1] = csy
+                    t_old_component_world_scale[i, 2] = csz
+                    oax = t_old_anchor_position[i, 0]
+                    oay = t_old_anchor_position[i, 1]
+                    oaz = t_old_anchor_position[i, 2]
+                    tax, tay, taz = dmath.transform_point(mat_c, oax, oay, oaz)
+                    t_old_anchor_position[i, 0] = tax
+                    t_old_anchor_position[i, 1] = tay
+                    t_old_anchor_position[i, 2] = taz
+                    tsvx, tsvy, tsvz = dmath.transform_vector(
+                        mat_c, t_smoothing_velocity[i, 0], t_smoothing_velocity[i, 1],
+                        t_smoothing_velocity[i, 2])
+                    t_smoothing_velocity[i, 0] = tsvx
+                    t_smoothing_velocity[i, 1] = tsvy
+                    t_smoothing_velocity[i, 2] = tsvz
+
+                ocp_x = t_old_component_world_position[i, 0]
+                ocp_y = t_old_component_world_position[i, 1]
+                ocp_z = t_old_component_world_position[i, 2]
+                ocr_x = t_old_component_world_rotation[i, 0]
+                ocr_y = t_old_component_world_rotation[i, 1]
+                ocr_z = t_old_component_world_rotation[i, 2]
+                ocr_w = t_old_component_world_rotation[i, 3]
+
+                # --- fixed-centre gather (f64 accumulate over center_fixed CSR) ---
+                cwpx = cpx
+                cwpy = cpy
+                cwpz = cpz
+                cwrx = crx
+                cwry = cry
+                cwrz = crz
+                cwrw = crw
+                nor_sx = float64(0.0)
+                nor_sy = float64(0.0)
+                nor_sz = float64(0.0)
+                tan_sx = float64(0.0)
+                tan_sy = float64(0.0)
+                tan_sz = float64(0.0)
+                pos_sx = float64(0.0)
+                pos_sy = float64(0.0)
+                pos_sz = float64(0.0)
+                fcount = 0
+                seg0 = csr_center_fixed_offsets[i]
+                seg1 = csr_center_fixed_offsets[i + 1]
+                for e in range(seg0, seg1):
+                    fp = st_center_fixed_particle[csr_center_fixed_order[e]]
+                    rx = p_rotations[fp, 0]
+                    ry = p_rotations[fp, 1]
+                    rz = p_rotations[fp, 2]
+                    rw = p_rotations[fp, 3]
+                    if is_negative:
+                        nnx, nny, nnz = dmath.quat_to_normal(rx, ry, rz, rw)
+                        ttx, tty, ttz = dmath.quat_to_tangent(rx, ry, rz, rw)
+                        rx, ry, rz, rw = dmath.to_rotation(-nnx, -nny, -nnz, -ttx, -tty, -ttz)
+                    rx, ry, rz, rw = dmath.quat_mul(
+                        rx, ry, rz, rw, p_vertex_bind_pose_rotations[fp, 0],
+                        p_vertex_bind_pose_rotations[fp, 1], p_vertex_bind_pose_rotations[fp, 2],
+                        p_vertex_bind_pose_rotations[fp, 3])
+                    norx, nory, norz = dmath.quat_to_normal(rx, ry, rz, rw)
+                    tanx, tany, tanz = dmath.quat_to_tangent(rx, ry, rz, rw)
+                    nflip = float32(-1.0) if (dir_x < float32(0.0) or dir_z < float32(0.0)) else float32(1.0)
+                    tflip = float32(-1.0) if (dir_x < float32(0.0) or dir_y < float32(0.0)) else float32(1.0)
+                    nor_sx += float64(norx * nflip)
+                    nor_sy += float64(nory * nflip)
+                    nor_sz += float64(norz * nflip)
+                    tan_sx += float64(tanx * tflip)
+                    tan_sy += float64(tany * tflip)
+                    tan_sz += float64(tanz * tflip)
+                    pos_sx += float64(p_positions[fp, 0])
+                    pos_sy += float64(p_positions[fp, 1])
+                    pos_sz += float64(p_positions[fp, 2])
+                    fcount += 1
+                if fcount > 0:
+                    nl = math.sqrt(nor_sx * nor_sx + nor_sy * nor_sy + nor_sz * nor_sz)
+                    tl = math.sqrt(tan_sx * tan_sx + tan_sy * tan_sy + tan_sz * tan_sz)
+                    if nl > float64(1e-30) and tl > float64(1e-30):
+                        cwpx = float32(pos_sx / float64(fcount))
+                        cwpy = float32(pos_sy / float64(fcount))
+                        cwpz = float32(pos_sz / float64(fcount))
+                        cwrx, cwry, cwrz, cwrw = dmath.to_rotation(
+                            float32(nor_sx / nl), float32(nor_sy / nl), float32(nor_sz / nl),
+                            float32(tan_sx / tl), float32(tan_sy / tl), float32(tan_sz / tl))
+
+                # --- teleport negative_scale_matrix (uses centre pose) ---
+                if teleport:
+                    dmath.trs_build_f64(mat_a, cwpx, cwpy, cwpz, cwrx, cwry, cwrz, cwrw, csx, csy, csz)
+                    dmath.trs_inverse_f64(
+                        mat_b, t_old_frame_world_position[i, 0], t_old_frame_world_position[i, 1],
+                        t_old_frame_world_position[i, 2], t_old_frame_world_rotation[i, 0],
+                        t_old_frame_world_rotation[i, 1], t_old_frame_world_rotation[i, 2],
+                        t_old_frame_world_rotation[i, 3], t_old_frame_world_scale[i, 0],
+                        t_old_frame_world_scale[i, 1], t_old_frame_world_scale[i, 2])
+                    dmath.mat4_mul_f64(t_negative_scale_matrix[i], mat_a, mat_b)
+
+                # --- anchor ---
+                adv_x = float32(0.0)
+                adv_y = float32(0.0)
+                adv_z = float32(0.0)
+                adr_x = float32(0.0)
+                adr_y = float32(0.0)
+                adr_z = float32(0.0)
+                adr_w = float32(1.0)
+                has_anc = t_has_anchor[i] != 0
+                anchor_reset = (has_anc != (t_had_anchor[i] != 0)) or (t_reset_pending[i] != 0)
+                t_had_anchor[i] = int32(1) if has_anc else int32(0)
+                if anchor_reset:
+                    iqx, iqy, iqz, iqw = dmath.quat_inverse(
+                        t_anchor_rotation[i, 0], t_anchor_rotation[i, 1],
+                        t_anchor_rotation[i, 2], t_anchor_rotation[i, 3])
+                    alx, aly, alz = dmath.quat_rotate(
+                        iqx, iqy, iqz, iqw, cpx - t_anchor_position[i, 0],
+                        cpy - t_anchor_position[i, 1], cpz - t_anchor_position[i, 2])
+                    t_old_anchor_position[i, 0] = t_anchor_position[i, 0]
+                    t_old_anchor_position[i, 1] = t_anchor_position[i, 1]
+                    t_old_anchor_position[i, 2] = t_anchor_position[i, 2]
+                    t_old_anchor_rotation[i, 0] = t_anchor_rotation[i, 0]
+                    t_old_anchor_rotation[i, 1] = t_anchor_rotation[i, 1]
+                    t_old_anchor_rotation[i, 2] = t_anchor_rotation[i, 2]
+                    t_old_anchor_rotation[i, 3] = t_anchor_rotation[i, 3]
+                    t_anchor_component_local_position[i, 0] = alx
+                    t_anchor_component_local_position[i, 1] = aly
+                    t_anchor_component_local_position[i, 2] = alz
+                if has_anc:
+                    rlx, rly, rlz = dmath.quat_rotate(
+                        t_anchor_rotation[i, 0], t_anchor_rotation[i, 1], t_anchor_rotation[i, 2],
+                        t_anchor_rotation[i, 3], t_anchor_component_local_position[i, 0],
+                        t_anchor_component_local_position[i, 1], t_anchor_component_local_position[i, 2])
+                    dvx = (rlx + t_anchor_position[i, 0]) - ocp_x
+                    dvy = (rly + t_anchor_position[i, 1]) - ocp_y
+                    dvz = (rlz + t_anchor_position[i, 2]) - ocp_z
+                    ioax, ioay, ioaz, ioaw = dmath.quat_inverse(
+                        t_old_anchor_rotation[i, 0], t_old_anchor_rotation[i, 1],
+                        t_old_anchor_rotation[i, 2], t_old_anchor_rotation[i, 3])
+                    drx, dry, drz, drw = dmath.quat_mul(
+                        t_anchor_rotation[i, 0], t_anchor_rotation[i, 1], t_anchor_rotation[i, 2],
+                        t_anchor_rotation[i, 3], ioax, ioay, ioaz, ioaw)
+                    a_ratio = float32(1.0) - t_anchor_inertia[i]
+                    adv_x = dvx * a_ratio
+                    adv_y = dvy * a_ratio
+                    adv_z = dvz * a_ratio
+                    adr_x, adr_y, adr_z, adr_w = dmath.quat_slerp(
+                        float32(0.0), float32(0.0), float32(0.0), float32(1.0),
+                        drx, dry, drz, drw, a_ratio)
+                    ocp_x = ocp_x + adv_x
+                    ocp_y = ocp_y + adv_y
+                    ocp_z = ocp_z + adv_z
+                    ocr_x, ocr_y, ocr_z, ocr_w = dmath.quat_mul(
+                        adr_x, adr_y, adr_z, adr_w, ocr_x, ocr_y, ocr_z, ocr_w)
+                    t_inertia_shift[i] = int32(1)
+
+                # --- frame delta + teleport distance/angle check ---
+                fdvx = cpx - ocp_x
+                fdvy = cpy - ocp_y
+                fdvz = cpz - ocp_z
+                fda = dmath.quat_angle(ocr_x, ocr_y, ocr_z, ocr_w, crx, cry, crz, crw)
+                if (t_teleport_mode[i] != 0) and (t_reset_pending[i] == 0):
+                    far = float64(dmath.length3(fdvx, fdvy, fdvz)) >= \
+                        float64(t_teleport_distance[i]) * csr_ratio
+                    spun = (fda * RAD2DEG) >= t_teleport_rotation[i]
+                    if far or spun:
+                        if t_teleport_mode[i] == TELEPORT_RESET:
+                            t_reset_pending[i] = int32(1)
+                        else:
+                            t_keep_teleport_pending[i] = int32(1)
+
+                reset = t_reset_pending[i] != 0
+                keep = t_keep_teleport_pending[i] != 0
+
+                # --- smoothing ---
+                sdv_x = float32(0.0)
+                sdv_y = float32(0.0)
+                sdv_z = float32(0.0)
+                if (t_movement_inertia_smoothing[i] >= float32(1e-6)) and (not (keep or reset)):
+                    running = t_running[i] != 0
+                    fdt_i = t_frame_dt[i]
+                    if fdt_i > float32(0.0):
+                        dvx = fdvx / fdt_i
+                        dvy = fdvy / fdt_i
+                        dvz = fdvz / fdt_i
+                    else:
+                        dvx = float32(0.0)
+                        dvy = float32(0.0)
+                        dvz = float32(0.0)
+                    limit = t_movement_speed_limit[i] * float32(csr_ratio)
+                    mlim = limit if limit > float32(0.0) else float32(0.0)
+                    cvx, cvy, cvz = dmath.clamp_vector(dvx, dvy, dvz, mlim)
+                    if limit >= float32(0.0):
+                        dvx = cvx
+                        dvy = cvy
+                        dvz = cvz
+                    mis = t_movement_inertia_smoothing[i]
+                    om = float32(1.0) - mis
+                    avg = dmath.saturate(om * om * om * float32(0.99) + float32(0.01))
+                    svx = t_smoothing_velocity[i, 0]
+                    svy = t_smoothing_velocity[i, 1]
+                    svz = t_smoothing_velocity[i, 2]
+                    smx = dmath.lerp(svx, dvx, avg)
+                    smy = dmath.lerp(svy, dvy, avg)
+                    smz = dmath.lerp(svz, dvz, avg)
+                    if running:
+                        t_smoothing_velocity[i, 0] = smx
+                        t_smoothing_velocity[i, 1] = smy
+                        t_smoothing_velocity[i, 2] = smz
+                        svx = smx
+                        svy = smy
+                        svz = smz
+                    spx = cpx - svx * fdt_i
+                    spy = cpy - svy * fdt_i
+                    spz = cpz - svz * fdt_i
+                    sdv_x = spx - ocp_x
+                    sdv_y = spy - ocp_y
+                    sdv_z = spz - ocp_z
+                    ocp_x = spx
+                    ocp_y = spy
+                    ocp_z = spz
+                    t_inertia_shift[i] = int32(1)
+
+                # --- frame_world store + reset / neg_only snapshots ---
+                t_frame_world_position[i, 0] = cwpx
+                t_frame_world_position[i, 1] = cwpy
+                t_frame_world_position[i, 2] = cwpz
+                t_frame_world_rotation[i, 0] = cwrx
+                t_frame_world_rotation[i, 1] = cwry
+                t_frame_world_rotation[i, 2] = cwrz
+                t_frame_world_rotation[i, 3] = cwrw
+                t_frame_world_scale[i, 0] = csx
+                t_frame_world_scale[i, 1] = csy
+                t_frame_world_scale[i, 2] = csz
+                if reset:
+                    t_old_component_world_position[i, 0] = cpx
+                    t_old_component_world_position[i, 1] = cpy
+                    t_old_component_world_position[i, 2] = cpz
+                    t_old_component_world_rotation[i, 0] = crx
+                    t_old_component_world_rotation[i, 1] = cry
+                    t_old_component_world_rotation[i, 2] = crz
+                    t_old_component_world_rotation[i, 3] = crw
+                    t_old_component_world_scale[i, 0] = csx
+                    t_old_component_world_scale[i, 1] = csy
+                    t_old_component_world_scale[i, 2] = csz
+                    ocp_x = cpx
+                    ocp_y = cpy
+                    ocp_z = cpz
+                    ocr_x = crx
+                    ocr_y = cry
+                    ocr_z = crz
+                    ocr_w = crw
+                if reset or (teleport and (not reset)):
+                    t_old_frame_world_position[i, 0] = cwpx
+                    t_old_frame_world_position[i, 1] = cwpy
+                    t_old_frame_world_position[i, 2] = cwpz
+                    t_old_frame_world_rotation[i, 0] = cwrx
+                    t_old_frame_world_rotation[i, 1] = cwry
+                    t_old_frame_world_rotation[i, 2] = cwrz
+                    t_old_frame_world_rotation[i, 3] = cwrw
+                    t_old_frame_world_scale[i, 0] = csx
+                    t_old_frame_world_scale[i, 1] = csy
+                    t_old_frame_world_scale[i, 2] = csz
+                    t_now_world_position[i, 0] = cwpx
+                    t_now_world_position[i, 1] = cwpy
+                    t_now_world_position[i, 2] = cwpz
+                    t_now_world_rotation[i, 0] = cwrx
+                    t_now_world_rotation[i, 1] = cwry
+                    t_now_world_rotation[i, 2] = cwrz
+                    t_now_world_rotation[i, 3] = cwrw
+                    t_old_world_position[i, 0] = cwpx
+                    t_old_world_position[i, 1] = cwpy
+                    t_old_world_position[i, 2] = cwpz
+                    t_old_world_rotation[i, 0] = cwrx
+                    t_old_world_rotation[i, 1] = cwry
+                    t_old_world_rotation[i, 2] = cwrz
+                    t_old_world_rotation[i, 3] = cwrw
+
+                # --- work vars + shift setup ---
+                wpx = ocp_x
+                wpy = ocp_y
+                wpz = ocp_z
+                wrx = ocr_x
+                wry = ocr_y
+                wrz = ocr_z
+                wrw = ocr_w
+                shv_x = float32(0.0)
+                shv_y = float32(0.0)
+                shv_z = float32(0.0)
+                shr_x = float32(0.0)
+                shr_y = float32(0.0)
+                shr_z = float32(0.0)
+                shr_w = float32(1.0)
+                if reset:
+                    t_smoothing_velocity[i, 0] = float32(0.0)
+                    t_smoothing_velocity[i, 1] = float32(0.0)
+                    t_smoothing_velocity[i, 2] = float32(0.0)
+                    sdv_x = float32(0.0)
+                    sdv_y = float32(0.0)
+                    sdv_z = float32(0.0)
+
+                # --- world inertia shift (live teams) ---
+                if not reset:
+                    shv_x = cpx - ocp_x
+                    shv_y = cpy - ocp_y
+                    shv_z = cpz - ocp_z
+                    iox, ioy, ioz, iow = dmath.quat_inverse(ocr_x, ocr_y, ocr_z, ocr_w)
+                    shr_x, shr_y, shr_z, shr_w = dmath.quat_mul(crx, cry, crz, crw, iox, ioy, ioz, iow)
+                    msr = float32(0.0)
+                    rsr = float32(0.0)
+                    keep_now = keep or (t_culling_invisible[i] != 0)
+                    if keep_now:
+                        movement_shift = float32(1.0)
+                    else:
+                        movement_shift = float32(1.0) - t_world_inertia[i]
+                    rotation_shift = movement_shift
+                    if movement_shift > EPSILON:
+                        t_inertia_shift[i] = int32(1)
+                        msr = movement_shift
+                        rsr = rotation_shift
+                        wpx = dmath.lerp(wpx, cpx, movement_shift)
+                        wpy = dmath.lerp(wpy, cpy, movement_shift)
+                        wpz = dmath.lerp(wpz, cpz, movement_shift)
+                        wrx, wry, wrz, wrw = dmath.quat_slerp(
+                            wrx, wry, wrz, wrw, crx, cry, crz, crw, rotation_shift)
+                    movement_limit = float64(t_movement_speed_limit[i]) * csr_ratio
+                    rotation_limit = t_rotation_speed_limit[i]
+                    dvx = cpx - wpx
+                    dvy = cpy - wpy
+                    dvz = cpz - wpz
+                    dang = dmath.quat_angle(wrx, wry, wrz, wrw, crx, cry, crz, crw)
+                    fdt_l = t_frame_dt[i]
+                    if fdt_l > float32(0.0):
+                        frame_speed = dmath.length3(dvx, dvy, dvz) / fdt_l
+                        frame_rot_speed = (dang * RAD2DEG) / fdt_l
+                    else:
+                        frame_speed = float32(0.0)
+                        frame_rot_speed = float32(0.0)
+                    over_move = (float64(frame_speed) > movement_limit) and \
+                        (t_movement_speed_limit[i] >= float32(0.0))
+                    if over_move:
+                        t_inertia_shift[i] = int32(1)
+                        denom_fs = frame_speed if frame_speed > float32(0.0) else float32(1.0)
+                        mlr = dmath.saturate((frame_speed - float32(movement_limit)) / denom_fs)
+                    else:
+                        mlr = float32(0.0)
+                    msr = msr + (float32(1.0) - msr) * mlr
+                    if over_move:
+                        wpx = dmath.lerp(wpx, cpx, mlr)
+                        wpy = dmath.lerp(wpy, cpy, mlr)
+                        wpz = dmath.lerp(wpz, cpz, mlr)
+                    over_rot = (frame_rot_speed > rotation_limit) and (rotation_limit >= float32(0.0))
+                    if over_rot:
+                        t_inertia_shift[i] = int32(1)
+                        denom_frs = frame_rot_speed if frame_rot_speed > float32(0.0) else float32(1.0)
+                        rlr = dmath.saturate((frame_rot_speed - rotation_limit) / denom_frs)
+                    else:
+                        rlr = float32(0.0)
+                    rsr = rsr + (float32(1.0) - rsr) * rlr
+                    if over_rot:
+                        wrx, wry, wrz, wrw = dmath.quat_slerp(
+                            wrx, wry, wrz, wrw, crx, cry, crz, crw, rlr)
+                    osr = float64(0.0)
+                    skip = t_skip_count[i]
+                    scaled_dt = fdt_l * t_now_time_scale[i]
+                    if (skip > 0) and (scaled_dt > float32(0.0)):
+                        sr = float64(skip) * float64(sim_dt) / float64(scaled_dt)
+                        if sr < float64(0.0):
+                            sr = float64(0.0)
+                        elif sr > float64(1.0):
+                            sr = float64(1.0)
+                        osr = osr + (float64(1.0) - osr) * sr
+                    vw = t_velocity_weight[i]
+                    if vw < float32(1.0):
+                        osr = osr + (float64(1.0) - osr) * (float64(1.0) - float64(vw))
+                    nts = t_now_time_scale[i]
+                    if nts < float32(1.0):
+                        osr = osr + (float64(1.0) - osr) * (float64(1.0) - float64(nts))
+                    msr_final = float64(msr)
+                    rsr_final = float64(rsr)
+                    if osr > float64(0.0):
+                        t_inertia_shift[i] = int32(1)
+                        msr_final = msr_final + (float64(1.0) - msr_final) * osr
+                        osr_f32 = float32(osr)
+                        wpx = dmath.lerp(wpx, cpx, osr_f32)
+                        wpy = dmath.lerp(wpy, cpy, osr_f32)
+                        wpz = dmath.lerp(wpz, cpz, osr_f32)
+                        rsr_final = rsr_final + (float64(1.0) - rsr_final) * osr
+                        wrx, wry, wrz, wrw = dmath.quat_slerp(
+                            wrx, wry, wrz, wrw, crx, cry, crz, crw, osr_f32)
+                    if t_inertia_shift[i] != 0:
+                        vecx = float64(shv_x) * msr_final + float64(adv_x) + float64(sdv_x)
+                        vecy = float64(shv_y) * msr_final + float64(adv_y) + float64(sdv_y)
+                        vecz = float64(shv_z) * msr_final + float64(adv_z) + float64(sdv_z)
+                        rqx, rqy, rqz, rqw = dmath.quat_slerp(
+                            float32(0.0), float32(0.0), float32(0.0), float32(1.0),
+                            shr_x, shr_y, shr_z, shr_w, float32(rsr_final))
+                        rqx, rqy, rqz, rqw = dmath.quat_mul(adr_x, adr_y, adr_z, adr_w, rqx, rqy, rqz, rqw)
+                        t_frame_component_shift_vector[i, 0] = float32(vecx)
+                        t_frame_component_shift_vector[i, 1] = float32(vecy)
+                        t_frame_component_shift_vector[i, 2] = float32(vecz)
+                        t_frame_component_shift_rotation[i, 0] = rqx
+                        t_frame_component_shift_rotation[i, 1] = rqy
+                        t_frame_component_shift_rotation[i, 2] = rqz
+                        t_frame_component_shift_rotation[i, 3] = rqw
+                        oc_x = t_old_component_world_position[i, 0]
+                        oc_y = t_old_component_world_position[i, 1]
+                        oc_z = t_old_component_world_position[i, 2]
+                        rlx1, rly1, rlz1 = dmath.quat_rotate(
+                            rqx, rqy, rqz, rqw, t_old_frame_world_position[i, 0] - oc_x,
+                            t_old_frame_world_position[i, 1] - oc_y, t_old_frame_world_position[i, 2] - oc_z)
+                        t_old_frame_world_position[i, 0] = float32(float64(rlx1 + oc_x) + vecx)
+                        t_old_frame_world_position[i, 1] = float32(float64(rly1 + oc_y) + vecy)
+                        t_old_frame_world_position[i, 2] = float32(float64(rlz1 + oc_z) + vecz)
+                        oqx, oqy, oqz, oqw = dmath.quat_mul(
+                            rqx, rqy, rqz, rqw, t_old_frame_world_rotation[i, 0],
+                            t_old_frame_world_rotation[i, 1], t_old_frame_world_rotation[i, 2],
+                            t_old_frame_world_rotation[i, 3])
+                        t_old_frame_world_rotation[i, 0] = oqx
+                        t_old_frame_world_rotation[i, 1] = oqy
+                        t_old_frame_world_rotation[i, 2] = oqz
+                        t_old_frame_world_rotation[i, 3] = oqw
+                        rlx2, rly2, rlz2 = dmath.quat_rotate(
+                            rqx, rqy, rqz, rqw, t_now_world_position[i, 0] - oc_x,
+                            t_now_world_position[i, 1] - oc_y, t_now_world_position[i, 2] - oc_z)
+                        t_now_world_position[i, 0] = float32(float64(rlx2 + oc_x) + vecx)
+                        t_now_world_position[i, 1] = float32(float64(rly2 + oc_y) + vecy)
+                        t_now_world_position[i, 2] = float32(float64(rlz2 + oc_z) + vecz)
+                        nqx, nqy, nqz, nqw = dmath.quat_mul(
+                            rqx, rqy, rqz, rqw, t_now_world_rotation[i, 0],
+                            t_now_world_rotation[i, 1], t_now_world_rotation[i, 2],
+                            t_now_world_rotation[i, 3])
+                        t_now_world_rotation[i, 0] = nqx
+                        t_now_world_rotation[i, 1] = nqy
+                        t_now_world_rotation[i, 2] = nqz
+                        t_now_world_rotation[i, 3] = nqw
+                    else:
+                        t_frame_component_shift_vector[i, 0] = shv_x
+                        t_frame_component_shift_vector[i, 1] = shv_y
+                        t_frame_component_shift_vector[i, 2] = shv_z
+                        t_frame_component_shift_rotation[i, 0] = shr_x
+                        t_frame_component_shift_rotation[i, 1] = shr_y
+                        t_frame_component_shift_rotation[i, 2] = shr_z
+                        t_frame_component_shift_rotation[i, 3] = shr_w
+                if reset:
+                    t_frame_component_shift_vector[i, 0] = float32(0.0)
+                    t_frame_component_shift_vector[i, 1] = float32(0.0)
+                    t_frame_component_shift_vector[i, 2] = float32(0.0)
+                    t_frame_component_shift_rotation[i, 0] = float32(0.0)
+                    t_frame_component_shift_rotation[i, 1] = float32(0.0)
+                    t_frame_component_shift_rotation[i, 2] = float32(0.0)
+                    t_frame_component_shift_rotation[i, 3] = float32(1.0)
+
+                # --- moving speed / direction ---
+                mvx = cpx - wpx
+                mvy = cpy - wpy
+                mvz = cpz - wpz
+                mlen = dmath.length3(mvx, mvy, mvz)
+                fdt_m = t_frame_dt[i]
+                if fdt_m > float32(0.0):
+                    speed = mlen / fdt_m
+                else:
+                    speed = float32(0.0)
+                nts_m = t_now_time_scale[i]
+                if nts_m > float32(1e-6):
+                    speed = speed * (float32(1.0) / nts_m)
+                else:
+                    speed = float32(0.0)
+                t_frame_moving_speed[i] = speed
+                if mlen > float32(1e-6):
+                    t_frame_moving_direction[i, 0] = mvx / mlen
+                    t_frame_moving_direction[i, 1] = mvy / mlen
+                    t_frame_moving_direction[i, 2] = mvz / mlen
+                else:
+                    t_frame_moving_direction[i, 0] = float32(0.0)
+                    t_frame_moving_direction[i, 1] = float32(0.0)
+                    t_frame_moving_direction[i, 2] = float32(0.0)
+
+                # --- stabilize ---
+                if (t_reset_pending[i] != 0) or (t_time_reset[i] != 0):
+                    if t_stablization_time[i] > float32(1e-6):
+                        wgt = float32(0.0)
+                    else:
+                        wgt = float32(1.0)
+                    t_velocity_weight[i] = wgt
+                    t_blend_weight[i] = wgt
+
+                # --- select_team_wind ---
+                old_count = t_wind_count[i]
+                for oc in range(WIND_ZONE_SLOTS):
+                    if oc < old_count:
+                        old_zid[oc] = t_wind_zone_id[i, oc]
+                        old_wt[oc] = t_wind_time[i, oc]
+                count = 0
+                if n_zones > 0 and t_wind_influence[i] > EPSILON:
+                    cx64 = float64(cwpx)
+                    cy64 = float64(cwpy)
+                    cz64 = float64(cwpz)
+                    min_volume = INF
+                    addition_count = 0
+                    latest_valid = False
+                    latest_id = int32(0)
+                    for zi in range(n_zones):
+                        is_add = z_is_addition[zi] != 0
+                        if is_add and addition_count >= 3:
+                            continue
+                        mode = z_mode[zi]
+                        zvol = z_zone_volume[zi]
+                        wm = z_world_to_local[zi]
+                        lxx = wm[0, 0] * cx64 + wm[0, 1] * cy64 + wm[0, 2] * cz64 + wm[0, 3]
+                        lyy = wm[1, 0] * cx64 + wm[1, 1] * cy64 + wm[1, 2] * cz64 + wm[1, 3]
+                        lzz = wm[2, 0] * cx64 + wm[2, 1] * cy64 + wm[2, 2] * cz64 + wm[2, 3]
+                        llen = math.sqrt(lxx * lxx + lyy * lyy + lzz * lzz)
+                        skip_zone = False
+                        if mode == ZONE_BOX:
+                            if abs(lxx) * float64(2.0) > float64(z_size[zi, 0]) or \
+                                    abs(lyy) * float64(2.0) > float64(z_size[zi, 1]) or \
+                                    abs(lzz) * float64(2.0) > float64(z_size[zi, 2]):
+                                skip_zone = True
+                        elif mode == ZONE_SPHERE_DIR or mode == ZONE_SPHERE_RADIAL:
+                            if llen > float64(z_size[zi, 0]):
+                                skip_zone = True
+                        if skip_zone:
+                            continue
+                        if (not is_add) and (zvol > min_volume):
+                            continue
+                        dirx = z_world_direction[zi, 0]
+                        diry = z_world_direction[zi, 1]
+                        dirz = z_world_direction[zi, 2]
+                        zmain = z_main[zi]
+                        if mode == ZONE_SPHERE_RADIAL:
+                            if llen <= float64(1e-6):
+                                continue
+                            vx64 = cx64 - float64(z_world_position[zi, 0])
+                            vy64 = cy64 - float64(z_world_position[zi, 1])
+                            vz64 = cz64 - float64(z_world_position[zi, 2])
+                            vlen = math.sqrt(vx64 * vx64 + vy64 * vy64 + vz64 * vz64)
+                            dirx = float32(vx64 / vlen)
+                            diry = float32(vy64 / vlen)
+                            dirz = float32(vz64 / vlen)
+                            depth = llen / float64(z_size[zi, 0])
+                            if depth < float64(0.0):
+                                depth = float64(0.0)
+                            elif depth > float64(1.0):
+                                depth = float64(1.0)
+                            zmain = zmain * dmath.evaluate_team_lut_clamp01(
+                                z_attenuation_lut, zi, float32(depth))
+                        zid = z_zone_id[zi]
+                        t_prev = -WIND_MAX_TIME
+                        for oi in range(WIND_ZONE_SLOTS):
+                            if oi < old_count and old_zid[oi] == zid:
+                                t_prev = old_wt[oi]
+                        zturb = z_turbulence[zi]
+                        if is_add:
+                            res_zone_id[count] = zid
+                            res_time[count] = t_prev
+                            res_main[count] = zmain
+                            res_dx[count] = dirx
+                            res_dy[count] = diry
+                            res_dz[count] = dirz
+                            res_turb[count] = zturb
+                            count += 1
+                            addition_count += 1
+                        else:
+                            if latest_valid:
+                                w = 0
+                                for r in range(count):
+                                    if res_zone_id[r] != latest_id:
+                                        res_zone_id[w] = res_zone_id[r]
+                                        res_time[w] = res_time[r]
+                                        res_main[w] = res_main[r]
+                                        res_dx[w] = res_dx[r]
+                                        res_dy[w] = res_dy[r]
+                                        res_dz[w] = res_dz[r]
+                                        res_turb[w] = res_turb[r]
+                                        w += 1
+                                count = w
+                            res_zone_id[count] = zid
+                            res_time[count] = t_prev
+                            res_main[count] = zmain
+                            res_dx[count] = dirx
+                            res_dy[count] = diry
+                            res_dz[count] = dirz
+                            res_turb[count] = zturb
+                            count += 1
+                            min_volume = zvol
+                            latest_id = zid
+                            latest_valid = True
+                final = count if count < WIND_ZONE_SLOTS else WIND_ZONE_SLOTS
+                t_wind_count[i] = int8(final)
+                for s in range(final):
+                    t_wind_zone_id[i, s] = res_zone_id[s]
+                    t_wind_time[i, s] = res_time[s]
+                    t_wind_main[i, s] = res_main[s]
+                    t_wind_direction[i, s, 0] = res_dx[s]
+                    t_wind_direction[i, s, 1] = res_dy[s]
+                    t_wind_direction[i, s, 2] = res_dz[s]
+                    t_wind_zone_turbulence[i, s] = res_turb[s]
+                    dqx, dqy, dqz, dqw = dmath.axis_quaternion(res_dx[s], res_dy[s], res_dz[s])
+                    t_wind_dirq[i, s, 0] = dqx
+                    t_wind_dirq[i, s, 1] = dqy
+                    t_wind_dirq[i, s, 2] = dqz
+                    t_wind_dirq[i, s, 3] = dqw
+            i += stride
     grid.sync()
 
     # P2 particles.frame_pre (per-particle; reset snapshot / negative-scale / inertia shift)
@@ -2657,6 +3452,11 @@ TEAM_KERNEL_FIELDS = (
     "collision_mode", "limit_distance_lut", "negative_scale_matrix",
     "negative_scale_change", "frame_component_shift_vector",
     "frame_component_shift_rotation",
+    "sync_target", "sync_top", "negative_scale_triangle_sign",
+    "smoothing_velocity", "has_anchor", "had_anchor", "anchor_inertia",
+    "world_inertia", "movement_inertia_smoothing", "movement_speed_limit",
+    "rotation_speed_limit", "teleport_mode", "teleport_distance",
+    "teleport_rotation", "culling_invisible", "wind_direction", "wind_zone_id",
 )
 
 PARTICLE_KERNEL_FIELDS = (
@@ -2667,7 +3467,7 @@ PARTICLE_KERNEL_FIELDS = (
     "step_basic_rotations", "depth", "velocities", "old_positions", "friction",
     "vertex_root_local", "collision_normals", "static_friction", "real_velocities",
     "attr_move", "vertex_local_positions", "vertex_local_rotations",
-    "old_rotations", "display_positions",
+    "old_rotations", "display_positions", "vertex_bind_pose_rotations",
 )
 
 TRANSFORM_KERNEL_FIELDS = ("world", "bind_pose")
@@ -2704,6 +3504,7 @@ STATIC_KERNEL_FIELDS = (
     ("point_pair_collider", "point_pairs", "collider"),
     ("edge_pair_collider", "edge_pairs", "collider"),
     ("collision_edge", "collision_edges", "edge"),
+    ("center_fixed_particle", "center_fixed", "particle"),
 )
 
 # CSR gather tables (offsets + order uploaded from a program CsrTable attribute)
@@ -2711,6 +3512,7 @@ STATIC_CSR_FIELDS = (
     ("distance_csr_offsets", "distance_csr_order", "distance_csr"),
     ("point_pair_csr_offsets", "point_pair_csr_order", "point_pair_csr"),
     ("edge_pair_csr_offsets", "edge_pair_csr_order", "edge_pair_csr"),
+    ("center_fixed_csr_offsets", "center_fixed_csr_order", "center_fixed_csr"),
 )
 
 # direct program arrays uploaded verbatim (level tables + flat index sets)
