@@ -359,6 +359,15 @@ def frame_kernel(phase_mask, sub_begin, sub_end,
                  t_motion_backstop_lut,
                  t_bending_stiffness, t_negative_scale_sign,
                  t_negative_scale_direction, t_negative_scale_quaternion, t_is_negative_scale,
+                 t_component_world_position, t_component_world_rotation,
+                 t_old_component_world_position, t_old_component_world_rotation,
+                 t_old_component_world_scale,
+                 t_frame_world_position, t_frame_world_rotation, t_frame_world_scale,
+                 t_old_frame_world_position, t_old_frame_world_rotation, t_old_frame_world_scale,
+                 t_anchor_position, t_anchor_rotation,
+                 t_old_anchor_position, t_old_anchor_rotation, t_anchor_component_local_position,
+                 t_reset_pending, t_keep_teleport_pending, t_inertia_shift,
+                 t_negative_scale_teleport,
                  p_team, p_local_positions, p_local_normals, p_local_tangents,
                  p_skin_indices, p_skin_weights, p_positions, p_rotations,
                  p_next_positions, p_velocity_positions, p_step_basic_positions, p_vertex_root,
@@ -1211,7 +1220,71 @@ def frame_kernel(phase_mask, sub_begin, sub_end,
                 p += stride
         grid.sync()
 
-    # ----- FRAME-POST (F4 team_time.frame_post added next) -----
+    # ----- FRAME-POST -----
+    grid.sync()
+    # F4 team_time.frame_post (per-team bookkeeping, no cross-team dependency)
+    if phase_mask & PHASE_TEAM_POST:
+        i = tid
+        while i < num_teams:
+            if team_frame_mask(t_enabled, t_valid, t_cws, i):
+                run = t_running[i] != 0
+                t_old_component_world_position[i, 0] = t_component_world_position[i, 0]
+                t_old_component_world_position[i, 1] = t_component_world_position[i, 1]
+                t_old_component_world_position[i, 2] = t_component_world_position[i, 2]
+                t_old_component_world_rotation[i, 0] = t_component_world_rotation[i, 0]
+                t_old_component_world_rotation[i, 1] = t_component_world_rotation[i, 1]
+                t_old_component_world_rotation[i, 2] = t_component_world_rotation[i, 2]
+                t_old_component_world_rotation[i, 3] = t_component_world_rotation[i, 3]
+                t_old_component_world_scale[i, 0] = t_cws[i, 0]
+                t_old_component_world_scale[i, 1] = t_cws[i, 1]
+                t_old_component_world_scale[i, 2] = t_cws[i, 2]
+                if run:
+                    t_old_frame_world_position[i, 0] = t_frame_world_position[i, 0]
+                    t_old_frame_world_position[i, 1] = t_frame_world_position[i, 1]
+                    t_old_frame_world_position[i, 2] = t_frame_world_position[i, 2]
+                    t_old_frame_world_rotation[i, 0] = t_frame_world_rotation[i, 0]
+                    t_old_frame_world_rotation[i, 1] = t_frame_world_rotation[i, 1]
+                    t_old_frame_world_rotation[i, 2] = t_frame_world_rotation[i, 2]
+                    t_old_frame_world_rotation[i, 3] = t_frame_world_rotation[i, 3]
+                    t_old_frame_world_scale[i, 0] = t_frame_world_scale[i, 0]
+                    t_old_frame_world_scale[i, 1] = t_frame_world_scale[i, 1]
+                    t_old_frame_world_scale[i, 2] = t_frame_world_scale[i, 2]
+                    t_skip_count[i] = int32(0)
+                    t_force_mode[i] = 0
+                    t_impact_force[i, 0] = float32(0.0)
+                    t_impact_force[i, 1] = float32(0.0)
+                    t_impact_force[i, 2] = float32(0.0)
+                t_old_anchor_position[i, 0] = t_anchor_position[i, 0]
+                t_old_anchor_position[i, 1] = t_anchor_position[i, 1]
+                t_old_anchor_position[i, 2] = t_anchor_position[i, 2]
+                t_old_anchor_rotation[i, 0] = t_anchor_rotation[i, 0]
+                t_old_anchor_rotation[i, 1] = t_anchor_rotation[i, 1]
+                t_old_anchor_rotation[i, 2] = t_anchor_rotation[i, 2]
+                t_old_anchor_rotation[i, 3] = t_anchor_rotation[i, 3]
+                qix, qiy, qiz, qiw = dmath.quat_inverse(
+                    t_anchor_rotation[i, 0], t_anchor_rotation[i, 1],
+                    t_anchor_rotation[i, 2], t_anchor_rotation[i, 3])
+                dpx = t_component_world_position[i, 0] - t_anchor_position[i, 0]
+                dpy = t_component_world_position[i, 1] - t_anchor_position[i, 1]
+                dpz = t_component_world_position[i, 2] - t_anchor_position[i, 2]
+                alx, aly, alz = dmath.quat_rotate(qix, qiy, qiz, qiw, dpx, dpy, dpz)
+                t_anchor_component_local_position[i, 0] = alx
+                t_anchor_component_local_position[i, 1] = aly
+                t_anchor_component_local_position[i, 2] = alz
+                t_reset_pending[i] = 0
+                t_time_reset[i] = 0
+                t_running[i] = 0
+                t_keep_teleport_pending[i] = 0
+                t_inertia_shift[i] = 0
+                t_negative_scale_teleport[i] = 0
+                if t_time[i] > float32(7200.0):
+                    t_time[i] = t_time[i] - float32(3600.0)
+                    t_old_time[i] = t_old_time[i] - float32(3600.0)
+                    t_now_update[i] = t_now_update[i] - float32(3600.0)
+                    t_old_update[i] = t_old_update[i] - float32(3600.0)
+                    t_frame_update[i] = t_frame_update[i] - float32(3600.0)
+                    t_frame_old[i] = t_frame_old[i] - float32(3600.0)
+            i += stride
     grid.sync()
 
 
@@ -1240,6 +1313,15 @@ TEAM_KERNEL_FIELDS = (
     "motion_backstop_lut",
     "bending_stiffness", "negative_scale_sign",
     "negative_scale_direction", "negative_scale_quaternion", "is_negative_scale",
+    "component_world_position", "component_world_rotation",
+    "old_component_world_position", "old_component_world_rotation",
+    "old_component_world_scale",
+    "frame_world_position", "frame_world_rotation", "frame_world_scale",
+    "old_frame_world_position", "old_frame_world_rotation", "old_frame_world_scale",
+    "anchor_position", "anchor_rotation",
+    "old_anchor_position", "old_anchor_rotation", "anchor_component_local_position",
+    "reset_pending", "keep_teleport_pending", "inertia_shift",
+    "negative_scale_teleport",
 )
 
 PARTICLE_KERNEL_FIELDS = (
