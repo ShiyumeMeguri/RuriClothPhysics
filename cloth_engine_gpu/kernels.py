@@ -42,6 +42,7 @@ PHASE_COLLIDER_POST = int32(1 << 16)  # F3 collider.frame_post
 PHASE_PARTICLES_PRE = int32(1 << 17)  # P2 particles.frame_pre
 PHASE_SYNC = int32(1 << 18)          # T0 team_time.resolve_sync (frame-pre, per-team)
 PHASE_CENTER = int32(1 << 19)        # C0 center.run + select_team_wind (frame-pre, per-team)
+PHASE_ANGLE = int32(1 << 20)         # S7 angle.run (substep; limit + restoration passes)
 
 ALL_PHASES = int32(-1)
 
@@ -82,6 +83,12 @@ VOLUME_SCALE = float32(1000.0)
 BENDING_FIX_INV_MASS = float32(0.01)
 ONE_SIXTH = float32(1.0 / 6.0)
 TO_FIXED = float32(1e6)
+
+# S7 angle.run (defs.ANGLE_LIMIT_*): 3 iterations, per-iteration restoration ratio 0.1/0.3/0.5,
+# constant limit rotation ratio 0.4 and velocity attenuation 0.9.
+ANGLE_ITERATION = 3
+ANGLE_LIMIT_ROT_RATIO = float32(0.4)
+ANGLE_LIMIT_ATTENUATION = float32(0.9)
 
 FRICTION_MASS = float32(3.0)
 COLLIDER_SPHERE = int32(0)
@@ -1441,6 +1448,229 @@ def do_particles_frame_pre(p, p_team, p_positions, p_rotations, p_next_positions
         _rotate_vec(p_real_velocities, p, srx, sry, srz, srw)
 
 
+@cuda.jit(device=True)
+def do_angle_limit(v, p, vt, c_inv, p_inv, p_move,
+                   p_next_positions, p_velocity_positions, p_albuf_rotation,
+                   p_albuf_local_pos, p_albuf_local_rot, p_albuf_length, p_depth,
+                   t_angle_limit_lut, t_angle_limit_stiffness):
+    # mirrors stages/angle.py limit block for one pass entry (v child, p parent). (level,rank)
+    # bucketing makes v and p unique in the pass, so the parent write is race-free (no atomics).
+    prx = p_albuf_rotation[p, 0]
+    pry = p_albuf_rotation[p, 1]
+    prz = p_albuf_rotation[p, 2]
+    prw = p_albuf_rotation[p, 3]
+    lpx = p_albuf_local_pos[v, 0]
+    lpy = p_albuf_local_pos[v, 1]
+    lpz = p_albuf_local_pos[v, 2]
+    lrx = p_albuf_local_rot[v, 0]
+    lry = p_albuf_local_rot[v, 1]
+    lrz = p_albuf_local_rot[v, 2]
+    lrw = p_albuf_local_rot[v, 3]
+    cpx = p_next_positions[v, 0]
+    cpy = p_next_positions[v, 1]
+    cpz = p_next_positions[v, 2]
+    ppx = p_next_positions[p, 0]
+    ppy = p_next_positions[p, 1]
+    ppz = p_next_positions[p, 2]
+    vvx = cpx - ppx
+    vvy = cpy - ppy
+    vvz = cpz - ppz
+    vlen = dmath.length3(vvx, vvy, vvz)
+    skip1 = vlen < EPSILON
+    tvx, tvy, tvz = dmath.quat_rotate(prx, pry, prz, prw, lpx, lpy, lpz)
+    tvlen = dmath.length3(tvx, tvy, tvz)
+    snap = (not skip1) and (tvlen < EPSILON)
+    if snap:
+        p_velocity_positions[v, 0] += ppx - cpx
+        p_velocity_positions[v, 1] += ppy - cpy
+        p_velocity_positions[v, 2] += ppz - cpz
+        p_next_positions[v, 0] = ppx
+        p_next_positions[v, 1] = ppy
+        p_next_positions[v, 2] = ppz
+        sqx, sqy, sqz, sqw = dmath.quat_mul(prx, pry, prz, prw, lrx, lry, lrz, lrw)
+        p_albuf_rotation[v, 0] = sqx
+        p_albuf_rotation[v, 1] = sqy
+        p_albuf_rotation[v, 2] = sqz
+        p_albuf_rotation[v, 3] = sqw
+        cpx = ppx
+        cpy = ppy
+        cpz = ppz
+    work = (not skip1) and (not snap)
+    safe_vlen = vlen if vlen > float32(1e-30) else float32(1.0)
+    uvx = vvx / safe_vlen
+    uvy = vvy / safe_vlen
+    uvz = vvz / safe_vlen
+    safe_tvlen = tvlen if tvlen > float32(1e-30) else float32(1.0)
+    utvx = tvx / safe_tvlen
+    utvy = tvy / safe_tvlen
+    utvz = tvz / safe_tvlen
+    blen = p_albuf_length[v]
+    vlen2 = dmath.lerp(vlen, blen, float32(0.5))
+    work = work and (blen >= EPSILON) and (vlen2 >= EPSILON)
+    vsx = uvx * vlen2
+    vsy = uvy * vlen2
+    vsz = uvz * vlen2
+    ang = dmath.angle_between(vsx, vsy, vsz, utvx, utvy, utvz)
+    max_angle = DEG2RAD * dmath.evaluate_team_lut(t_angle_limit_lut, vt, p_depth[v])
+    over = ang > max_angle
+    recovery = dmath.lerp(ang, max_angle, t_angle_limit_stiffness[vt])
+    clx, cly, clz, _cn = dmath.clamp_angle_vector(vsx, vsy, vsz, utvx, utvy, utvz, recovery)
+    if over and work:
+        rvx = clx
+        rvy = cly
+        rvz = clz
+    else:
+        rvx = vsx
+        rvy = vsy
+        rvz = vsz
+    rpx = ppx + vsx * ANGLE_LIMIT_ROT_RATIO
+    rpy = ppy + vsy * ANGLE_LIMIT_ROT_RATIO
+    rpz = ppz + vsz * ANGLE_LIMIT_ROT_RATIO
+    pfx = rpx - rvx * ANGLE_LIMIT_ROT_RATIO
+    pfy = rpy - rvy * ANGLE_LIMIT_ROT_RATIO
+    pfz = rpz - rvz * ANGLE_LIMIT_ROT_RATIO
+    cfx = rpx + rvx * (float32(1.0) - ANGLE_LIMIT_ROT_RATIO)
+    cfy = rpy + rvy * (float32(1.0) - ANGLE_LIMIT_ROT_RATIO)
+    cfz = rpz + rvz * (float32(1.0) - ANGLE_LIMIT_ROT_RATIO)
+    if work:
+        paddx = (pfx - ppx) * p_inv
+        paddy = (pfy - ppy) * p_inv
+        paddz = (pfz - ppz) * p_inv
+        caddx = (cfx - cpx) * c_inv
+        caddy = (cfy - cpy) * c_inv
+        caddz = (cfz - cpz) * c_inv
+    else:
+        paddx = float32(0.0)
+        paddy = float32(0.0)
+        paddz = float32(0.0)
+        caddx = float32(0.0)
+        caddy = float32(0.0)
+        caddz = float32(0.0)
+    cpx = cpx + caddx
+    cpy = cpy + caddy
+    cpz = cpz + caddz
+    p_next_positions[v, 0] = cpx
+    p_next_positions[v, 1] = cpy
+    p_next_positions[v, 2] = cpz
+    p_velocity_positions[v, 0] += caddx * ANGLE_LIMIT_ATTENUATION
+    p_velocity_positions[v, 1] += caddy * ANGLE_LIMIT_ATTENUATION
+    p_velocity_positions[v, 2] += caddz * ANGLE_LIMIT_ATTENUATION
+    if work and p_move:
+        ppx = ppx + paddx
+        ppy = ppy + paddy
+        ppz = ppz + paddz
+        p_next_positions[p, 0] = ppx
+        p_next_positions[p, 1] = ppy
+        p_next_positions[p, 2] = ppz
+        p_velocity_positions[p, 0] += paddx * ANGLE_LIMIT_ATTENUATION
+        p_velocity_positions[p, 1] += paddy * ANGLE_LIMIT_ATTENUATION
+        p_velocity_positions[p, 2] += paddz * ANGLE_LIMIT_ATTENUATION
+    v3x = cpx - ppx
+    v3y = cpy - ppy
+    v3z = cpz - ppz
+    vlen3 = dmath.length3(v3x, v3y, v3z)
+    fix_ok = work and (vlen3 >= EPSILON)
+    safe_v3 = vlen3 if vlen3 > float32(1e-30) else float32(1.0)
+    uv3x = v3x / safe_v3
+    uv3y = v3y / safe_v3
+    uv3z = v3z / safe_v3
+    nrx, nry, nrz, nrw = dmath.quat_mul(prx, pry, prz, prw, lrx, lry, lrz, lrw)
+    qx, qy, qz, qw = dmath.from_to_rotation(utvx, utvy, utvz, uv3x, uv3y, uv3z, float32(1.0), True)
+    frx, fry, frz, frw = dmath.quat_mul(qx, qy, qz, qw, nrx, nry, nrz, nrw)
+    if fix_ok:
+        p_albuf_rotation[v, 0] = frx
+        p_albuf_rotation[v, 1] = fry
+        p_albuf_rotation[v, 2] = frz
+        p_albuf_rotation[v, 3] = frw
+
+
+@cuda.jit(device=True)
+def do_angle_restoration(v, p, vt, c_inv, p_inv, p_move, rot_ratio, power3,
+                         p_next_positions, p_velocity_positions, p_albuf_restore, p_depth,
+                         t_angle_restoration_lut, t_angle_restoration_attenuation,
+                         t_angle_restoration_gravity_falloff, t_gravity_dot):
+    # mirrors stages/angle.py restoration block for one pass entry (runs after the limit block
+    # on the same thread; positions refetched so limit's writes feed restoration).
+    stiff = dmath.evaluate_team_lut_clamp01(t_angle_restoration_lut, vt, p_depth[v])
+    stiff = dmath.saturate(stiff * power3)
+    gfo = dmath.lerp(float32(1.0) - t_angle_restoration_gravity_falloff[vt],
+                     float32(1.0), t_gravity_dot[vt])
+    stiff = stiff * gfo
+    r_attn = t_angle_restoration_attenuation[vt]
+    cpx = p_next_positions[v, 0]
+    cpy = p_next_positions[v, 1]
+    cpz = p_next_positions[v, 2]
+    ppx = p_next_positions[p, 0]
+    ppy = p_next_positions[p, 1]
+    ppz = p_next_positions[p, 2]
+    tvx = p_albuf_restore[v, 0]
+    tvy = p_albuf_restore[v, 1]
+    tvz = p_albuf_restore[v, 2]
+    tvlen = dmath.length3(tvx, tvy, tvz)
+    snap = tvlen < EPSILON
+    if snap:
+        p_velocity_positions[v, 0] += ppx - cpx
+        p_velocity_positions[v, 1] += ppy - cpy
+        p_velocity_positions[v, 2] += ppz - cpz
+        p_next_positions[v, 0] = ppx
+        p_next_positions[v, 1] = ppy
+        p_next_positions[v, 2] = ppz
+        cpx = ppx
+        cpy = ppy
+        cpz = ppz
+    vvx = cpx - ppx
+    vvy = cpy - ppy
+    vvz = cpz - ppz
+    vlen = dmath.length3(vvx, vvy, vvz)
+    work = (not snap) and (vlen >= EPSILON)
+    safe_vlen = vlen if vlen > float32(1e-30) else float32(1.0)
+    uvx = vvx / safe_vlen
+    uvy = vvy / safe_vlen
+    uvz = vvz / safe_vlen
+    safe_tvlen = tvlen if tvlen > float32(1e-30) else float32(1.0)
+    utvx = tvx / safe_tvlen
+    utvy = tvy / safe_tvlen
+    utvz = tvz / safe_tvlen
+    rqx, rqy, rqz, rqw = dmath.from_to_rotation(uvx, uvy, uvz, utvx, utvy, utvz, stiff, True)
+    rvx, rvy, rvz = dmath.quat_rotate(rqx, rqy, rqz, rqw, vvx, vvy, vvz)
+    rpx = ppx + vvx * rot_ratio
+    rpy = ppy + vvy * rot_ratio
+    rpz = ppz + vvz * rot_ratio
+    pfx = rpx - rvx * rot_ratio
+    pfy = rpy - rvy * rot_ratio
+    pfz = rpz - rvz * rot_ratio
+    cfx = rpx + rvx * (float32(1.0) - rot_ratio)
+    cfy = rpy + rvy * (float32(1.0) - rot_ratio)
+    cfz = rpz + rvz * (float32(1.0) - rot_ratio)
+    if work:
+        paddx = (pfx - ppx) * p_inv
+        paddy = (pfy - ppy) * p_inv
+        paddz = (pfz - ppz) * p_inv
+        caddx = (cfx - cpx) * c_inv
+        caddy = (cfy - cpy) * c_inv
+        caddz = (cfz - cpz) * c_inv
+    else:
+        paddx = float32(0.0)
+        paddy = float32(0.0)
+        paddz = float32(0.0)
+        caddx = float32(0.0)
+        caddy = float32(0.0)
+        caddz = float32(0.0)
+    p_next_positions[v, 0] = cpx + caddx
+    p_next_positions[v, 1] = cpy + caddy
+    p_next_positions[v, 2] = cpz + caddz
+    p_velocity_positions[v, 0] += caddx * r_attn
+    p_velocity_positions[v, 1] += caddy * r_attn
+    p_velocity_positions[v, 2] += caddz * r_attn
+    if work and p_move:
+        p_next_positions[p, 0] = ppx + paddx
+        p_next_positions[p, 1] = ppy + paddy
+        p_next_positions[p, 2] = ppz + paddz
+        p_velocity_positions[p, 0] += paddx * r_attn
+        p_velocity_positions[p, 1] += paddy * r_attn
+        p_velocity_positions[p, 2] += paddz * r_attn
+
+
 @cuda.jit(cache=True)
 def frame_kernel(phase_mask, sub_begin, sub_end,
                  fdt, sim_dt, max_sim_count, global_time_scale,
@@ -1491,6 +1721,9 @@ def frame_kernel(phase_mask, sub_begin, sub_end,
                  t_world_inertia, t_movement_inertia_smoothing, t_movement_speed_limit,
                  t_rotation_speed_limit, t_teleport_mode, t_teleport_distance,
                  t_teleport_rotation, t_culling_invisible, t_wind_direction, t_wind_zone_id,
+                 t_angle_use_limit, t_angle_use_restoration, t_angle_limit_lut,
+                 t_angle_limit_stiffness, t_angle_restoration_lut,
+                 t_angle_restoration_attenuation, t_angle_restoration_gravity_falloff,
                  p_team, p_local_positions, p_local_normals, p_local_tangents,
                  p_skin_indices, p_skin_weights, p_positions, p_rotations,
                  p_next_positions, p_velocity_positions, p_step_basic_positions, p_vertex_root,
@@ -1499,6 +1732,8 @@ def frame_kernel(phase_mask, sub_begin, sub_end,
                  p_vertex_root_local, p_collision_normals, p_static_friction, p_real_velocities,
                  p_attr_move, p_vertex_local_positions, p_vertex_local_rotations,
                  p_old_rotations, p_display_positions, p_vertex_bind_pose_rotations,
+                 p_vertex_parent, p_albuf_length, p_albuf_local_pos, p_albuf_local_rot,
+                 p_albuf_restore, p_albuf_rotation,
                  x_world, x_bind,
                  c_team, c_kind, c_center, c_size, c_axis, c_aligned, c_enabled,
                  c_enabled_prev, c_active, c_input_positions, c_input_rotations, c_input_scales,
@@ -1513,12 +1748,13 @@ def frame_kernel(phase_mask, sub_begin, sub_end,
                  st_motion_particle, st_motion_team,
                  st_bending_team, st_bending_pair, st_bending_rest, st_bending_sign,
                  st_point_pair_collider, st_edge_pair_collider, st_collision_edge,
-                 st_center_fixed_particle,
+                 st_center_fixed_particle, st_angle_buffered_particle,
                  csr_distance_offsets, csr_distance_order,
                  csr_point_pair_offsets, csr_point_pair_order,
                  csr_edge_pair_offsets, csr_edge_pair_order,
                  csr_center_fixed_offsets, csr_center_fixed_order,
                  fk_yes_offsets, fk_yes, fk_yes_parent, fk_no_offsets, fk_no, baseline_entries,
+                 angle_pass_offsets, angle_pass_vertices, angle_pass_parents,
                  sc_dcorr, sc_dcorr_fixed, sc_dcount, sc_col_friction_fixed, sc_col_normal_fixed,
                  sc_sync,
                  n_zones, z_zone_id, z_mode, z_is_addition, z_main, z_turbulence,
@@ -2373,6 +2609,8 @@ def frame_kernel(phase_mask, sub_begin, sub_end,
     n_bending = st_bending_team.shape[0]
     n_baseline = baseline_entries.shape[0]
     num_fk_levels = fk_yes_offsets.shape[0] - 1
+    n_angle_buffered = st_angle_buffered_particle.shape[0]
+    num_angle_passes = angle_pass_offsets.shape[0] - 1
     for _k in range(sub_begin, sub_end):
         # --- S1 team_time.step_update (per-team, first substep stage) ---
         if phase_mask & PHASE_TEAM_STEP:
@@ -2810,6 +3048,114 @@ def frame_kernel(phase_mask, sub_begin, sub_end,
                     p_velocity_positions[p, 2] += sc_dcorr[p, 2] * DISTANCE_VELOCITY_ATTENUATION
                 p += stride
         grid.sync()
+
+        # --- S7 angle.run: buffer segment -> 3 iterations x P (level,rank) passes ---
+        # Buffer a: for baseline entries whose team needs angle, snapshot step_basic_rotations
+        # into albuf_rotation (oracle does ALL baseline entries incl. fixed roots). Buffer b:
+        # for angle_buffered vertices (parent always >=0) build the limit local frame and the
+        # restoration target vector. a/b touch disjoint fields so they need no barrier between.
+        if phase_mask & PHASE_ANGLE:
+            i = tid
+            while i < n_baseline:
+                v = baseline_entries[i]
+                vt = p_team[v]
+                if team_frame_mask(t_enabled, t_valid, t_cws, vt) and t_update_count[vt] > _k \
+                        and (t_angle_use_limit[vt] != 0 or t_angle_use_restoration[vt] != 0):
+                    p_albuf_rotation[v, 0] = p_step_basic_rotations[v, 0]
+                    p_albuf_rotation[v, 1] = p_step_basic_rotations[v, 1]
+                    p_albuf_rotation[v, 2] = p_step_basic_rotations[v, 2]
+                    p_albuf_rotation[v, 3] = p_step_basic_rotations[v, 3]
+                i += stride
+            i = tid
+            while i < n_angle_buffered:
+                v = st_angle_buffered_particle[i]
+                vt = p_team[v]
+                if team_frame_mask(t_enabled, t_valid, t_cws, vt) and t_update_count[vt] > _k \
+                        and (t_angle_use_limit[vt] != 0 or t_angle_use_restoration[vt] != 0):
+                    par = p_vertex_parent[v]
+                    bvx = p_step_basic_positions[v, 0] - p_step_basic_positions[par, 0]
+                    bvy = p_step_basic_positions[v, 1] - p_step_basic_positions[par, 1]
+                    bvz = p_step_basic_positions[v, 2] - p_step_basic_positions[par, 2]
+                    if t_angle_use_limit[vt] != 0:
+                        dvx = p_next_positions[v, 0] - p_next_positions[par, 0]
+                        dvy = p_next_positions[v, 1] - p_next_positions[par, 1]
+                        dvz = p_next_positions[v, 2] - p_next_positions[par, 2]
+                        avlen = dmath.length3(dvx, dvy, dvz)
+                        bvlen = dmath.length3(bvx, bvy, bvz)
+                        if avlen < EPSILON or bvlen < EPSILON:
+                            p_albuf_length[v] = float32(0.0)
+                            p_albuf_local_pos[v, 0] = float32(0.0)
+                            p_albuf_local_pos[v, 1] = float32(0.0)
+                            p_albuf_local_pos[v, 2] = float32(0.0)
+                            p_albuf_local_rot[v, 0] = float32(0.0)
+                            p_albuf_local_rot[v, 1] = float32(0.0)
+                            p_albuf_local_rot[v, 2] = float32(0.0)
+                            p_albuf_local_rot[v, 3] = float32(1.0)
+                        else:
+                            safe_bv = bvlen if bvlen > float32(1e-30) else float32(1.0)
+                            dirx = bvx / safe_bv
+                            diry = bvy / safe_bv
+                            dirz = bvz / safe_bv
+                            ipx, ipy, ipz, ipw = dmath.quat_inverse(
+                                p_step_basic_rotations[par, 0], p_step_basic_rotations[par, 1],
+                                p_step_basic_rotations[par, 2], p_step_basic_rotations[par, 3])
+                            lpx, lpy, lpz = dmath.quat_rotate(ipx, ipy, ipz, ipw, dirx, diry, dirz)
+                            lrx, lry, lrz, lrw = dmath.quat_mul(
+                                ipx, ipy, ipz, ipw,
+                                p_step_basic_rotations[v, 0], p_step_basic_rotations[v, 1],
+                                p_step_basic_rotations[v, 2], p_step_basic_rotations[v, 3])
+                            p_albuf_length[v] = avlen
+                            p_albuf_local_pos[v, 0] = lpx
+                            p_albuf_local_pos[v, 1] = lpy
+                            p_albuf_local_pos[v, 2] = lpz
+                            p_albuf_local_rot[v, 0] = lrx
+                            p_albuf_local_rot[v, 1] = lry
+                            p_albuf_local_rot[v, 2] = lrz
+                            p_albuf_local_rot[v, 3] = lrw
+                    if t_angle_use_restoration[vt] != 0:
+                        p_albuf_restore[v, 0] = bvx
+                        p_albuf_restore[v, 1] = bvy
+                        p_albuf_restore[v, 2] = bvz
+                i += stride
+        grid.sync()
+        # 3 iterations, each walking passes in sorted (level,rank) order with a grid.sync wall.
+        for _ai in range(ANGLE_ITERATION):
+            angle_rot_ratio = float32(0.1) + (float32(0.5) - float32(0.1)) \
+                * (float32(_ai) / float32(2.0))
+            for _ap in range(num_angle_passes):
+                if phase_mask & PHASE_ANGLE:
+                    aps = angle_pass_offsets[_ap]
+                    ape = angle_pass_offsets[_ap + 1]
+                    e = aps + tid
+                    while e < ape:
+                        v = angle_pass_vertices[e]
+                        p = angle_pass_parents[e]
+                        vt = p_team[v]
+                        if team_frame_mask(t_enabled, t_valid, t_cws, vt) \
+                                and t_update_count[vt] > _k:
+                            ul = t_angle_use_limit[vt] != 0
+                            ur = t_angle_use_restoration[vt] != 0
+                            if ul or ur:
+                                c_inv = float32(1.0) / (float32(1.0) + p_friction[v] * FRICTION_MASS)
+                                p_inv = float32(1.0) / (float32(1.0) + p_friction[p] * FRICTION_MASS)
+                                p_mv = p_attr_move[p] != 0
+                                if ul:
+                                    do_angle_limit(v, p, vt, c_inv, p_inv, p_mv,
+                                                   p_next_positions, p_velocity_positions,
+                                                   p_albuf_rotation, p_albuf_local_pos,
+                                                   p_albuf_local_rot, p_albuf_length, p_depth,
+                                                   t_angle_limit_lut, t_angle_limit_stiffness)
+                                if ur:
+                                    do_angle_restoration(v, p, vt, c_inv, p_inv, p_mv,
+                                                         angle_rot_ratio, power3,
+                                                         p_next_positions, p_velocity_positions,
+                                                         p_albuf_restore, p_depth,
+                                                         t_angle_restoration_lut,
+                                                         t_angle_restoration_attenuation,
+                                                         t_angle_restoration_gravity_falloff,
+                                                         t_gravity_dot)
+                        e += stride
+                grid.sync()
 
         # --- S8 bending.run: clear -> per-pair scatter (int32 fixed-point) -> apply ---
         if phase_mask & PHASE_BENDING:
@@ -3457,6 +3803,9 @@ TEAM_KERNEL_FIELDS = (
     "world_inertia", "movement_inertia_smoothing", "movement_speed_limit",
     "rotation_speed_limit", "teleport_mode", "teleport_distance",
     "teleport_rotation", "culling_invisible", "wind_direction", "wind_zone_id",
+    "angle_use_limit", "angle_use_restoration", "angle_limit_lut",
+    "angle_limit_stiffness", "angle_restoration_lut",
+    "angle_restoration_attenuation", "angle_restoration_gravity_falloff",
 )
 
 PARTICLE_KERNEL_FIELDS = (
@@ -3468,6 +3817,8 @@ PARTICLE_KERNEL_FIELDS = (
     "vertex_root_local", "collision_normals", "static_friction", "real_velocities",
     "attr_move", "vertex_local_positions", "vertex_local_rotations",
     "old_rotations", "display_positions", "vertex_bind_pose_rotations",
+    "vertex_parent", "albuf_length", "albuf_local_pos", "albuf_local_rot",
+    "albuf_restore", "albuf_rotation",
 )
 
 TRANSFORM_KERNEL_FIELDS = ("world", "bind_pose")
@@ -3505,6 +3856,7 @@ STATIC_KERNEL_FIELDS = (
     ("edge_pair_collider", "edge_pairs", "collider"),
     ("collision_edge", "collision_edges", "edge"),
     ("center_fixed_particle", "center_fixed", "particle"),
+    ("angle_buffered_particle", "angle_buffered", "particle"),
 )
 
 # CSR gather tables (offsets + order uploaded from a program CsrTable attribute)
@@ -3519,4 +3871,5 @@ STATIC_CSR_FIELDS = (
 STATIC_DIRECT_FIELDS = (
     "fk_yes_offsets", "fk_yes", "fk_yes_parent", "fk_no_offsets", "fk_no",
     "baseline_entries",
+    "angle_pass_offsets", "angle_pass_vertices", "angle_pass_parents",
 )

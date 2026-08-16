@@ -127,6 +127,14 @@ class Program:
         self.angle_passes = []            # list of (vertices, parents)
         self.postline_levels = []         # list of (entry_vertex, child_owner, child_vertex)
 
+        # flattened angle (level,rank) passes (offsets[P+1] + concatenated vertices/parents),
+        # so a device loop over ``range(offsets.shape[0]-1)`` walks passes in sorted (level,rank)
+        # order with a grid.sync wall between them (Gauss-Seidel: parent albuf_rotation of a
+        # level-L vertex was finalised in an earlier pass at level < L this iteration).
+        self.angle_pass_offsets = None
+        self.angle_pass_vertices = None
+        self.angle_pass_parents = None
+
         # flattened FK level tables (offsets[num_levels+1] + concatenated values), so a
         # device loop over ``range(offsets.shape[0]-1)`` walks levels with a grid.sync
         # wall between them (parent step_basic of level L was written at level < L).
@@ -197,6 +205,9 @@ def build_program(world):
     program.fk_no_offsets, program.fk_no = _flatten_levels([lv[2] for lv in program.fk_levels])
     program.angle_passes = [(np.ascontiguousarray(v, I4), np.ascontiguousarray(p, I4))
                             for v, p in world.angle_passes]
+    program.angle_pass_offsets, program.angle_pass_vertices = \
+        _flatten_levels([v for v, _p in program.angle_passes])
+    _, program.angle_pass_parents = _flatten_levels([p for _v, p in program.angle_passes])
     program.postline_levels = [(np.ascontiguousarray(ev, I4), np.ascontiguousarray(co, I4),
                                 np.ascontiguousarray(cv, I4)) for ev, co, cv in world.postline_levels]
     program.postline_level_csr = [build_csr(co, int(ev.shape[0]))
