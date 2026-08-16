@@ -238,7 +238,8 @@ class RCP_OT_colliders_from_selected(bpy.types.Operator):
             item.shape = 'CAPSULE'
             item.bone = name
             item.direction = 'Y'
-            item.aligned_on_center = False
+            item.aligned_on_center = True
+            item.center = (0.0, bone.length * 0.5, 0.0)
             item.length = max(bone.length, 0.001)
             radius = max(bone.length * 0.2, 0.005)
             item.radius = radius
