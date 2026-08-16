@@ -27,6 +27,7 @@ PHASE_BASE_POSE = int32(1 << 1)      # P0/P1 particles.compute_base_pose (skinni
 PHASE_TETHER = int32(1 << 2)         # S5 tether.run (substep)
 PHASE_TEAM_POST = int32(1 << 3)      # F4 team_time.frame_post
 PHASE_PARTICLES_STEP = int32(1 << 4)  # S3 particles.step_update (substep)
+PHASE_STEP_POST = int32(1 << 5)      # S13 particles.step_post (substep)
 
 ALL_PHASES = int32(-1)
 
@@ -257,12 +258,15 @@ def frame_kernel(phase_mask, sub_begin, sub_end,
                  t_wind_count, t_wind_main, t_wind_time, t_wind_dirq, t_wind_zone_turbulence,
                  t_wind_influence, t_wind_depth_weight, t_moving_wind_main, t_wind_moving,
                  t_moving_wind_time, t_moving_wind_dirq,
+                 t_static_friction, t_dynamic_friction, t_particle_speed_limit,
+                 t_angular_velocity, t_centrifugal_acceleration, t_rotation_axis,
+                 t_now_world_position,
                  p_team, p_local_positions, p_local_normals, p_local_tangents,
                  p_skin_indices, p_skin_weights, p_positions, p_rotations,
                  p_next_positions, p_velocity_positions, p_step_basic_positions, p_vertex_root,
                  p_old_anim_positions, p_old_anim_rotations, p_base_positions, p_base_rotations,
                  p_step_basic_rotations, p_depth, p_velocities, p_old_positions, p_friction,
-                 p_vertex_root_local,
+                 p_vertex_root_local, p_collision_normals, p_static_friction, p_real_velocities,
                  x_world, x_bind,
                  st_tether_particle, st_tether_team,
                  st_move_particle, st_move_team, st_fixed_particle, st_fixed_team,
@@ -564,6 +568,150 @@ def frame_kernel(phase_mask, sub_begin, sub_end,
                 e += stride
         grid.sync()
 
+        # --- S13 particles.step_post PASS 1: friction / limit / centrifugal (move set) ---
+        if phase_mask & PHASE_STEP_POST:
+            e = tid
+            while e < n_move:
+                mt = st_move_team[e]
+                if team_frame_mask(t_enabled, t_valid, t_cws, mt) and t_update_count[mt] > _k:
+                    pmi = st_move_particle[e]
+                    n0 = p_next_positions[pmi, 0]
+                    n1 = p_next_positions[pmi, 1]
+                    n2 = p_next_positions[pmi, 2]
+                    o0 = p_old_positions[pmi, 0]
+                    o1 = p_old_positions[pmi, 1]
+                    o2 = p_old_positions[pmi, 2]
+                    vo0 = p_velocity_positions[pmi, 0]
+                    vo1 = p_velocity_positions[pmi, 1]
+                    vo2 = p_velocity_positions[pmi, 2]
+                    depth = p_depth[pmi]
+                    friction = p_friction[pmi]
+                    cn0 = p_collision_normals[pmi, 0]
+                    cn1 = p_collision_normals[pmi, 1]
+                    cn2 = p_collision_normals[pmi, 2]
+                    cn_len2 = cn0 * cn0 + cn1 * cn1 + cn2 * cn2
+                    is_collision = (cn_len2 > EPSILON) and (friction > EPSILON)
+                    static_param = t_static_friction[mt] * t_scale_ratio[mt]
+                    dynamic_param = t_dynamic_friction[mt]
+
+                    # static friction
+                    sfp = p_static_friction[pmi]
+                    static_on = static_param > float32(0.0)
+                    vx = n0 - o0
+                    vy = n1 - o1
+                    vz = n2 - o2
+                    vdotcn = vx * cn0 + vy * cn1 + vz * cn2
+                    tgx = vx - vdotcn * cn0
+                    tgy = vy - vdotcn * cn1
+                    tgz = vz - vdotcn * cn2
+                    tangent_velocity = dmath.length3(tgx, tgy, tgz) / sim_dt
+                    increase = dmath.saturate(sfp + float32(0.04))
+                    dec_amount = (tangent_velocity - static_param) / float32(0.2)
+                    if dec_amount < float32(0.05):
+                        dec_amount = float32(0.05)
+                    decrease = dmath.saturate(sfp - dec_amount)
+                    new_static = increase if tangent_velocity < static_param else decrease
+                    decayed = dmath.saturate(sfp - float32(0.05))
+                    updated_sf = new_static if is_collision else decayed
+                    sfp_new = updated_sf if static_on else decayed
+                    if static_on and is_collision:
+                        rbx = tgx * sfp_new
+                        rby = tgy * sfp_new
+                        rbz = tgz * sfp_new
+                    else:
+                        rbx = float32(0.0)
+                        rby = float32(0.0)
+                        rbz = float32(0.0)
+                    n0 = n0 - rbx
+                    n1 = n1 - rby
+                    n2 = n2 - rbz
+                    vo0 = vo0 - rbx
+                    vo1 = vo1 - rby
+                    vo2 = vo2 - rbz
+                    p_static_friction[pmi] = sfp_new
+
+                    # dynamic friction
+                    velx = (n0 - vo0) / sim_dt
+                    vely = (n1 - vo1) / sim_dt
+                    velz = (n2 - vo2) / sim_dt
+                    sq_velocity = velx * velx + vely * vely + velz * velz
+                    nvx, nvy, nvz = dmath.normalize3(velx, vely, velz)
+                    if not (sq_velocity > EPSILON):
+                        nvx = float32(0.0)
+                        nvy = float32(0.0)
+                        nvz = float32(0.0)
+                    dynamic_on = dynamic_param > float32(0.0)
+                    dd = cn0 * nvx + cn1 * nvy + cn2 * nvz
+                    dd = float32(0.5) + float32(0.5) * dd
+                    dd = dd * dd
+                    dd = float32(1.0) - dd
+                    damp = dd * dmath.saturate(friction * dynamic_param)
+                    if dynamic_on and is_collision and (sq_velocity >= EPSILON):
+                        velx = velx - velx * damp
+                        vely = vely - vely * damp
+                        velz = velz - velz * damp
+                    p_friction[pmi] = friction * float32(0.6)
+
+                    # speed limit
+                    speed_limit = t_particle_speed_limit[mt]
+                    max_len = speed_limit * t_scale_ratio[mt]
+                    if max_len < float32(0.0):
+                        max_len = float32(0.0)
+                    if speed_limit >= float32(0.0):
+                        velx, vely, velz = dmath.clamp_vector(velx, vely, velz, max_len)
+
+                    # centrifugal
+                    angular = t_angular_velocity[mt]
+                    centrifugal = t_centrifugal_acceleration[mt]
+                    if (angular > EPSILON) and (centrifugal > EPSILON):
+                        axx = t_rotation_axis[mt, 0]
+                        axy = t_rotation_axis[mt, 1]
+                        axz = t_rotation_axis[mt, 2]
+                        lpx = n0 - t_now_world_position[mt, 0]
+                        lpy = n1 - t_now_world_position[mt, 1]
+                        lpz = n2 - t_now_world_position[mt, 2]
+                        lp_dot = lpx * axx + lpy * axy + lpz * axz
+                        v2x = lpx - lp_dot * axx
+                        v2y = lpy - lp_dot * axy
+                        v2z = lpz - lp_dot * axz
+                        rr = dmath.length3(v2x, v2y, v2z)
+                        if (rr > EPSILON) and (sq_velocity >= EPSILON):
+                            nx2, ny2, nz2 = dmath.normalize3(v2x, v2y, v2z)
+                            mm = float32(1.0) + (float32(1.0) - depth)
+                            ff = mm * angular * angular * rr
+                            ucx, ucy, ucz = dmath.cross3(axx, axy, axz, nx2, ny2, nz2)
+                            uux, uuy, uuz = dmath.normalize3(ucx, ucy, ucz)
+                            ff = ff * dmath.saturate(nvx * uux + nvy * uuy + nvz * uuz)
+                            addc = ff * centrifugal * float32(0.02)
+                            velx = velx + nx2 * addc
+                            vely = vely + ny2 * addc
+                            velz = velz + nz2 * addc
+
+                    vw = t_velocity_weight[mt]
+                    p_velocities[pmi, 0] = velx * vw
+                    p_velocities[pmi, 1] = vely * vw
+                    p_velocities[pmi, 2] = velz * vw
+                    p_next_positions[pmi, 0] = n0
+                    p_next_positions[pmi, 1] = n1
+                    p_next_positions[pmi, 2] = n2
+                e += stride
+        grid.sync()
+
+        # --- S13 PASS 2: real_velocities + old_positions for all substep particles ---
+        if phase_mask & PHASE_STEP_POST:
+            p = tid
+            while p < num_particles:
+                mt = p_team[p]
+                if team_frame_mask(t_enabled, t_valid, t_cws, mt) and t_update_count[mt] > _k:
+                    p_real_velocities[p, 0] = (p_next_positions[p, 0] - p_old_positions[p, 0]) / sim_dt
+                    p_real_velocities[p, 1] = (p_next_positions[p, 1] - p_old_positions[p, 1]) / sim_dt
+                    p_real_velocities[p, 2] = (p_next_positions[p, 2] - p_old_positions[p, 2]) / sim_dt
+                    p_old_positions[p, 0] = p_next_positions[p, 0]
+                    p_old_positions[p, 1] = p_next_positions[p, 1]
+                    p_old_positions[p, 2] = p_next_positions[p, 2]
+                p += stride
+        grid.sync()
+
     # ----- FRAME-POST (F4 team_time.frame_post added next) -----
     grid.sync()
 
@@ -584,6 +732,9 @@ TEAM_KERNEL_FIELDS = (
     "wind_count", "wind_main", "wind_time", "wind_dirq", "wind_zone_turbulence",
     "wind_influence", "wind_depth_weight", "moving_wind_main", "wind_moving",
     "moving_wind_time", "moving_wind_dirq",
+    "static_friction", "dynamic_friction", "particle_speed_limit",
+    "angular_velocity", "centrifugal_acceleration", "rotation_axis",
+    "now_world_position",
 )
 
 PARTICLE_KERNEL_FIELDS = (
@@ -592,7 +743,7 @@ PARTICLE_KERNEL_FIELDS = (
     "next_positions", "velocity_positions", "step_basic_positions", "vertex_root",
     "old_anim_positions", "old_anim_rotations", "base_positions", "base_rotations",
     "step_basic_rotations", "depth", "velocities", "old_positions", "friction",
-    "vertex_root_local",
+    "vertex_root_local", "collision_normals", "static_friction", "real_velocities",
 )
 
 TRANSFORM_KERNEL_FIELDS = ("world", "bind_pose")
