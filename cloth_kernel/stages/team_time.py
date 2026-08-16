@@ -127,7 +127,7 @@ def step_update(world, ctx):
     tt["step_rotation_inertia_ratio"][i] = local_rotation_inertia
 
     tt["inertia_vector"][i] = step_vector * local_movement_inertia[:, None]
-    identity = np.broadcast_to(np.array([0, 0, 0, 1], dtype=np.float32), step_rotation.shape)
+    identity = pm.IDENTITY_QUAT
     tt["inertia_rotation"][i] = pm.quat_slerp(identity, step_rotation, local_rotation_inertia)
 
     angular_velocity = step_angle / sdt

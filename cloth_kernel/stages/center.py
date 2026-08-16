@@ -135,7 +135,7 @@ def run(world, ctx):
                                      pm.quat_inverse(tt["old_anchor_rotation"][gi]))
         anchor_ratio = (1.0 - tt["anchor_inertia"][gi])
         delta_vector = delta_vector * anchor_ratio[:, None]
-        identity = np.broadcast_to(np.array([0, 0, 0, 1], dtype=np.float32), delta_rotation.shape)
+        identity = pm.IDENTITY_QUAT
         delta_rotation = pm.quat_slerp(identity, delta_rotation, anchor_ratio)
         anchor_delta_vector[j] = delta_vector
         anchor_delta_rotation[j] = delta_rotation
@@ -309,7 +309,7 @@ def run(world, ctx):
             k = np.flatnonzero(applied)
             gk = gi[k]
             vec = shift_vector[j[k]] * move_shift_ratio[k][:, None]
-            identity = np.broadcast_to(np.array([0, 0, 0, 1], dtype=np.float32), (len(k), 4))
+            identity = pm.IDENTITY_QUAT
             rot = pm.quat_slerp(identity, shift_rotation[j[k]], rotation_shift_ratio[k])
             vec = vec + anchor_delta_vector[j[k]]
             rot = pm.quat_mul(anchor_delta_rotation[j[k]], rot)

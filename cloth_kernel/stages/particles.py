@@ -34,8 +34,8 @@ def compute_base_pose(world, ctx):
         wtan += np.einsum('nij,nj->ni', m[:, :3, :3], ltan) * wj
 
     pa["positions"][fp] = wpos
-    wnor = pm.normalize(wnor, fallback=np.broadcast_to(pm.VEC_UP, wnor.shape))
-    wtan = pm.normalize(wtan, fallback=np.broadcast_to(pm.VEC_FORWARD, wtan.shape))
+    wnor = pm.normalize(wnor, fallback=pm.VEC_UP)
+    wtan = pm.normalize(wtan, fallback=pm.VEC_FORWARD)
     pa["rotations"][fp] = pm.to_rotation(wnor, wtan)
 
 

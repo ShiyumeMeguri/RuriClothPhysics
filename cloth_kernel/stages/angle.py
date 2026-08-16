@@ -48,7 +48,7 @@ def run(world, ctx):
                 ipq = pm.quat_inverse(pbrot)
                 lpos = pm.quat_rotate(ipq, direction)
                 lrot = pm.quat_mul(ipq, brot)
-                identity = np.broadcast_to(np.array([0, 0, 0, 1], dtype=np.float32), lrot.shape)
+                identity = pm.IDENTITY_QUAT
                 length_value = np.where(degenerate, 0.0, vlen)
                 lpos_value = np.where(degenerate[:, None], 0.0, lpos)
                 lrot_value = np.where(degenerate[:, None], identity, lrot)
