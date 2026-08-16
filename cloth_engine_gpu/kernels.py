@@ -30,6 +30,7 @@ PHASE_PARTICLES_STEP = int32(1 << 4)  # S3 particles.step_update (substep)
 PHASE_STEP_POST = int32(1 << 5)      # S13 particles.step_post (substep)
 PHASE_DISTANCE_A = int32(1 << 6)     # S6 distance.run (first substep occurrence)
 PHASE_DISTANCE_B = int32(1 << 7)     # S10 distance.run (second substep occurrence)
+PHASE_MOTION = int32(1 << 8)         # S11 motion.run (substep)
 
 ALL_PHASES = int32(-1)
 
@@ -345,6 +346,9 @@ def frame_kernel(phase_mask, sub_begin, sub_end,
                  t_angular_velocity, t_centrifugal_acceleration, t_rotation_axis,
                  t_now_world_position,
                  t_is_spring, t_animation_pose_ratio, t_init_scale, t_distance_lut,
+                 t_motion_use_max_distance, t_motion_use_backstop, t_motion_stiffness,
+                 t_motion_backstop_radius, t_radius_lut, t_motion_max_distance_lut,
+                 t_motion_backstop_lut,
                  p_team, p_local_positions, p_local_normals, p_local_tangents,
                  p_skin_indices, p_skin_weights, p_positions, p_rotations,
                  p_next_positions, p_velocity_positions, p_step_basic_positions, p_vertex_root,
@@ -357,6 +361,7 @@ def frame_kernel(phase_mask, sub_begin, sub_end,
                  st_move_particle, st_move_team, st_fixed_particle, st_fixed_team,
                  st_spring_particle, st_spring_team,
                  st_distance_target, st_distance_rest,
+                 st_motion_particle, st_motion_team,
                  csr_distance_offsets, csr_distance_order,
                  sc_dcorr):
     grid = cg.this_grid()
@@ -393,6 +398,7 @@ def frame_kernel(phase_mask, sub_begin, sub_end,
     n_move = st_move_particle.shape[0]
     n_fixed = st_fixed_particle.shape[0]
     n_spring = st_spring_particle.shape[0]
+    n_motion = st_motion_particle.shape[0]
     for _k in range(sub_begin, sub_end):
         # --- S3 particles.step_update PASS 1: base interpolation (all sp) + move set ---
         if phase_mask & PHASE_PARTICLES_STEP:
@@ -683,6 +689,72 @@ def frame_kernel(phase_mask, sub_begin, sub_end,
                 p += stride
         grid.sync()
 
+        # --- S11 motion.run (per-entry independent) ---
+        if phase_mask & PHASE_MOTION:
+            e = tid
+            while e < n_motion:
+                mt = st_motion_team[e]
+                use_max = t_motion_use_max_distance[mt] != 0
+                use_backstop = t_motion_use_backstop[mt] != 0
+                if team_frame_mask(t_enabled, t_valid, t_cws, mt) and t_update_count[mt] > _k \
+                        and (use_max or use_backstop):
+                    index = st_motion_particle[e]
+                    stiffness = t_motion_stiffness[mt]
+                    backstop_radius = t_motion_backstop_radius[mt]
+                    o0 = p_next_positions[index, 0]
+                    o1 = p_next_positions[index, 1]
+                    o2 = p_next_positions[index, 2]
+                    n0 = o0
+                    n1 = o1
+                    n2 = o2
+                    b0 = p_base_positions[index, 0]
+                    b1 = p_base_positions[index, 1]
+                    b2 = p_base_positions[index, 2]
+                    depth = p_depth[index]
+                    radius = dmath.evaluate_team_lut(t_radius_lut, mt, depth)
+                    if radius < float32(0.0001):
+                        radius = float32(0.0001)
+                    cfr = radius
+                    depth2 = depth * depth
+                    dirx, diry, dirz = dmath.quat_rotate(
+                        p_base_rotations[index, 0], p_base_rotations[index, 1],
+                        p_base_rotations[index, 2], p_base_rotations[index, 3],
+                        t_normal_axis_vector[mt, 0], t_normal_axis_vector[mt, 1],
+                        t_normal_axis_vector[mt, 2])
+                    if use_max:
+                        max_distance = dmath.evaluate_team_lut(t_motion_max_distance_lut, mt, depth2)
+                        cvx, cvy, cvz = dmath.clamp_vector(n0 - b0, n1 - b1, n2 - b2, max_distance)
+                        n0 = b0 + cvx
+                        n1 = b1 + cvy
+                        n2 = b2 + cvz
+                    if use_backstop and backstop_radius > float32(0.0):
+                        backstop_distance = dmath.evaluate_team_lut(t_motion_backstop_lut, mt, depth2)
+                        off = backstop_distance + backstop_radius
+                        cx = b0 - dirx * off
+                        cy = b1 - diry * off
+                        cz = b2 - dirz * off
+                        vx = n0 - cx
+                        vy = n1 - cy
+                        vz = n2 - cz
+                        l = dmath.length3(vx, vy, vz)
+                        near = (l > EPSILON) and (l < backstop_radius + cfr)
+                        if near and (l < backstop_radius):
+                            safe_l = l if l > float32(1e-30) else float32(1.0)
+                            n0 = cx + vx / safe_l * backstop_radius
+                            n1 = cy + vy / safe_l * backstop_radius
+                            n2 = cz + vz / safe_l * backstop_radius
+                    n0 = dmath.lerp(o0, n0, stiffness)
+                    n1 = dmath.lerp(o1, n1, stiffness)
+                    n2 = dmath.lerp(o2, n2, stiffness)
+                    p_next_positions[index, 0] = n0
+                    p_next_positions[index, 1] = n1
+                    p_next_positions[index, 2] = n2
+                    p_velocity_positions[index, 0] += (n0 - o0) * float32(0.95)
+                    p_velocity_positions[index, 1] += (n1 - o1) * float32(0.95)
+                    p_velocity_positions[index, 2] += (n2 - o2) * float32(0.95)
+                e += stride
+        grid.sync()
+
         # --- S13 particles.step_post PASS 1: friction / limit / centrifugal (move set) ---
         if phase_mask & PHASE_STEP_POST:
             e = tid
@@ -851,6 +923,9 @@ TEAM_KERNEL_FIELDS = (
     "angular_velocity", "centrifugal_acceleration", "rotation_axis",
     "now_world_position",
     "is_spring", "animation_pose_ratio", "init_scale", "distance_lut",
+    "motion_use_max_distance", "motion_use_backstop", "motion_stiffness",
+    "motion_backstop_radius", "radius_lut", "motion_max_distance_lut",
+    "motion_backstop_lut",
 )
 
 PARTICLE_KERNEL_FIELDS = (
@@ -877,6 +952,8 @@ STATIC_KERNEL_FIELDS = (
     ("spring_team", "spring", "team"),
     ("distance_target", "distance", "target"),
     ("distance_rest", "distance", "rest"),
+    ("motion_particle", "motion", "particle"),
+    ("motion_team", "motion", "team"),
 )
 
 # CSR gather tables (offsets + order uploaded from a program CsrTable attribute)
