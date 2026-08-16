@@ -39,6 +39,7 @@ PHASE_COLLIDER_START = int32(1 << 13)  # S2 collider.start_step (substep)
 PHASE_COLLIDER_SOLVE = int32(1 << 14)  # S9 collider.solve point+edge (substep)
 PHASE_COLLIDER_END = int32(1 << 15)  # S14 collider.end_step (substep)
 PHASE_COLLIDER_POST = int32(1 << 16)  # F3 collider.frame_post
+PHASE_PARTICLES_PRE = int32(1 << 17)  # P2 particles.frame_pre
 
 ALL_PHASES = int32(-1)
 
@@ -583,6 +584,31 @@ def _shift_pose(arr_pos, arr_rot, ci, cpx, cpy, cpz, svx, svy, svz, srx, sry, sr
     arr_rot[ci, 1] = qy
     arr_rot[ci, 2] = qz
     arr_rot[ci, 3] = qw
+
+
+@cuda.jit(device=True)
+def _shift_point(arr, p, cpx, cpy, cpz, svx, svy, svz, srx, sry, srz, srw):
+    rx, ry, rz = dmath.quat_rotate(srx, sry, srz, srw, arr[p, 0] - cpx, arr[p, 1] - cpy, arr[p, 2] - cpz)
+    arr[p, 0] = rx + cpx + svx
+    arr[p, 1] = ry + cpy + svy
+    arr[p, 2] = rz + cpz + svz
+
+
+@cuda.jit(device=True)
+def _premul_quat(arr, p, srx, sry, srz, srw):
+    qx, qy, qz, qw = dmath.quat_mul(srx, sry, srz, srw, arr[p, 0], arr[p, 1], arr[p, 2], arr[p, 3])
+    arr[p, 0] = qx
+    arr[p, 1] = qy
+    arr[p, 2] = qz
+    arr[p, 3] = qw
+
+
+@cuda.jit(device=True)
+def _rotate_vec(arr, p, srx, sry, srz, srw):
+    vx, vy, vz = dmath.quat_rotate(srx, sry, srz, srw, arr[p, 0], arr[p, 1], arr[p, 2])
+    arr[p, 0] = vx
+    arr[p, 1] = vy
+    arr[p, 2] = vz
 
 
 @cuda.jit(device=True)
@@ -1334,6 +1360,77 @@ def do_solve_edge(ee, p_team, p_next_positions, p_depth, p_attr_move,
         cuda.atomic.add(sc_col_normal_fixed, (e1, 2), int32(noutz * TO_FIXED))
 
 
+@cuda.jit(device=True)
+def do_particles_frame_pre(p, p_team, p_positions, p_rotations, p_next_positions,
+                           p_old_positions, p_old_rotations, p_base_positions, p_base_rotations,
+                           p_old_anim_positions, p_old_anim_rotations, p_velocity_positions,
+                           p_display_positions, p_velocities, p_real_velocities,
+                           p_friction, p_static_friction, p_collision_normals,
+                           t_reset_pending, t_neg_teleport, t_neg_matrix,
+                           t_inertia_shift, t_shift_vec, t_shift_rot, t_old_cwp):
+    team = p_team[p]
+    if t_reset_pending[team] != 0:
+        for j in range(3):
+            pv = p_positions[p, j]
+            p_next_positions[p, j] = pv
+            p_old_positions[p, j] = pv
+            p_base_positions[p, j] = pv
+            p_old_anim_positions[p, j] = pv
+            p_velocity_positions[p, j] = pv
+            p_display_positions[p, j] = pv
+            p_velocities[p, j] = float32(0.0)
+            p_real_velocities[p, j] = float32(0.0)
+            p_collision_normals[p, j] = float32(0.0)
+        for j in range(4):
+            rv = p_rotations[p, j]
+            p_old_rotations[p, j] = rv
+            p_base_rotations[p, j] = rv
+            p_old_anim_rotations[p, j] = rv
+        p_friction[p] = float32(0.0)
+        p_static_friction[p] = float32(0.0)
+        return
+    neg = t_neg_teleport[team] != 0
+    shift = t_inertia_shift[team] != 0
+    if not (neg or shift):
+        return
+    if neg:
+        m = t_neg_matrix[team]
+        _neg_transform_pose(p_old_positions, p_old_rotations, p, m, float32(1.0), float32(1.0))
+        _neg_transform_pose(p_old_anim_positions, p_old_anim_rotations, p, m, float32(1.0), float32(1.0))
+        dpx, dpy, dpz = dmath.transform_point(m, p_display_positions[p, 0], p_display_positions[p, 1],
+                                              p_display_positions[p, 2])
+        p_display_positions[p, 0] = dpx
+        p_display_positions[p, 1] = dpy
+        p_display_positions[p, 2] = dpz
+        vx, vy, vz = dmath.transform_vector(m, p_velocities[p, 0], p_velocities[p, 1], p_velocities[p, 2])
+        p_velocities[p, 0] = vx
+        p_velocities[p, 1] = vy
+        p_velocities[p, 2] = vz
+        rvx, rvy, rvz = dmath.transform_vector(m, p_real_velocities[p, 0], p_real_velocities[p, 1],
+                                               p_real_velocities[p, 2])
+        p_real_velocities[p, 0] = rvx
+        p_real_velocities[p, 1] = rvy
+        p_real_velocities[p, 2] = rvz
+    if shift:
+        cpx = t_old_cwp[team, 0]
+        cpy = t_old_cwp[team, 1]
+        cpz = t_old_cwp[team, 2]
+        svx = t_shift_vec[team, 0]
+        svy = t_shift_vec[team, 1]
+        svz = t_shift_vec[team, 2]
+        srx = t_shift_rot[team, 0]
+        sry = t_shift_rot[team, 1]
+        srz = t_shift_rot[team, 2]
+        srw = t_shift_rot[team, 3]
+        _shift_point(p_old_positions, p, cpx, cpy, cpz, svx, svy, svz, srx, sry, srz, srw)
+        _shift_point(p_old_anim_positions, p, cpx, cpy, cpz, svx, svy, svz, srx, sry, srz, srw)
+        _shift_point(p_display_positions, p, cpx, cpy, cpz, svx, svy, svz, srx, sry, srz, srw)
+        _premul_quat(p_old_rotations, p, srx, sry, srz, srw)
+        _premul_quat(p_old_anim_rotations, p, srx, sry, srz, srw)
+        _rotate_vec(p_velocities, p, srx, sry, srz, srw)
+        _rotate_vec(p_real_velocities, p, srx, sry, srz, srw)
+
+
 @cuda.jit(cache=True)
 def frame_kernel(phase_mask, sub_begin, sub_end,
                  fdt, sim_dt, max_sim_count, global_time_scale,
@@ -1386,6 +1483,7 @@ def frame_kernel(phase_mask, sub_begin, sub_end,
                  p_step_basic_rotations, p_depth, p_velocities, p_old_positions, p_friction,
                  p_vertex_root_local, p_collision_normals, p_static_friction, p_real_velocities,
                  p_attr_move, p_vertex_local_positions, p_vertex_local_rotations,
+                 p_old_rotations, p_display_positions,
                  x_world, x_bind,
                  c_team, c_kind, c_center, c_size, c_axis, c_aligned, c_enabled,
                  c_enabled_prev, c_active, c_input_positions, c_input_rotations, c_input_scales,
@@ -1432,6 +1530,24 @@ def frame_kernel(phase_mask, sub_begin, sub_end,
                 do_base_pose(p, p_team, p_local_positions, p_local_normals, p_local_tangents,
                              p_skin_indices, p_skin_weights, p_positions, p_rotations,
                              x_world, x_bind)
+            p += stride
+    grid.sync()
+
+    # P2 particles.frame_pre (per-particle; reset snapshot / negative-scale / inertia shift)
+    if phase_mask & PHASE_PARTICLES_PRE:
+        p = tid
+        while p < num_particles:
+            if team_frame_mask(t_enabled, t_valid, t_cws, p_team[p]):
+                do_particles_frame_pre(p, p_team, p_positions, p_rotations, p_next_positions,
+                                       p_old_positions, p_old_rotations, p_base_positions,
+                                       p_base_rotations, p_old_anim_positions, p_old_anim_rotations,
+                                       p_velocity_positions, p_display_positions, p_velocities,
+                                       p_real_velocities, p_friction, p_static_friction,
+                                       p_collision_normals, t_reset_pending,
+                                       t_negative_scale_teleport, t_negative_scale_matrix,
+                                       t_inertia_shift, t_frame_component_shift_vector,
+                                       t_frame_component_shift_rotation,
+                                       t_old_component_world_position)
             p += stride
     grid.sync()
 
@@ -2171,6 +2287,33 @@ def frame_kernel(phase_mask, sub_begin, sub_end,
                 p += stride
         grid.sync()
 
+        # --- S10 distance.run (second occurrence): same Jacobi gather -> apply ---
+        if phase_mask & PHASE_DISTANCE_B:
+            p = tid
+            while p < num_particles:
+                mt = p_team[p]
+                if team_frame_mask(t_enabled, t_valid, t_cws, mt) and t_update_count[mt] > _k:
+                    do_distance_gather(p, p_team, p_next_positions, p_base_positions, p_depth,
+                                       p_friction, p_attr_move, t_is_spring, t_animation_pose_ratio,
+                                       t_init_scale, t_scale_ratio, t_distance_lut, power1,
+                                       csr_distance_offsets, csr_distance_order,
+                                       st_distance_target, st_distance_rest, sc_dcorr)
+                p += stride
+        grid.sync()
+        if phase_mask & PHASE_DISTANCE_B:
+            p = tid
+            while p < num_particles:
+                mt = p_team[p]
+                if team_frame_mask(t_enabled, t_valid, t_cws, mt) and t_update_count[mt] > _k:
+                    p_next_positions[p, 0] += sc_dcorr[p, 0]
+                    p_next_positions[p, 1] += sc_dcorr[p, 1]
+                    p_next_positions[p, 2] += sc_dcorr[p, 2]
+                    p_velocity_positions[p, 0] += sc_dcorr[p, 0] * DISTANCE_VELOCITY_ATTENUATION
+                    p_velocity_positions[p, 1] += sc_dcorr[p, 1] * DISTANCE_VELOCITY_ATTENUATION
+                    p_velocity_positions[p, 2] += sc_dcorr[p, 2] * DISTANCE_VELOCITY_ATTENUATION
+                p += stride
+        grid.sync()
+
         # --- S11 motion.run (per-entry independent) ---
         if phase_mask & PHASE_MOTION:
             e = tid
@@ -2524,6 +2667,7 @@ PARTICLE_KERNEL_FIELDS = (
     "step_basic_rotations", "depth", "velocities", "old_positions", "friction",
     "vertex_root_local", "collision_normals", "static_friction", "real_velocities",
     "attr_move", "vertex_local_positions", "vertex_local_rotations",
+    "old_rotations", "display_positions",
 )
 
 TRANSFORM_KERNEL_FIELDS = ("world", "bind_pose")
