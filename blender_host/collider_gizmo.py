@@ -36,10 +36,11 @@ def _oriented(matrix, center, column):
         side = mathutils.Vector((1.0, 0.0, 0.0))
     side.normalize()
     up = forward.cross(side)
-    result = mathutils.Matrix.Identity(4)
-    result.col[0] = side.to_4d()
-    result.col[1] = up.to_4d()
-    result.col[2] = forward.to_4d()
+    result = mathutils.Matrix((
+        (side.x, up.x, forward.x),
+        (side.y, up.y, forward.y),
+        (side.z, up.z, forward.z),
+    )).to_4x4()
     result.translation = matrix @ mathutils.Vector(center)
     return result
 
@@ -162,19 +163,27 @@ class RCP_GGT_collider(bpy.types.GizmoGroup):
         matrix = _bone_matrix(obj, item)
         center = tuple(item.center)
         is_capsule = item.shape == 'CAPSULE'
+        radius = item.start_radius if is_capsule else item.radius
+        handle = min(max(radius * 0.8, 0.01), 0.12)
 
         self.radius_gizmo.matrix_basis = _oriented(matrix, center, 0)
+        self.radius_gizmo.scale_basis = handle
         self.radius_gizmo.hide = item.shape == 'PLANE'
 
         self.length_gizmo.matrix_basis = _oriented(matrix, center, 1)
+        self.length_gizmo.scale_basis = min(max(item.length * 0.2, 0.01), 0.12)
         self.length_gizmo.hide = not is_capsule
 
         self.end_radius_gizmo.matrix_basis = _oriented(matrix, center, 2)
+        self.end_radius_gizmo.scale_basis = min(max(item.end_radius * 0.8, 0.01), 0.12)
         self.end_radius_gizmo.hide = not (is_capsule and item.radius_separation)
 
+        # move_3d draws at matrix_basis + rotation @ offset, and offset IS item.center,
+        # so this must stay at the bone origin or the centre gets counted twice.
         basis = matrix.to_3x3().normalized().to_4x4()
         basis.translation = matrix.translation
         self.center_gizmo.matrix_basis = basis
+        self.center_gizmo.scale_basis = handle * 0.8
 
 
 _CLASSES = (RCP_GGT_collider,)
