@@ -279,3 +279,4 @@ class KinematicsHost:
             pose_bone = pose_bones.get(self.bone_names[i])
             if pose_bone is not None:
                 pose_bone.matrix_basis = basis[i].tolist()
+        return basis

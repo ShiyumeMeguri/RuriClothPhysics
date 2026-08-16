@@ -9,6 +9,7 @@ from bpy.app.handlers import persistent
 from . import armature
 from . import bone_binding
 from . import curve_host
+from . import frame_cache
 from ..cloth_kernel import compile as kernel_compile
 from ..cloth_kernel import defs
 from ..cloth_kernel import io as kernel_io
@@ -66,6 +67,7 @@ class RuntimeEntry:
         self.write_mask = None
         self.position_mask = None
         self.culling_invisible = False
+        self.input_names = ()
 
 
 def get_world():
@@ -78,6 +80,7 @@ def clear_registry():
             _world.unregister_team(entry.team)
     _registry.clear()
     _basis_store.clear()
+    frame_cache.clear_all()
     global _last_frame
     _last_frame = None
 
@@ -100,6 +103,7 @@ def iter_entries(scene):
 
 
 def request_reset(obj, mode):
+    frame_cache.clear_object(obj.session_uid)
     for (uid, index), entry in _registry.items():
         if uid != obj.session_uid or entry.team is None:
             continue
@@ -371,6 +375,7 @@ def ensure_entry(obj, config_index, config):
         params = _build_params(config)
         entry.params_token = _params_token(obj, config)
         entry.team = _world.register_team(setup, params, entry.binding)
+        entry.input_names = frame_cache.external_input_names(setup, entry.binding, config)
         store = _basis_store.setdefault(obj.session_uid, {})
         animated = armature.collect_animated_bone_names(obj)
         entry.kinematics.capture_missing_basis(obj, animated, store)
@@ -380,6 +385,8 @@ def ensure_entry(obj, config_index, config):
             if binding.token != entry.collider_token:
                 entry.binding = binding
                 entry.collider_token = binding.token
+                entry.input_names = frame_cache.external_input_names(
+                    entry.setup, binding, config)
                 _world.update_colliders(entry.team, binding)
             entry.collider_serial = obj.ruri_cloth_physics.collider_serial
 
@@ -531,6 +538,63 @@ def _active_armatures(scene):
     return result
 
 
+def _scene_salt(scene):
+    scene_settings = scene.ruri_cloth_physics
+    return repr((int(scene_settings.simulation_frequency),
+                 int(scene_settings.max_simulation_count),
+                 round(float(scene_settings.global_time_scale), 6),
+                 round(scene.render.fps / scene.render.fps_base, 6))).encode("utf-8")
+
+
+def _cache_enabled(scene, obj):
+    mode = scene.ruri_cloth_physics.cache_mode
+    if mode == 'OFF':
+        return False
+    if mode == 'ALWAYS':
+        return True
+    animation = obj.animation_data
+    return animation is not None and (animation.action is not None
+                                      or len(animation.nla_tracks) > 0)
+
+
+def _cache_signature(obj, config, salt):
+    return (_params_token(obj, config), obj.ruri_cloth_physics.collider_serial, salt)
+
+
+def try_replay(scene):
+    frame = scene.frame_current
+    plan = []
+    for obj in _active_armatures(scene):
+        if not _cache_enabled(scene, obj):
+            return False
+        salt = _scene_salt(scene)
+        settings = obj.ruri_cloth_physics
+        animated = armature.collect_animated_bone_names(obj)
+        for index, config in enumerate(settings.configs):
+            if not config.enabled:
+                continue
+            if config.rebuild_pending:
+                return False
+            entry = _registry.get((obj.session_uid, index))
+            if entry is None or entry.setup is None or entry.team is None:
+                return False
+            cache = frame_cache.get(obj.session_uid, index)
+            if cache.signature != _cache_signature(obj, config, salt):
+                return False
+            digest = frame_cache.input_hash(
+                obj, entry.input_names,
+                frame_cache.animated_inputs(entry.setup, animated), salt)
+            basis = cache.fetch(frame, digest)
+            if basis is None:
+                return False
+            plan.append((obj, cache, basis))
+    if not plan:
+        return False
+    for obj, cache, basis in plan:
+        frame_cache.apply(obj, cache, basis)
+    return True
+
+
 def run_frame(scene, frame_delta_time):
     scene_settings = scene.ruri_cloth_physics
     frame_globals = kernel_io.FrameGlobals()
@@ -608,11 +672,19 @@ def run_frame(scene, frame_delta_time):
                 kernel_io.set_team_collider_input(_world, entry.team, positions, rotations,
                                                   scales, enabled)
 
+            digest = None
+            if _cache_enabled(scene, obj):
+                salt = _scene_salt(scene)
+                digest = (index, _cache_signature(obj, config, salt),
+                          frame_cache.input_hash(
+                              obj, entry.input_names,
+                              frame_cache.animated_inputs(setup, animated), salt))
+
             name_map[config.name] = entry.team
             collected.append((entry, obj, config, anim_world, matrix_world_inverse,
-                              obj.session_uid))
+                              obj.session_uid, digest))
 
-    for entry, obj, config, anim_world, matrix_world_inverse, uid in collected:
+    for entry, obj, config, anim_world, matrix_world_inverse, uid, digest in collected:
         partner_name = config.self_collision.sync_partner
         partner = 0
         if partner_name and partner_name != config.name:
@@ -625,11 +697,18 @@ def run_frame(scene, frame_delta_time):
         frame_globals.zones = []
     pipeline.run_frame(_world, frame_globals)
 
-    for entry, obj, config, anim_world, matrix_world_inverse, uid in collected:
+    for entry, obj, config, anim_world, matrix_world_inverse, uid, digest in collected:
         out_positions, out_rotations = kernel_io.team_output(_world, entry.team)
-        entry.kinematics.write_back(obj, out_positions.astype(np.float64), out_rotations,
-                                    entry.write_mask, entry.position_mask, anim_world,
-                                    matrix_world_inverse)
+        basis = entry.kinematics.write_back(obj, out_positions.astype(np.float64), out_rotations,
+                                            entry.write_mask, entry.position_mask, anim_world,
+                                            matrix_world_inverse)
+        if digest is None:
+            continue
+        index, signature, input_digest = digest
+        cache = frame_cache.get(uid, index)
+        if cache.signature != signature:
+            cache.reset(signature, np.flatnonzero(entry.write_mask), entry.setup.bone_names)
+        cache.store(scene.frame_current, input_digest, basis[cache.indices])
 
 
 @persistent
@@ -639,6 +718,14 @@ def _on_frame_change_post(scene, depsgraph=None):
         return
     frame = scene.frame_current
     fps = scene.render.fps / scene.render.fps_base
+
+    try:
+        if try_replay(scene):
+            _last_frame = frame
+            return
+    except Exception:
+        import traceback
+        traceback.print_exc()
 
     if _last_frame is None or frame <= _last_frame:
         for entry in _registry.values():

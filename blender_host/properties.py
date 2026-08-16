@@ -134,8 +134,8 @@ RCPCheckParticleSpeed = _make_check_type("RCPCheckParticleSpeed", True, 4.0, 0.0
 RCPCheckCullingLength = _make_check_type("RCPCheckCullingLength", False, 30.0, 0.0, 100.0)
 
 
-def _bone_property(name, update, target=None):
-    getter, setter = bone_binding.make_accessors("bone_uid", update, target)
+def _bone_property(name, update, target=None, uid_attribute="bone_uid"):
+    getter, setter = bone_binding.make_accessors(uid_attribute, update, target)
     return StringProperty(name=name, get=getter, set=setter)
 
 
@@ -283,7 +283,8 @@ TELEPORT_MODE_ITEMS = (
 class RCPInertiaSettings(bpy.types.PropertyGroup):
     anchor_object: PointerProperty(name="锚对象", type=bpy.types.Object, update=_param_update)
     anchor_bone_uid: StringProperty(default="", options={'HIDDEN'})
-    anchor_bone: _bone_property("锚骨骼", _param_update, lambda self: self.anchor_object)
+    anchor_bone: _bone_property("锚骨骼", _param_update, lambda self: self.anchor_object,
+                                "anchor_bone_uid")
     anchor_inertia: FloatProperty(name="锚惯性", default=0.0, min=0.0, max=1.0,
                                   update=_param_update)
     world_inertia: FloatProperty(name="世界惯性", default=1.0, min=0.0, max=1.0,
@@ -435,7 +436,8 @@ class RCPClothConfig(bpy.types.PropertyGroup):
                                              update=_topology_update)
     normal_alignment_bone_uid: StringProperty(default="", options={'HIDDEN'})
     normal_alignment_bone: _bone_property("对齐参考骨骼", _topology_update,
-                                          lambda self: self.normal_alignment_object)
+                                          lambda self: self.normal_alignment_object,
+                                          "normal_alignment_bone_uid")
 
     custom_skinning_enable: BoolProperty(name="启用自定义蒙皮", default=False,
                                          update=_topology_update)
@@ -503,7 +505,16 @@ class RCPObjectSettings(bpy.types.PropertyGroup):
     collider_serial: IntProperty(default=0, options={'HIDDEN'})
 
 
+CACHE_MODE_ITEMS = (
+    ('AUTO', "自动", "骨架带动画时缓存已播放过的帧, 没有动画时每帧实时计算"),
+    ('ALWAYS', "始终", "总是缓存已播放过的帧"),
+    ('OFF', "关闭", "永远每帧实时计算"),
+)
+
+
 class RCPSceneSettings(bpy.types.PropertyGroup):
+    cache_mode: EnumProperty(name="帧缓存", items=CACHE_MODE_ITEMS, default='AUTO',
+                             description="播放过的帧记录结果, 再次回到该帧直接回放不重算")
     simulation_frequency: IntProperty(name="模拟频率", default=90, min=30, max=150,
                                       description="每秒模拟步数")
     max_simulation_count: IntProperty(name="单帧最大步数", default=3, min=1, max=5)
