@@ -595,3 +595,23 @@ def evaluate_lut(lut, base, time):
 @cuda.jit(device=True)
 def evaluate_lut_clamp01(lut, base, time):
     return saturate(evaluate_lut(lut, base, time))
+
+
+@cuda.jit(device=True)
+def evaluate_team_lut(luts, team, time):
+    # luts is a (num_teams, 16) device array; mirrors math.evaluate_team_lut
+    t = saturate(time)
+    f = t * float32(15.0)
+    index = int32(f)
+    frac = f - float32(index)
+    index2 = index + 1
+    if index2 > 15:
+        index2 = 15
+    a = luts[team, index]
+    b = luts[team, index2]
+    return a + (b - a) * frac
+
+
+@cuda.jit(device=True)
+def evaluate_team_lut_clamp01(luts, team, time):
+    return saturate(evaluate_team_lut(luts, team, time))

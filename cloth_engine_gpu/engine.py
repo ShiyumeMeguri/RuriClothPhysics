@@ -15,6 +15,8 @@ state, launches just phase X, and compares the readback to the oracle "after X" 
 import numpy as np
 from numba import int32
 
+from cloth_kernel import defs as _defs
+
 from . import device
 from . import kernels
 from .program import build_program
@@ -86,13 +88,16 @@ class GpuEngine:
 
     # ---- launch -------------------------------------------------------------
     def _frame_scalars(self, frame_globals):
+        power = _defs.simulation_power(frame_globals.simulation_frequency)
         return (np.float32(frame_globals.frame_delta_time),
                 np.float32(1.0 / frame_globals.simulation_frequency),
                 np.int32(frame_globals.max_simulation_count),
-                np.float32(frame_globals.global_time_scale))
+                np.float32(frame_globals.global_time_scale),
+                np.float32(power[0]), np.float32(power[1]),
+                np.float32(power[2]), np.float32(power[3]))
 
     def launch(self, phase_mask, sub_begin, sub_end, frame_globals):
-        fdt, sim_dt, msc, gts = self._frame_scalars(frame_globals)
+        fdt, sim_dt, msc, gts, pw0, pw1, pw2, pw3 = self._frame_scalars(frame_globals)
         team_args = [self.team.get(name) for name in kernels.TEAM_KERNEL_FIELDS]
         particle_args = [self.particles.get(name) for name in kernels.PARTICLE_KERNEL_FIELDS]
         transform_args = [self.transforms.get(name) for name in kernels.TRANSFORM_KERNEL_FIELDS]
@@ -100,7 +105,7 @@ class GpuEngine:
         blocks = self._blocks()
         kernels.frame_kernel[blocks, _THREADS](
             int32(phase_mask), int32(sub_begin), int32(sub_end),
-            fdt, sim_dt, msc, gts,
+            fdt, sim_dt, msc, gts, pw0, pw1, pw2, pw3,
             *team_args, *particle_args, *transform_args, *static_args)
 
     # ---- production API (grows as phases land) ------------------------------

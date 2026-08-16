@@ -14,8 +14,10 @@ require ``update_count > k``. Per-team frame-level phases may use internal f64 (
 oracle trs / matrix inverse); per-particle / per-pair phases stay strict-f32.
 """
 
+import math
+
 from numba import cuda, float32, int32
-from numba.cuda import cg
+from numba.cuda import cg, libdevice
 
 from . import dmath
 
@@ -24,6 +26,7 @@ PHASE_ADVANCE = int32(1 << 0)        # T1 team_time.advance
 PHASE_BASE_POSE = int32(1 << 1)      # P0/P1 particles.compute_base_pose (skinning)
 PHASE_TETHER = int32(1 << 2)         # S5 tether.run (substep)
 PHASE_TEAM_POST = int32(1 << 3)      # F4 team_time.frame_post
+PHASE_PARTICLES_STEP = int32(1 << 4)  # S3 particles.step_update (substep)
 
 ALL_PHASES = int32(-1)
 
@@ -34,6 +37,15 @@ TETHER_STRETCH_LIMIT = float32(0.03)
 TETHER_STIFFNESS_WIDTH = float32(0.3)
 TETHER_VELOCITY_ATTENUATION = float32(0.7)
 EPSILON = float32(1e-8)
+
+WIND_BASE_SPEED = float32(7.5)
+WIND_TURBULENCE_ANGLE = float32(45.0)
+DEG2RAD = float32(math.pi / 180.0)
+
+FORCE_VELOCITY_ADD = int32(1)
+FORCE_VELOCITY_ADD_WITHOUT_DEPTH = int32(2)
+FORCE_VELOCITY_CHANGE = int32(3)
+FORCE_VELOCITY_CHANGE_WITHOUT_DEPTH = int32(4)
 
 
 @cuda.jit(device=True)
@@ -191,18 +203,70 @@ def do_tether(e, tether_particle, p_team, next_positions, velocity_positions,
     velocity_positions[idx, 2] += az * TETHER_VELOCITY_ATTENUATION
 
 
+@cuda.jit(device=True)
+def do_wind_blend(wind_main, time, dqx, dqy, dqz, dqw, zone_turbulence,
+                  blend, turbulence_param, wind_position):
+    """One wind slot's force direction*strength; mirrors wind._wind_force_blend."""
+    active = wind_main >= float32(0.01)
+    main_ratio = wind_main / WIND_BASE_SPEED
+
+    sin_pos = wind_position + time * float32(10.0)
+    sin_wave = libdevice.sinf(sin_pos)
+
+    noise_pos = wind_position + time * float32(2.3132)
+    noise_wave = dmath.cnoise2(noise_pos, noise_pos) * float32(2.3)
+
+    wave_x = sin_wave + (noise_wave - sin_wave) * blend
+    wave_y = wave_x
+
+    turbulence = zone_turbulence * turbulence_param
+
+    angle_x = (wave_x * WIND_TURBULENCE_ANGLE) * DEG2RAD
+    angle_y = (wave_y * WIND_TURBULENCE_ANGLE) * DEG2RAD
+    angle_y = angle_y * (float32(0.1) + (float32(0.5) - float32(0.1)) * blend)
+    angle_x = angle_x * turbulence
+    angle_y = angle_y * turbulence
+
+    rqx, rqy, rqz, rqw = dmath.euler_yx(angle_x, angle_y)
+    cqx, cqy, cqz, cqw = dmath.quat_mul(dqx, dqy, dqz, dqw, rqx, rqy, rqz, rqw)
+    wdx, wdy, wdz = dmath.quat_to_tangent(cqx, cqy, cqz, cqw)
+
+    main_scale = dmath.saturate(float32(1.0) - main_ratio)
+    main_wave = (wave_x + float32(1.0)) * float32(0.5)
+    main_wave = main_wave * main_scale * turbulence
+    strength = wind_main - wind_main * main_wave
+    if not active:
+        strength = float32(0.0)
+    return (wdx * strength, wdy * strength, wdz * strength)
+
+
 @cuda.jit(cache=True)
 def frame_kernel(phase_mask, sub_begin, sub_end,
                  fdt, sim_dt, max_sim_count, global_time_scale,
+                 power0, power1, power2, power3,
                  t_enabled, t_valid, t_cws, t_time_reset,
                  t_time, t_old_time, t_now_update, t_old_update, t_frame_update, t_frame_old,
                  t_frame_dt, t_time_scale, t_now_time_scale, t_update_count, t_skip_count,
                  t_running, t_tether_compression,
+                 t_frame_interpolation, t_depth_inertia, t_inertia_vector, t_step_vector,
+                 t_inertia_rotation, t_step_rotation, t_old_world_position, t_velocity_weight,
+                 t_damping_lut, t_force_mode, t_gravity_direction, t_gravity, t_gravity_ratio,
+                 t_impact_force, t_scale_ratio, t_normal_axis_vector, t_spring_limit_distance,
+                 t_spring_normal_limit_ratio, t_spring_power, t_spring_noise,
+                 t_wind_seed, t_wind_synchronization, t_wind_blend, t_wind_turbulence,
+                 t_wind_count, t_wind_main, t_wind_time, t_wind_dirq, t_wind_zone_turbulence,
+                 t_wind_influence, t_wind_depth_weight, t_moving_wind_main, t_wind_moving,
+                 t_moving_wind_time, t_moving_wind_dirq,
                  p_team, p_local_positions, p_local_normals, p_local_tangents,
                  p_skin_indices, p_skin_weights, p_positions, p_rotations,
                  p_next_positions, p_velocity_positions, p_step_basic_positions, p_vertex_root,
+                 p_old_anim_positions, p_old_anim_rotations, p_base_positions, p_base_rotations,
+                 p_step_basic_rotations, p_depth, p_velocities, p_old_positions, p_friction,
+                 p_vertex_root_local,
                  x_world, x_bind,
-                 st_tether_particle, st_tether_team):
+                 st_tether_particle, st_tether_team,
+                 st_move_particle, st_move_team, st_fixed_particle, st_fixed_team,
+                 st_spring_particle, st_spring_team):
     grid = cg.this_grid()
     tid = cuda.grid(1)
     stride = cuda.gridsize(1)
@@ -234,7 +298,261 @@ def frame_kernel(phase_mask, sub_begin, sub_end,
 
     # ----- SUBSTEP LOOP (phases added in dependency order as ported) -----
     n_tether = st_tether_particle.shape[0]
+    n_move = st_move_particle.shape[0]
+    n_fixed = st_fixed_particle.shape[0]
+    n_spring = st_spring_particle.shape[0]
     for _k in range(sub_begin, sub_end):
+        # --- S3 particles.step_update PASS 1: base interpolation (all sp) + move set ---
+        if phase_mask & PHASE_PARTICLES_STEP:
+            p = tid
+            while p < num_particles:
+                mt = p_team[p]
+                if team_frame_mask(t_enabled, t_valid, t_cws, mt) and t_update_count[mt] > _k:
+                    t = t_frame_interpolation[mt]
+                    bx = dmath.lerp(p_old_anim_positions[p, 0], p_positions[p, 0], t)
+                    by = dmath.lerp(p_old_anim_positions[p, 1], p_positions[p, 1], t)
+                    bz = dmath.lerp(p_old_anim_positions[p, 2], p_positions[p, 2], t)
+                    qx, qy, qz, qw = dmath.quat_slerp(
+                        p_old_anim_rotations[p, 0], p_old_anim_rotations[p, 1],
+                        p_old_anim_rotations[p, 2], p_old_anim_rotations[p, 3],
+                        p_rotations[p, 0], p_rotations[p, 1], p_rotations[p, 2], p_rotations[p, 3], t)
+                    p_base_positions[p, 0] = bx
+                    p_base_positions[p, 1] = by
+                    p_base_positions[p, 2] = bz
+                    p_step_basic_positions[p, 0] = bx
+                    p_step_basic_positions[p, 1] = by
+                    p_step_basic_positions[p, 2] = bz
+                    p_base_rotations[p, 0] = qx
+                    p_base_rotations[p, 1] = qy
+                    p_base_rotations[p, 2] = qz
+                    p_base_rotations[p, 3] = qw
+                    p_step_basic_rotations[p, 0] = qx
+                    p_step_basic_rotations[p, 1] = qy
+                    p_step_basic_rotations[p, 2] = qz
+                    p_step_basic_rotations[p, 3] = qw
+                p += stride
+
+            e = tid
+            while e < n_move:
+                mt = st_move_team[e]
+                if team_frame_mask(t_enabled, t_valid, t_cws, mt) and t_update_count[mt] > _k:
+                    pmi = st_move_particle[e]
+                    depth = p_depth[pmi]
+                    ox = p_old_positions[pmi, 0]
+                    oy = p_old_positions[pmi, 1]
+                    oz = p_old_positions[pmi, 2]
+
+                    inertia_depth = t_depth_inertia[mt] * (float32(1.0) - depth * depth)
+                    ivx = dmath.lerp(t_inertia_vector[mt, 0], t_step_vector[mt, 0], inertia_depth)
+                    ivy = dmath.lerp(t_inertia_vector[mt, 1], t_step_vector[mt, 1], inertia_depth)
+                    ivz = dmath.lerp(t_inertia_vector[mt, 2], t_step_vector[mt, 2], inertia_depth)
+                    irx, iry, irz, irw = dmath.quat_slerp(
+                        t_inertia_rotation[mt, 0], t_inertia_rotation[mt, 1],
+                        t_inertia_rotation[mt, 2], t_inertia_rotation[mt, 3],
+                        t_step_rotation[mt, 0], t_step_rotation[mt, 1],
+                        t_step_rotation[mt, 2], t_step_rotation[mt, 3], inertia_depth)
+                    owx = t_old_world_position[mt, 0]
+                    owy = t_old_world_position[mt, 1]
+                    owz = t_old_world_position[mt, 2]
+                    lx = ox - owx
+                    ly = oy - owy
+                    lz = oz - owz
+                    rlx, rly, rlz = dmath.quat_rotate(irx, iry, irz, irw, lx, ly, lz)
+                    lx = rlx + ivx
+                    ly = rly + ivy
+                    lz = rlz + ivz
+                    wx = owx + lx
+                    wy = owy + ly
+                    wz = owz + lz
+                    nextx = wx
+                    nexty = wy
+                    nextz = wz
+                    velposx = ox + (wx - ox)
+                    velposy = oy + (wy - oy)
+                    velposz = oz + (wz - oz)
+
+                    vx, vy, vz = dmath.quat_rotate(irx, iry, irz, irw,
+                                                   p_velocities[pmi, 0], p_velocities[pmi, 1],
+                                                   p_velocities[pmi, 2])
+                    vw = t_velocity_weight[mt]
+                    vx = vx * vw
+                    vy = vy * vw
+                    vz = vz * vw
+                    damping = dmath.evaluate_team_lut_clamp01(t_damping_lut, mt, depth)
+                    damp = dmath.saturate(float32(1.0) - damping * power2)
+                    vx = vx * damp
+                    vy = vy * damp
+                    vz = vz * damp
+
+                    fm = t_force_mode[mt]
+                    change = (fm == FORCE_VELOCITY_CHANGE) or (fm == FORCE_VELOCITY_CHANGE_WITHOUT_DEPTH)
+                    if change:
+                        vx = float32(0.0)
+                        vy = float32(0.0)
+                        vz = float32(0.0)
+
+                    g = t_gravity[mt] * t_gravity_ratio[mt]
+                    fx = t_gravity_direction[mt, 0] * g
+                    fy = t_gravity_direction[mt, 1] * g
+                    fz = t_gravity_direction[mt, 2] * g
+                    mass = dmath.calc_mass(depth)
+                    with_depth = (fm == FORCE_VELOCITY_ADD) or (fm == FORCE_VELOCITY_CHANGE)
+                    without_depth = (fm == FORCE_VELOCITY_ADD_WITHOUT_DEPTH) or (fm == FORCE_VELOCITY_CHANGE_WITHOUT_DEPTH)
+                    if with_depth:
+                        fx = fx + t_impact_force[mt, 0] / mass
+                        fy = fy + t_impact_force[mt, 1] / mass
+                        fz = fz + t_impact_force[mt, 2] / mass
+                    if without_depth:
+                        fx = fx + t_impact_force[mt, 0]
+                        fy = fy + t_impact_force[mt, 1]
+                        fz = fz + t_impact_force[mt, 2]
+
+                    # wind force (inline; do_wind_blend per slot + moving)
+                    root = float32(p_vertex_root_local[pmi])
+                    seed = float32(t_wind_seed[mt])
+                    sync = t_wind_synchronization[mt]
+                    wind_position = (seed + float32(1.0)) * float32(4.19230645) \
+                        + root * float32(0.0023963) * (float32(1.0) - sync) * float32(100.0)
+                    blend = t_wind_blend[mt]
+                    turbulence_param = t_wind_turbulence[mt]
+                    wfx = float32(0.0)
+                    wfy = float32(0.0)
+                    wfz = float32(0.0)
+                    wc = t_wind_count[mt]
+                    for s in range(4):
+                        if s < wc:
+                            cx, cy, cz = do_wind_blend(
+                                t_wind_main[mt, s], t_wind_time[mt, s],
+                                t_wind_dirq[mt, s, 0], t_wind_dirq[mt, s, 1],
+                                t_wind_dirq[mt, s, 2], t_wind_dirq[mt, s, 3],
+                                t_wind_zone_turbulence[mt, s], blend, turbulence_param, wind_position)
+                            wfx = wfx + cx
+                            wfy = wfy + cy
+                            wfz = wfz + cz
+                    moving_on = (t_moving_wind_main[mt] > float32(0.01)) and (t_wind_moving[mt] > float32(0.01))
+                    if moving_on:
+                        cx, cy, cz = do_wind_blend(
+                            t_moving_wind_main[mt], t_moving_wind_time[mt],
+                            t_moving_wind_dirq[mt, 0], t_moving_wind_dirq[mt, 1],
+                            t_moving_wind_dirq[mt, 2], t_moving_wind_dirq[mt, 3],
+                            float32(1.0), blend, turbulence_param, wind_position)
+                        wfx = wfx + cx
+                        wfy = wfy + cy
+                        wfz = wfz + cz
+                    influence = t_wind_influence[mt] * (float32(1.0) - p_friction[pmi])
+                    depth_scale = depth * depth
+                    influence = influence * dmath.lerp(float32(1.0), depth_scale, t_wind_depth_weight[mt])
+                    fx = fx + wfx * influence
+                    fy = fy + wfy * influence
+                    fz = fz + wfz * influence
+
+                    sr = t_scale_ratio[mt]
+                    fx = fx * sr
+                    fy = fy * sr
+                    fz = fz * sr
+
+                    vx = vx + fx * sim_dt
+                    vy = vy + fy * sim_dt
+                    vz = vz + fz * sim_dt
+                    nextx = nextx + vx * sim_dt
+                    nexty = nexty + vy * sim_dt
+                    nextz = nextz + vz * sim_dt
+
+                    p_velocities[pmi, 0] = vx
+                    p_velocities[pmi, 1] = vy
+                    p_velocities[pmi, 2] = vz
+                    p_next_positions[pmi, 0] = nextx
+                    p_next_positions[pmi, 1] = nexty
+                    p_next_positions[pmi, 2] = nextz
+                    p_velocity_positions[pmi, 0] = velposx
+                    p_velocity_positions[pmi, 1] = velposy
+                    p_velocity_positions[pmi, 2] = velposz
+                e += stride
+        grid.sync()
+
+        # --- S3 PASS 2: fixed set (next=base) + spring set (limit/elliptic/noise) ---
+        if phase_mask & PHASE_PARTICLES_STEP:
+            e = tid
+            while e < n_fixed:
+                ft = st_fixed_team[e]
+                if team_frame_mask(t_enabled, t_valid, t_cws, ft) and t_update_count[ft] > _k:
+                    pfi = st_fixed_particle[e]
+                    p_next_positions[pfi, 0] = p_base_positions[pfi, 0]
+                    p_next_positions[pfi, 1] = p_base_positions[pfi, 1]
+                    p_next_positions[pfi, 2] = p_base_positions[pfi, 2]
+                    p_velocity_positions[pfi, 0] = p_base_positions[pfi, 0]
+                    p_velocity_positions[pfi, 1] = p_base_positions[pfi, 1]
+                    p_velocity_positions[pfi, 2] = p_base_positions[pfi, 2]
+                e += stride
+
+            e = tid
+            while e < n_spring:
+                st = st_spring_team[e]
+                if team_frame_mask(t_enabled, t_valid, t_cws, st) and t_update_count[st] > _k \
+                        and t_spring_power[st] > float32(0.0):
+                    psi = st_spring_particle[e]
+                    bpx = p_base_positions[psi, 0]
+                    bpy = p_base_positions[psi, 1]
+                    bpz = p_base_positions[psi, 2]
+                    n0 = p_next_positions[psi, 0]
+                    n1 = p_next_positions[psi, 1]
+                    n2 = p_next_positions[psi, 2]
+                    vx = n0 - bpx
+                    vy = n1 - bpy
+                    vz = n2 - bpz
+                    dx, dy, dz = dmath.quat_rotate(
+                        p_base_rotations[psi, 0], p_base_rotations[psi, 1],
+                        p_base_rotations[psi, 2], p_base_rotations[psi, 3],
+                        t_normal_axis_vector[st, 0], t_normal_axis_vector[st, 1],
+                        t_normal_axis_vector[st, 2])
+                    limit = t_spring_limit_distance[st] * t_scale_ratio[st]
+                    clampable = limit > float32(1e-8)
+                    l = dmath.length3(vx, vy, vz)
+                    over = clampable and (l > limit)
+                    if over and (l > float32(1e-30)):
+                        scale = limit / l
+                        vx = vx * scale
+                        vy = vy * scale
+                        vz = vz * scale
+                    ratio = t_spring_normal_limit_ratio[st]
+                    elliptic = clampable and (ratio < float32(1.0))
+                    ylen = dmath.dot3(dx, dy, dz, vx, vy, vz)
+                    vpx = vx - dx * ylen
+                    vpy = vy - dy * ylen
+                    vpz = vz - dz * ylen
+                    xlen = dmath.length3(vpx, vpy, vpz)
+                    safe_limit = limit if limit > float32(1e-30) else float32(1.0)
+                    tval = dmath.saturate(xlen / safe_limit)
+                    y = libdevice.cosf(libdevice.asinf(dmath.clamp1(tval))) * (limit * ratio)
+                    exceed = elliptic and (libdevice.fabsf(ylen) > y)
+                    if exceed:
+                        adjust = (libdevice.fabsf(ylen) - y) * dmath.fsign(ylen)
+                        vx = vx - adjust * dx
+                        vy = vy - adjust * dy
+                        vz = vz - adjust * dz
+                    if not clampable:
+                        vx = float32(0.0)
+                        vy = float32(0.0)
+                        vz = float32(0.0)
+
+                    power = t_spring_power[st]
+                    noise_param = t_spring_noise[st]
+                    if noise_param > float32(0.0):
+                        noise_time = (t_time[st] + float32(psi) * float32(49.6198)) * float32(2.4512) \
+                            + (n0 + n1 + n2)
+                        noise = libdevice.sinf(noise_time) * (noise_param * float32(0.6))
+                        power = power + power * noise
+                        if power < float32(0.0):
+                            power = float32(0.0)
+                    vx = vx - vx * power
+                    vy = vy - vy * power
+                    vz = vz - vz * power
+                    p_next_positions[psi, 0] = bpx + vx
+                    p_next_positions[psi, 1] = bpy + vy
+                    p_next_positions[psi, 2] = bpz + vz
+                e += stride
+        grid.sync()
+
         if phase_mask & PHASE_TETHER:
             e = tid
             while e < n_tether:
@@ -257,12 +575,24 @@ TEAM_KERNEL_FIELDS = (
     "time", "old_time", "now_update_time", "old_update_time", "frame_update_time",
     "frame_old_time", "frame_delta_time", "time_scale", "now_time_scale",
     "update_count", "skip_count", "running", "tether_compression",
+    "frame_interpolation", "depth_inertia", "inertia_vector", "step_vector",
+    "inertia_rotation", "step_rotation", "old_world_position", "velocity_weight",
+    "damping_lut", "force_mode", "gravity_direction", "gravity", "gravity_ratio",
+    "impact_force", "scale_ratio", "normal_axis_vector", "spring_limit_distance",
+    "spring_normal_limit_ratio", "spring_power", "spring_noise",
+    "wind_seed", "wind_synchronization", "wind_blend", "wind_turbulence",
+    "wind_count", "wind_main", "wind_time", "wind_dirq", "wind_zone_turbulence",
+    "wind_influence", "wind_depth_weight", "moving_wind_main", "wind_moving",
+    "moving_wind_time", "moving_wind_dirq",
 )
 
 PARTICLE_KERNEL_FIELDS = (
     "team", "local_positions", "local_normals", "local_tangents",
     "skin_indices", "skin_weights", "positions", "rotations",
     "next_positions", "velocity_positions", "step_basic_positions", "vertex_root",
+    "old_anim_positions", "old_anim_rotations", "base_positions", "base_rotations",
+    "step_basic_rotations", "depth", "velocities", "old_positions", "friction",
+    "vertex_root_local",
 )
 
 TRANSFORM_KERNEL_FIELDS = ("world", "bind_pose")
@@ -271,4 +601,10 @@ TRANSFORM_KERNEL_FIELDS = ("world", "bind_pose")
 STATIC_KERNEL_FIELDS = (
     ("tether_particle", "tether", "particle"),
     ("tether_team", "tether", "team"),
+    ("move_particle", "update_move", "particle"),
+    ("move_team", "update_move", "team"),
+    ("fixed_particle", "update_fixed", "particle"),
+    ("fixed_team", "update_fixed", "team"),
+    ("spring_particle", "spring", "particle"),
+    ("spring_team", "spring", "team"),
 )
