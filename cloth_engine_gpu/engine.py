@@ -386,6 +386,15 @@ class GpuEngine:
         # A fresh load zeroes every self_state blob, so the device already reflects the empty-task
         # state: _self_frame_prepare can skip its (~20 small) uploads until the first self frame.
         self._self_empty_uploaded = True
+        # The self-collision task table (use flags + EE/PT/intersect task pairs) is a pure function of
+        # the per-team columns it reads (self_mode/sync_mode/sync_target/enabled/valid/scale-alive + the
+        # sp/se/st chunk offsets). Building it walks every frame team with slow numpy void-scalar access
+        # (~0.15 ms/frame for 24 teams -- and it ran unconditionally, even -noself). Cache the built
+        # tables keyed on a byte fingerprint of exactly those inputs, so a steady scene (every -noself
+        # frame; every unchanged self frame) reuses them and only a genuine layout/config/input change
+        # rebuilds. Reset here so the first frame after any (re)load always recomputes.
+        self._self_task_shadow = None
+        self._self_task_cache = None
 
     # ---- wind-zone per-frame upload -----------------------------------------
     def _zone_host(self, zones):
@@ -716,14 +725,29 @@ class GpuEngine:
         self.feedback_staging.download(world.team, self.team, tblocks, tthreads)
 
     # ---- G3a self-collision per-frame host prep + upload ---------------------
-    def _self_frame_prepare(self, world, frame_index, stream=0):
+    def _self_task_fingerprint(self, tt, nt):
+        """Byte fingerprint of exactly the per-team columns _build_self_tasks reads, so the built
+        task tables are reused whenever none of them changed. Cheap (a handful of tobytes on nt-length
+        columns, ~microseconds) vs the ~0.15 ms per-team build loop it guards. scale-alive is folded in
+        as its derived bool (matching frame_mask), so sub-threshold scale wiggle never invalidates."""
+        cws = tt["component_world_scale"][:nt]
+        scale_alive = (np.abs(cws).min(axis=1) >= 1e-6)
+        return b"".join((
+            int(nt).to_bytes(8, "little"),
+            tt["self_mode"][:nt].tobytes(), tt["sync_mode"][:nt].tobytes(),
+            tt["sync_target"][:nt].tobytes(), tt["enabled"][:nt].tobytes(),
+            tt["valid"][:nt].tobytes(), scale_alive.tobytes(),
+            tt["sp_start"][:nt].tobytes(), tt["sp_count"][:nt].tobytes(),
+            tt["se_start"][:nt].tobytes(), tt["se_count"][:nt].tobytes(),
+            tt["st_start"][:nt].tobytes(), tt["st_count"][:nt].tobytes()))
+
+    def _build_self_tasks(self, tt, nt):
         """Mirror of cloth_kernel.self_collision.frame_begin's TEAM-LEVEL logic (D2: the use_point/
         edge/triangle flags and the (EE/PT/TP) contact + intersect task pairs are frame-level pure
-        team logic -> host). Builds this frame's device task tables + use flags + reset counters and
-        uploads them. TP is stored flipped to PT (my=points, target=triangles). Cross-team (sync)
-        tasks carry same_object=0 (no connection filter, no EE self-dedup)."""
-        tt = world.team
-        nt = self.program.num_teams
+        team logic -> host). Returns (contact, intersect, use_point, use_edge, use_triangle). TP is
+        stored flipped to PT (my=points, target=triangles). Cross-team (sync) tasks carry
+        same_object=0 (no connection filter, no EE self-dedup). Pure function of the fingerprinted
+        columns -> the caller caches the result across frames."""
         cws = tt["component_world_scale"][:nt]
         scale_alive = np.abs(cws).min(axis=1) >= 1e-6
         frame_mask = tt["enabled"][:nt] & tt["valid"][:nt] & scale_alive
@@ -779,10 +803,25 @@ class GpuEngine:
                     intersect.append((slot, se_s, se_c, partner, p_st_s, p_st, 0))
                 if has_tri and p_edge:
                     intersect.append((partner, p_se_s, p_se, slot, st_s, st_c, 0))
-        # -noself fast path: if this frame has no self-collision tasks AND the device already reflects
-        # the empty state (fresh load, or the previous frame reset it), skip all uploads -- the kernel's
-        # grid-uniform total-pair gates then execute zero self-collision work / barriers (P6: self off
-        # == near-zero overhead). A self->noself transition still resets once (empty but not-yet-empty).
+        return contact, intersect, use_point, use_edge, use_triangle
+
+    def _self_frame_prepare(self, world, frame_index, stream=0):
+        """Build (or reuse) this frame's self-collision device task tables + use flags + reset
+        counters and upload them. The task tables are fingerprint-cached (see _self_task_fingerprint):
+        a steady scene rebuilds them once and every later frame reuses them, so the -noself production
+        path costs a fingerprint compare instead of the per-team build loop. Uploads still run each
+        non-empty frame (scl_counts' frame_index rotates); the empty-task device state is reused as-is."""
+        tt = world.team
+        nt = self.program.num_teams
+        fingerprint = self._self_task_fingerprint(tt, nt)
+        if fingerprint != self._self_task_shadow or self._self_task_cache is None:
+            self._self_task_cache = self._build_self_tasks(tt, nt)
+            self._self_task_shadow = fingerprint
+        contact, intersect, use_point, use_edge, use_triangle = self._self_task_cache
+        # -noself fast path: no self-collision tasks AND the device already reflects the empty state
+        # (fresh load, or the previous frame reset it) -> skip all uploads; the kernel's grid-uniform
+        # total-pair gates then execute zero self-collision work / barriers (P6: self off == near-zero
+        # overhead). A self->noself transition still resets once (empty but not-yet-empty).
         if not contact and not intersect and self._self_empty_uploaded:
             return
         self._self_empty_uploaded = (not contact) and (not intersect)
