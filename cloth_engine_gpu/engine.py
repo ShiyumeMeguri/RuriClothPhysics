@@ -156,6 +156,7 @@ class GpuEngine:
         self.self_edges = None
         self.self_triangles = None
         self.self_state = {}
+        self._self_empty_uploaded = True
         self.load(world)
 
     # ---- lifecycle ----------------------------------------------------------
@@ -382,6 +383,9 @@ class GpuEngine:
         world_field = world.transforms.arrays["world"]
         self._world_pinned = cuda.pinned_array(
             (max(self.program.num_transforms, 1),) + world_field.shape[1:], dtype=world_field.dtype)
+        # A fresh load zeroes every self_state blob, so the device already reflects the empty-task
+        # state: _self_frame_prepare can skip its (~20 small) uploads until the first self frame.
+        self._self_empty_uploaded = True
 
     # ---- wind-zone per-frame upload -----------------------------------------
     def _zone_host(self, zones):
@@ -775,6 +779,13 @@ class GpuEngine:
                     intersect.append((slot, se_s, se_c, partner, p_st_s, p_st, 0))
                 if has_tri and p_edge:
                     intersect.append((partner, p_se_s, p_se, slot, st_s, st_c, 0))
+        # -noself fast path: if this frame has no self-collision tasks AND the device already reflects
+        # the empty state (fresh load, or the previous frame reset it), skip all uploads -- the kernel's
+        # grid-uniform total-pair gates then execute zero self-collision work / barriers (P6: self off
+        # == near-zero overhead). A self->noself transition still resets once (empty but not-yet-empty).
+        if not contact and not intersect and self._self_empty_uploaded:
+            return
+        self._self_empty_uploaded = (not contact) and (not intersect)
         total_ct = self._fill_task_table(contact, self.program.self_max_contact_tasks,
                                          ("ct_kind", "ct_my_team", "ct_my_start", "ct_my_count",
                                           "ct_tgt_team", "ct_tgt_start", "ct_tgt_count", "ct_same"),

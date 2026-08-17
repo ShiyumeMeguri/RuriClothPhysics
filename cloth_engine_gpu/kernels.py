@@ -16,7 +16,7 @@ oracle trs / matrix inverse); per-particle / per-pair phases stay strict-f32.
 
 import math
 
-from numba import cuda, float32, float64, int8, int32
+from numba import cuda, float32, float64, int8, int32, uint8
 from numba.cuda import cg, libdevice
 
 from . import dmath
@@ -2060,6 +2060,160 @@ def do_output_particle(p, mt, p_rotations, p_vertex_to_transform_rotations,
     p_out_rotations[p, 3] = ow
 
 
+# ---------------------------------------------------------------------------
+# G3a self-collision device helpers (mirror cloth_kernel.stages.self_collision). n^2 broad-phase
+# (D1): the exact-AABB-overlap predicate + filters reproduce the oracle grid+_filter_pairs pair set.
+# ---------------------------------------------------------------------------
+
+@cuda.jit(device=True)
+def do_self_update_primitive(prim, axes, a_team, a_particles, a_fix, a_ignore, a_prim_depth,
+                             a_inv_mass, a_thickness, a_aabb_min, a_aabb_max, a_intersect, a_use,
+                             t_use_flag, t_thickness_lut, t_cloth_mass, t_scale_ratio,
+                             t_enabled, t_valid, t_cws, t_update_count,
+                             p_next, p_old, p_friction, p_iflag, scl_counts, scl_max_fixed, k):
+    # mirrors self_collision._update_primitives for one primitive of `axes` particles (1/2/3).
+    team = a_team[prim]
+    if not (team_frame_mask(t_enabled, t_valid, t_cws, team) and t_update_count[team] > k
+            and t_use_flag[team] != 0):
+        a_use[prim] = uint8(0)
+        return
+    a_use[prim] = uint8(1)
+    fix_mask = a_fix[prim]
+    thickness = dmath.evaluate_team_lut(t_thickness_lut, team, a_prim_depth[prim]) * t_scale_ratio[team]
+    a_thickness[prim] = thickness
+    cloth_mass = t_cloth_mass[team]
+    use_intersect = scl_counts[SCL_USE_INTERSECT] != 0
+    imask = int32(0)
+    lowx = float32(1e30); lowy = float32(1e30); lowz = float32(1e30)
+    highx = float32(-1e30); highy = float32(-1e30); highz = float32(-1e30)
+    for slot in range(axes):
+        raw = a_particles[prim, slot]
+        pp = raw if raw >= 0 else int32(0)
+        fixed = ((fix_mask >> slot) & int32(1)) != 0
+        a_inv_mass[prim, slot] = dmath.calc_self_collision_inverse_mass(
+            p_friction[pp], fixed, cloth_mass)
+        nx = p_next[pp, 0]; ny = p_next[pp, 1]; nz = p_next[pp, 2]
+        ox = p_old[pp, 0]; oy = p_old[pp, 1]; oz = p_old[pp, 2]
+        slx = nx if nx < ox else ox
+        shx = nx if nx > ox else ox
+        sly = ny if ny < oy else oy
+        shy = ny if ny > oy else oy
+        slz = nz if nz < oz else oz
+        shz = nz if nz > oz else oz
+        if slx < lowx:
+            lowx = slx
+        if shx > highx:
+            highx = shx
+        if sly < lowy:
+            lowy = sly
+        if shy > highy:
+            highy = shy
+        if slz < lowz:
+            lowz = slz
+        if shz > highz:
+            highz = shz
+        if use_intersect and p_iflag[pp] != 0:
+            imask = imask | (int32(1) << slot)
+    a_intersect[prim] = uint8(imask)
+    a_aabb_min[prim, 0] = lowx - thickness
+    a_aabb_min[prim, 1] = lowy - thickness
+    a_aabb_min[prim, 2] = lowz - thickness
+    a_aabb_max[prim, 0] = highx + thickness
+    a_aabb_max[prim, 1] = highy + thickness
+    a_aabb_max[prim, 2] = highz + thickness
+    size = highx - lowx
+    ey = highy - lowy
+    ez = highz - lowz
+    if ey > size:
+        size = ey
+    if ez > size:
+        size = ez
+    if a_ignore[prim] == 0:
+        cuda.atomic.max(scl_max_fixed, team, int32(size * TO_FIXED))
+
+
+@cuda.jit(device=True)
+def self_aabb_overlap(a_min, a_max, i, b_min, b_max, j):
+    return (a_min[i, 0] <= b_max[j, 0] and a_max[i, 0] >= b_min[j, 0]
+            and a_min[i, 1] <= b_max[j, 1] and a_max[i, 1] >= b_min[j, 1]
+            and a_min[i, 2] <= b_max[j, 2] and a_max[i, 2] >= b_min[j, 2])
+
+
+@cuda.jit(device=True)
+def self_connection_shared(a_particles, i, b_particles, j):
+    # mirrors _filter_pairs connection_check: any shared valid (>=0) particle index.
+    for x in range(3):
+        pa = a_particles[i, x]
+        if pa >= 0:
+            for y in range(3):
+                pb = b_particles[j, y]
+                if pb >= 0 and pa == pb:
+                    return True
+    return False
+
+
+@cuda.jit(device=True)
+def self_ee_geometry(my_edge, tgt_edge, thickness, sfe_particles, p_next, p_old):
+    # mirrors _update_contacts EE block -> (s, t, nx, ny, nz, enable).
+    scr = thickness * SELF_COLLISION_SCR
+    a0 = sfe_particles[my_edge, 0]; a1 = sfe_particles[my_edge, 1]
+    b0 = sfe_particles[tgt_edge, 0]; b1 = sfe_particles[tgt_edge, 1]
+    s, t, c1x, c1y, c1z, c2x, c2y, c2z = dmath.closest_pt_segment_segment(
+        p_old[a0, 0], p_old[a0, 1], p_old[a0, 2], p_old[a1, 0], p_old[a1, 1], p_old[a1, 2],
+        p_old[b0, 0], p_old[b0, 1], p_old[b0, 2], p_old[b1, 0], p_old[b1, 1], p_old[b1, 2])
+    cdx = c1x - c2x; cdy = c1y - c2y; cdz = c1z - c2z
+    clen = dmath.length3(cdx, cdy, cdz)
+    ok = clen >= float32(1e-9)
+    safe = clen if clen > float32(1e-30) else float32(1.0)
+    nx = cdx / safe; ny = cdy / safe; nz = cdz / safe
+    dax = dmath.lerp(p_next[a0, 0] - p_old[a0, 0], p_next[a1, 0] - p_old[a1, 0], s)
+    day = dmath.lerp(p_next[a0, 1] - p_old[a0, 1], p_next[a1, 1] - p_old[a1, 1], s)
+    daz = dmath.lerp(p_next[a0, 2] - p_old[a0, 2], p_next[a1, 2] - p_old[a1, 2], s)
+    dbx = dmath.lerp(p_next[b0, 0] - p_old[b0, 0], p_next[b1, 0] - p_old[b1, 0], t)
+    dby = dmath.lerp(p_next[b0, 1] - p_old[b0, 1], p_next[b1, 1] - p_old[b1, 1], t)
+    dbz = dmath.lerp(p_next[b0, 2] - p_old[b0, 2], p_next[b1, 2] - p_old[b1, 2], t)
+    l = clen + (nx * dax + ny * day + nz * daz) - (nx * dbx + ny * dby + nz * dbz)
+    ok = ok and (l <= (thickness + scr))
+    return (s, t, nx, ny, nz, ok)
+
+
+@cuda.jit(device=True)
+def self_pt_geometry(point_prim, tri_prim, thickness, first, sfp_particles, sft_particles,
+                     p_next, p_old):
+    # mirrors _update_contacts PT block -> (enable, sign). sign is only meaningful when first.
+    scr = thickness * SELF_COLLISION_SCR
+    pp = sfp_particles[point_prim, 0]
+    t0 = sft_particles[tri_prim, 0]; t1 = sft_particles[tri_prim, 1]; t2 = sft_particles[tri_prim, 2]
+    oax = p_old[pp, 0]; oay = p_old[pp, 1]; oaz = p_old[pp, 2]
+    ob0x = p_old[t0, 0]; ob0y = p_old[t0, 1]; ob0z = p_old[t0, 2]
+    ob1x = p_old[t1, 0]; ob1y = p_old[t1, 1]; ob1z = p_old[t1, 2]
+    ob2x = p_old[t2, 0]; ob2y = p_old[t2, 1]; ob2z = p_old[t2, 2]
+    dax = p_next[pp, 0] - oax; day = p_next[pp, 1] - oay; daz = p_next[pp, 2] - oaz
+    db0x = p_next[t0, 0] - ob0x; db0y = p_next[t0, 1] - ob0y; db0z = p_next[t0, 2] - ob0z
+    db1x = p_next[t1, 0] - ob1x; db1y = p_next[t1, 1] - ob1y; db1z = p_next[t1, 2] - ob1z
+    db2x = p_next[t2, 0] - ob2x; db2y = p_next[t2, 1] - ob2y; db2z = p_next[t2, 2] - ob2z
+    cpx, cpy, cpz, u, v, w = dmath.closest_pt_point_triangle(
+        oax, oay, oaz, ob0x, ob0y, ob0z, ob1x, ob1y, ob1z, ob2x, ob2y, ob2z)
+    dtx = db0x * u + db1x * v + db2x * w
+    dty = db0y * u + db1y * v + db2y * w
+    dtz = db0z * u + db1z * v + db2z * w
+    cvx = cpx - oax; cvy = cpy - oay; cvz = cpz - oaz
+    cvlen = dmath.length3(cvx, cvy, cvz)
+    ok = cvlen > EPSILON
+    safe = cvlen if cvlen > float32(1e-30) else float32(1.0)
+    nx = cvx / safe; ny = cvy / safe; nz = cvz / safe
+    l = cvlen - (nx * dax + ny * day + nz * daz) + (nx * dtx + ny * dty + nz * dtz)
+    ok = ok and (l < (thickness + scr))
+    sign = float32(0.0)
+    if first:
+        otnx, otny, otnz = dmath.triangle_normal(ob0x, ob0y, ob0z, ob1x, ob1y, ob1z, ob2x, ob2y, ob2z)
+        n2x, n2y, n2z = dmath.normalize3(oax - cpx, oay - cpy, oaz - cpz)
+        d = otnx * n2x + otny * n2y + otnz * n2z
+        ok = ok and (libdevice.fabsf(d) >= SELF_COLLISION_POINT_TRIANGLE_ANGLE_COS)
+        sign = dmath.fsign(d)
+    return (ok, sign)
+
+
 @cuda.jit(cache=True)
 def frame_kernel(phase_mask, sub_begin, sub_end,
                  fdt, sim_dt, max_sim_count, global_time_scale,
@@ -2464,6 +2618,9 @@ def frame_kernel(phase_mask, sub_begin, sub_end,
 
     num_particles = p_team.shape[0]
     num_colliders = c_team.shape[0]
+    num_self_points = sfp_team.shape[0]
+    num_self_edges = sfe_team.shape[0]
+    num_self_triangles = sft_team.shape[0]
 
     # ----- FRAME-PRE -----
     # T0 team_time.resolve_sync (per ENABLED team; gate = enabled only, not the
@@ -3296,6 +3453,55 @@ def frame_kernel(phase_mask, sub_begin, sub_end,
                                       t_old_component_world_position)
             ci += stride
     grid.sync()
+
+    # --- SELF_BEGIN self_collision.frame_begin intersect broad-phase (frame-pre; STALE AABB) ---
+    # n^2 edge x triangle per intersect task using last frame's resident AABB / grid sizes (frame 0 =
+    # all zero -> skipped, matching the oracle). Gated behind a grid-uniform total-pair count, so a
+    # -noself frame (no intersect tasks) executes ZERO of these barriers (zero overhead).
+    num_it_slots = it_pair_off.shape[0] - 1
+    total_it = it_pair_off[num_it_slots]
+    if total_it > 0:
+        if phase_mask & PHASE_SELF_BEGIN:
+            if tid == 0:
+                scl_counts[SCL_IP_COUNT] = int32(0)
+        grid.sync()
+        if phase_mask & PHASE_SELF_BEGIN:
+            frame_index = scl_counts[SCL_FRAME_INDEX]
+            ip_cap = ip_edge.shape[0]
+            g = tid
+            while g < total_it:
+                task = int32(-1)
+                for kk in range(num_it_slots):
+                    if it_pair_off[kk] <= g and g < it_pair_off[kk + 1]:
+                        task = kk
+                        break
+                tgt_team = it_tri_team[task]
+                # broad_phase + _detect_intersect skip: target grid_size / max primitive size > eps.
+                if t_self_grid_size[tgt_team] > EPSILON and t_self_max_primitive_size[tgt_team] > EPSILON:
+                    tri_count = it_tri_count[task]
+                    local = g - it_pair_off[task]
+                    i = local // tri_count
+                    j = local % tri_count
+                    my_edge = it_edge_start[task] + i
+                    tgt_tri = it_tri_start[task] + j
+                    same = it_same[task]
+                    # my edge ~ignore; 分帧 by local edge index; target = (stale use) & ~ignore.
+                    if (sfe_ignore[my_edge] == 0 and (i % SELF_COLLISION_INTERSECT_DIV) == frame_index
+                            and sft_use[tgt_tri] != 0 and sft_ignore[tgt_tri] == 0
+                            and self_aabb_overlap(sfe_aabb_min, sfe_aabb_max, my_edge,
+                                                  sft_aabb_min, sft_aabb_max, tgt_tri)
+                            and not (sfe_all_fix[my_edge] != 0 and sft_all_fix[tgt_tri] != 0)):
+                        conn = (same == 0) or (not self_connection_shared(
+                            sfe_particles, my_edge, sft_particles, tgt_tri))
+                        if conn:
+                            idx = cuda.atomic.add(scl_counts, SCL_IP_COUNT, 1)
+                            if idx < ip_cap:
+                                ip_edge[idx] = my_edge
+                                ip_tri[idx] = tgt_tri
+                            else:
+                                scl_counts[SCL_ERROR] = int32(1)
+                g += stride
+        grid.sync()
 
     # ----- SUBSTEP LOOP (phases added in dependency order as ported) -----
     n_tether = st_tether_particle.shape[0]
@@ -4231,6 +4437,326 @@ def frame_kernel(phase_mask, sub_begin, sub_end,
                 e += stride
         grid.sync()
 
+        # --- SELF_STEP self_collision.step (S12; between S11 motion and S13 step_post) ---
+        # first substep: update_primitives + n^2 detect_contacts (append only enabled -> free compaction);
+        # later substeps: update_contacts. Then a 4-iteration PBD solve using int32 fixed-point atomic
+        # scatter (reuses sc_dcorr_fixed / sc_dcount). The whole block is gated behind a grid-uniform
+        # contact-pair count, so a -noself frame executes ZERO of these barriers.
+        num_ct_slots = ct_pair_off.shape[0] - 1
+        total_ct = ct_pair_off[num_ct_slots]
+        if total_ct > 0:
+            ee_cap = ee_my.shape[0]
+            pt_cap = pt_my.shape[0]
+            if _k == 0:
+                if phase_mask & PHASE_SELF_STEP:
+                    i = tid
+                    while i < num_teams:
+                        if team_frame_mask(t_enabled, t_valid, t_cws, i) and t_update_count[i] > _k:
+                            scl_max_fixed[i] = int32(0)
+                        i += stride
+                grid.sync()
+                if phase_mask & PHASE_SELF_STEP:
+                    q = tid
+                    while q < num_self_points:
+                        do_self_update_primitive(
+                            q, 1, sfp_team, sfp_particles, sfp_fix, sfp_ignore, sfp_prim_depth,
+                            sfp_inv_mass, sfp_thickness, sfp_aabb_min, sfp_aabb_max, sfp_intersect,
+                            sfp_use, t_use_point, t_self_thickness_lut, t_self_cloth_mass, t_scale_ratio,
+                            t_enabled, t_valid, t_cws, t_update_count, p_next_positions, p_old_positions,
+                            p_friction, p_intersect_flag, scl_counts, scl_max_fixed, _k)
+                        q += stride
+                    q = tid
+                    while q < num_self_edges:
+                        do_self_update_primitive(
+                            q, 2, sfe_team, sfe_particles, sfe_fix, sfe_ignore, sfe_prim_depth,
+                            sfe_inv_mass, sfe_thickness, sfe_aabb_min, sfe_aabb_max, sfe_intersect,
+                            sfe_use, t_use_edge, t_self_thickness_lut, t_self_cloth_mass, t_scale_ratio,
+                            t_enabled, t_valid, t_cws, t_update_count, p_next_positions, p_old_positions,
+                            p_friction, p_intersect_flag, scl_counts, scl_max_fixed, _k)
+                        q += stride
+                    q = tid
+                    while q < num_self_triangles:
+                        do_self_update_primitive(
+                            q, 3, sft_team, sft_particles, sft_fix, sft_ignore, sft_prim_depth,
+                            sft_inv_mass, sft_thickness, sft_aabb_min, sft_aabb_max, sft_intersect,
+                            sft_use, t_use_triangle, t_self_thickness_lut, t_self_cloth_mass, t_scale_ratio,
+                            t_enabled, t_valid, t_cws, t_update_count, p_next_positions, p_old_positions,
+                            p_friction, p_intersect_flag, scl_counts, scl_max_fixed, _k)
+                        q += stride
+                grid.sync()
+                if phase_mask & PHASE_SELF_STEP:
+                    i = tid
+                    while i < num_teams:
+                        if team_frame_mask(t_enabled, t_valid, t_cws, i) and t_update_count[i] > _k:
+                            ms = float32(scl_max_fixed[i]) / TO_FIXED
+                            t_self_max_primitive_size[i] = ms
+                            t_self_grid_size[i] = ms * SELF_COLLISION_UNIFORM_GRID_SCALE
+                        i += stride
+                grid.sync()
+                if phase_mask & PHASE_SELF_STEP:
+                    if tid == 0:
+                        scl_counts[SCL_EE_COUNT] = int32(0)
+                        scl_counts[SCL_PT_COUNT] = int32(0)
+                grid.sync()
+                if phase_mask & PHASE_SELF_STEP:
+                    g = tid
+                    while g < total_ct:
+                        task = int32(-1)
+                        for kk in range(num_ct_slots):
+                            if ct_pair_off[kk] <= g and g < ct_pair_off[kk + 1]:
+                                task = kk
+                                break
+                        tgt_team = ct_tgt_team[task]
+                        if t_self_grid_size[tgt_team] > EPSILON:
+                            tgt_count = ct_tgt_count[task]
+                            local = g - ct_pair_off[task]
+                            i = local // tgt_count
+                            j = local % tgt_count
+                            my_prim = ct_my_start[task] + i
+                            tgt_prim = ct_tgt_start[task] + j
+                            same = ct_same[task]
+                            if ct_kind[task] == 0:
+                                if (sfe_use[my_prim] != 0 and sfe_ignore[my_prim] == 0
+                                        and sfe_use[tgt_prim] != 0 and sfe_ignore[tgt_prim] == 0
+                                        and (same == 0 or my_prim < tgt_prim)
+                                        and self_aabb_overlap(sfe_aabb_min, sfe_aabb_max, my_prim,
+                                                              sfe_aabb_min, sfe_aabb_max, tgt_prim)
+                                        and not (sfe_all_fix[my_prim] != 0 and sfe_all_fix[tgt_prim] != 0)):
+                                    if (same == 0) or (not self_connection_shared(
+                                            sfe_particles, my_prim, sfe_particles, tgt_prim)):
+                                        thk = sfe_thickness[my_prim] + sfe_thickness[tgt_prim]
+                                        s, t, nx, ny, nz, enable = self_ee_geometry(
+                                            my_prim, tgt_prim, thk, sfe_particles,
+                                            p_next_positions, p_old_positions)
+                                        if enable:
+                                            idx = cuda.atomic.add(scl_counts, SCL_EE_COUNT, 1)
+                                            if idx < ee_cap:
+                                                ee_my[idx] = my_prim
+                                                ee_target[idx] = tgt_prim
+                                                ee_thickness[idx] = thk
+                                                ee_s[idx] = s
+                                                ee_t[idx] = t
+                                                ee_n[idx, 0] = nx
+                                                ee_n[idx, 1] = ny
+                                                ee_n[idx, 2] = nz
+                                                ee_enable[idx] = uint8(1)
+                                            else:
+                                                scl_counts[SCL_ERROR] = int32(1)
+                            else:
+                                if (sfp_use[my_prim] != 0 and sfp_ignore[my_prim] == 0
+                                        and sft_use[tgt_prim] != 0 and sft_ignore[tgt_prim] == 0
+                                        and self_aabb_overlap(sfp_aabb_min, sfp_aabb_max, my_prim,
+                                                              sft_aabb_min, sft_aabb_max, tgt_prim)
+                                        and not (sfp_all_fix[my_prim] != 0 and sft_all_fix[tgt_prim] != 0)):
+                                    if (same == 0) or (not self_connection_shared(
+                                            sfp_particles, my_prim, sft_particles, tgt_prim)):
+                                        thk = sfp_thickness[my_prim] + sft_thickness[tgt_prim]
+                                        enable, sign = self_pt_geometry(
+                                            my_prim, tgt_prim, thk, True, sfp_particles,
+                                            sft_particles, p_next_positions, p_old_positions)
+                                        if enable:
+                                            idx = cuda.atomic.add(scl_counts, SCL_PT_COUNT, 1)
+                                            if idx < pt_cap:
+                                                pt_my[idx] = my_prim
+                                                pt_target[idx] = tgt_prim
+                                                pt_thickness[idx] = thk
+                                                pt_sign[idx] = sign
+                                                pt_enable[idx] = uint8(1)
+                                            else:
+                                                scl_counts[SCL_ERROR] = int32(1)
+                        g += stride
+                grid.sync()
+            else:
+                if phase_mask & PHASE_SELF_STEP:
+                    ee_count = scl_counts[SCL_EE_COUNT]
+                    ee_lim = ee_count if ee_count < ee_cap else ee_cap
+                    e = tid
+                    while e < ee_lim:
+                        s, t, nx, ny, nz, enable = self_ee_geometry(
+                            ee_my[e], ee_target[e], ee_thickness[e], sfe_particles,
+                            p_next_positions, p_old_positions)
+                        ee_s[e] = s
+                        ee_t[e] = t
+                        ee_n[e, 0] = nx
+                        ee_n[e, 1] = ny
+                        ee_n[e, 2] = nz
+                        ee_enable[e] = uint8(1) if enable else uint8(0)
+                        e += stride
+                    pt_count = scl_counts[SCL_PT_COUNT]
+                    pt_lim = pt_count if pt_count < pt_cap else pt_cap
+                    e = tid
+                    while e < pt_lim:
+                        enable, _sign = self_pt_geometry(
+                            pt_my[e], pt_target[e], pt_thickness[e], False, sfp_particles,
+                            sft_particles, p_next_positions, p_old_positions)
+                        pt_enable[e] = uint8(1) if enable else uint8(0)
+                        e += stride
+                grid.sync()
+            ee_count2 = scl_counts[SCL_EE_COUNT]
+            ee_lim2 = ee_count2 if ee_count2 < ee_cap else ee_cap
+            pt_count2 = scl_counts[SCL_PT_COUNT]
+            pt_lim2 = pt_count2 if pt_count2 < pt_cap else pt_cap
+            if phase_mask & PHASE_SELF_STEP:
+                p = tid
+                while p < num_particles:
+                    sc_dcorr_fixed[p, 0] = int32(0)
+                    sc_dcorr_fixed[p, 1] = int32(0)
+                    sc_dcorr_fixed[p, 2] = int32(0)
+                    sc_dcount[p] = int32(0)
+                    p += stride
+            grid.sync()
+            for _sit in range(SELF_COLLISION_SOLVER_ITERATION):
+                if phase_mask & PHASE_SELF_STEP:
+                    e = tid
+                    while e < ee_lim2:
+                        if ee_enable[e] != 0:
+                            my = ee_my[e]
+                            tgt = ee_target[e]
+                            s = ee_s[e]
+                            t = ee_t[e]
+                            nx = ee_n[e, 0]
+                            ny = ee_n[e, 1]
+                            nz = ee_n[e, 2]
+                            thk = ee_thickness[e]
+                            a0 = sfe_particles[my, 0]
+                            a1 = sfe_particles[my, 1]
+                            b0 = sfe_particles[tgt, 0]
+                            b1 = sfe_particles[tgt, 1]
+                            ax = dmath.lerp(p_next_positions[a0, 0], p_next_positions[a1, 0], s)
+                            ay = dmath.lerp(p_next_positions[a0, 1], p_next_positions[a1, 1], s)
+                            az = dmath.lerp(p_next_positions[a0, 2], p_next_positions[a1, 2], s)
+                            bx = dmath.lerp(p_next_positions[b0, 0], p_next_positions[b1, 0], t)
+                            by = dmath.lerp(p_next_positions[b0, 1], p_next_positions[b1, 1], t)
+                            bz = dmath.lerp(p_next_positions[b0, 2], p_next_positions[b1, 2], t)
+                            l = nx * (ax - bx) + ny * (ay - by) + nz * (az - bz)
+                            c = thk - l
+                            bb0 = float32(1.0) - s
+                            bb1 = s
+                            bb2 = float32(1.0) - t
+                            bb3 = t
+                            im0 = sfe_inv_mass[my, 0]
+                            im1 = sfe_inv_mass[my, 1]
+                            im20 = sfe_inv_mass[tgt, 0]
+                            im21 = sfe_inv_mass[tgt, 1]
+                            denom = im0 * bb0 * bb0 + im1 * bb1 * bb1 + im20 * bb2 * bb2 + im21 * bb3 * bb3
+                            if l <= thk and denom != float32(0.0):
+                                scale = c / denom
+                                s0 = scale * im0 * bb0
+                                s1 = scale * im1 * bb1
+                                s2 = scale * im20 * bb2
+                                s3 = scale * im21 * bb3
+                                fm = sfe_fix[my]
+                                imk = sfe_intersect[my]
+                                fmt = sfe_fix[tgt]
+                                imt = sfe_intersect[tgt]
+                                if ((fm >> 0) & 1) == 0 and ((imk >> 0) & 1) == 0:
+                                    cuda.atomic.add(sc_dcorr_fixed, (a0, 0), int32(nx * s0 * TO_FIXED))
+                                    cuda.atomic.add(sc_dcorr_fixed, (a0, 1), int32(ny * s0 * TO_FIXED))
+                                    cuda.atomic.add(sc_dcorr_fixed, (a0, 2), int32(nz * s0 * TO_FIXED))
+                                    cuda.atomic.add(sc_dcount, a0, 1)
+                                if ((fm >> 1) & 1) == 0 and ((imk >> 1) & 1) == 0:
+                                    cuda.atomic.add(sc_dcorr_fixed, (a1, 0), int32(nx * s1 * TO_FIXED))
+                                    cuda.atomic.add(sc_dcorr_fixed, (a1, 1), int32(ny * s1 * TO_FIXED))
+                                    cuda.atomic.add(sc_dcorr_fixed, (a1, 2), int32(nz * s1 * TO_FIXED))
+                                    cuda.atomic.add(sc_dcount, a1, 1)
+                                if ((fmt >> 0) & 1) == 0 and ((imt >> 0) & 1) == 0:
+                                    cuda.atomic.add(sc_dcorr_fixed, (b0, 0), int32(-nx * s2 * TO_FIXED))
+                                    cuda.atomic.add(sc_dcorr_fixed, (b0, 1), int32(-ny * s2 * TO_FIXED))
+                                    cuda.atomic.add(sc_dcorr_fixed, (b0, 2), int32(-nz * s2 * TO_FIXED))
+                                    cuda.atomic.add(sc_dcount, b0, 1)
+                                if ((fmt >> 1) & 1) == 0 and ((imt >> 1) & 1) == 0:
+                                    cuda.atomic.add(sc_dcorr_fixed, (b1, 0), int32(-nx * s3 * TO_FIXED))
+                                    cuda.atomic.add(sc_dcorr_fixed, (b1, 1), int32(-ny * s3 * TO_FIXED))
+                                    cuda.atomic.add(sc_dcorr_fixed, (b1, 2), int32(-nz * s3 * TO_FIXED))
+                                    cuda.atomic.add(sc_dcount, b1, 1)
+                        e += stride
+                    e = tid
+                    while e < pt_lim2:
+                        if pt_enable[e] != 0:
+                            my = pt_my[e]
+                            tgt = pt_target[e]
+                            sign = pt_sign[e]
+                            thk = pt_thickness[e]
+                            pp = sfp_particles[my, 0]
+                            t0 = sft_particles[tgt, 0]
+                            t1 = sft_particles[tgt, 1]
+                            t2 = sft_particles[tgt, 2]
+                            npx = p_next_positions[pp, 0]
+                            npy = p_next_positions[pp, 1]
+                            npz = p_next_positions[pp, 2]
+                            t0x = p_next_positions[t0, 0]
+                            t0y = p_next_positions[t0, 1]
+                            t0z = p_next_positions[t0, 2]
+                            t1x = p_next_positions[t1, 0]
+                            t1y = p_next_positions[t1, 1]
+                            t1z = p_next_positions[t1, 2]
+                            t2x = p_next_positions[t2, 0]
+                            t2y = p_next_positions[t2, 1]
+                            t2z = p_next_positions[t2, 2]
+                            tnx, tny, tnz = dmath.triangle_normal(t0x, t0y, t0z, t1x, t1y, t1z,
+                                                                 t2x, t2y, t2z)
+                            nx = tnx * sign
+                            ny = tny * sign
+                            nz = tnz * sign
+                            dist = nx * (npx - t0x) + ny * (npy - t0y) + nz * (npz - t0z)
+                            _cx, _cy, _cz, u, v, w = dmath.closest_pt_point_triangle(
+                                npx, npy, npz, t0x, t0y, t0z, t1x, t1y, t1z, t2x, t2y, t2z)
+                            c = dist - thk
+                            imp = sfp_inv_mass[my, 0]
+                            imt0 = sft_inv_mass[tgt, 0]
+                            imt1 = sft_inv_mass[tgt, 1]
+                            imt2 = sft_inv_mass[tgt, 2]
+                            denom = imp + imt0 * u * u + imt1 * v * v + imt2 * w * w
+                            if dist < thk and denom != float32(0.0):
+                                scale = c / denom
+                                sp = scale * imp
+                                st0 = scale * imt0 * u
+                                st1 = scale * imt1 * v
+                                st2 = scale * imt2 * w
+                                fp = sfp_fix[my]
+                                ipk = sfp_intersect[my]
+                                ft = sft_fix[tgt]
+                                itk = sft_intersect[tgt]
+                                if ((fp >> 0) & 1) == 0 and ((ipk >> 0) & 1) == 0:
+                                    cuda.atomic.add(sc_dcorr_fixed, (pp, 0), int32(-nx * sp * TO_FIXED))
+                                    cuda.atomic.add(sc_dcorr_fixed, (pp, 1), int32(-ny * sp * TO_FIXED))
+                                    cuda.atomic.add(sc_dcorr_fixed, (pp, 2), int32(-nz * sp * TO_FIXED))
+                                    cuda.atomic.add(sc_dcount, pp, 1)
+                                if ((ft >> 0) & 1) == 0 and ((itk >> 0) & 1) == 0:
+                                    cuda.atomic.add(sc_dcorr_fixed, (t0, 0), int32(nx * st0 * TO_FIXED))
+                                    cuda.atomic.add(sc_dcorr_fixed, (t0, 1), int32(ny * st0 * TO_FIXED))
+                                    cuda.atomic.add(sc_dcorr_fixed, (t0, 2), int32(nz * st0 * TO_FIXED))
+                                    cuda.atomic.add(sc_dcount, t0, 1)
+                                if ((ft >> 1) & 1) == 0 and ((itk >> 1) & 1) == 0:
+                                    cuda.atomic.add(sc_dcorr_fixed, (t1, 0), int32(nx * st1 * TO_FIXED))
+                                    cuda.atomic.add(sc_dcorr_fixed, (t1, 1), int32(ny * st1 * TO_FIXED))
+                                    cuda.atomic.add(sc_dcorr_fixed, (t1, 2), int32(nz * st1 * TO_FIXED))
+                                    cuda.atomic.add(sc_dcount, t1, 1)
+                                if ((ft >> 2) & 1) == 0 and ((itk >> 2) & 1) == 0:
+                                    cuda.atomic.add(sc_dcorr_fixed, (t2, 0), int32(nx * st2 * TO_FIXED))
+                                    cuda.atomic.add(sc_dcorr_fixed, (t2, 1), int32(ny * st2 * TO_FIXED))
+                                    cuda.atomic.add(sc_dcorr_fixed, (t2, 2), int32(nz * st2 * TO_FIXED))
+                                    cuda.atomic.add(sc_dcount, t2, 1)
+                        e += stride
+                grid.sync()
+                if phase_mask & PHASE_SELF_STEP:
+                    p = tid
+                    while p < num_particles:
+                        cnt = sc_dcount[p]
+                        if cnt > 0:
+                            mt = p_team[p]
+                            if team_frame_mask(t_enabled, t_valid, t_cws, mt) and t_update_count[mt] > _k:
+                                inv = float32(1.0) / float32(cnt)
+                                p_next_positions[p, 0] += float32(sc_dcorr_fixed[p, 0]) / TO_FIXED * inv
+                                p_next_positions[p, 1] += float32(sc_dcorr_fixed[p, 1]) / TO_FIXED * inv
+                                p_next_positions[p, 2] += float32(sc_dcorr_fixed[p, 2]) / TO_FIXED * inv
+                        sc_dcorr_fixed[p, 0] = int32(0)
+                        sc_dcorr_fixed[p, 1] = int32(0)
+                        sc_dcorr_fixed[p, 2] = int32(0)
+                        sc_dcount[p] = int32(0)
+                        p += stride
+                grid.sync()
+
         # --- S13 particles.step_post PASS 1: friction / limit / centrifugal (move set) ---
         if phase_mask & PHASE_STEP_POST:
             e = tid
@@ -4388,9 +4914,66 @@ def frame_kernel(phase_mask, sub_begin, sub_end,
 
     # ----- FRAME-POST -----
     grid.sync()
+
+    # --- SELF_END self_collision.frame_end intersect narrow-phase (frame-post; FRESH next_pos) ---
+    # segment-triangle test over the intersect-pair table SELF_BEGIN filled (with THIS frame's final
+    # next_positions); clears then sets intersect_flag, consumed by next frame's update_primitives.
+    # Gated behind the same grid-uniform intersect-pair total, so -noself pays zero barriers here.
+    if total_it > 0:
+        if phase_mask & PHASE_SELF_END:
+            p = tid
+            while p < num_particles:
+                if team_frame_mask(t_enabled, t_valid, t_cws, p_team[p]):
+                    p_intersect_flag[p] = uint8(0)
+                p += stride
+        grid.sync()
+        if phase_mask & PHASE_SELF_END:
+            ip_count = scl_counts[SCL_IP_COUNT]
+            ip_lim = ip_count if ip_count < ip_edge.shape[0] else ip_edge.shape[0]
+            e = tid
+            while e < ip_lim:
+                edge_prim = ip_edge[e]
+                tri_prim = ip_tri[e]
+                ep0 = sfe_particles[edge_prim, 0]
+                ep1 = sfe_particles[edge_prim, 1]
+                ta = sft_particles[tri_prim, 0]
+                tb = sft_particles[tri_prim, 1]
+                tc = sft_particles[tri_prim, 2]
+                px = p_next_positions[ep0, 0]; py = p_next_positions[ep0, 1]; pz = p_next_positions[ep0, 2]
+                qx = p_next_positions[ep1, 0]; qy = p_next_positions[ep1, 1]; qz = p_next_positions[ep1, 2]
+                ax = p_next_positions[ta, 0]; ay = p_next_positions[ta, 1]; az = p_next_positions[ta, 2]
+                bx = p_next_positions[tb, 0]; by = p_next_positions[tb, 1]; bz = p_next_positions[tb, 2]
+                cx = p_next_positions[tc, 0]; cy = p_next_positions[tc, 1]; cz = p_next_positions[tc, 2]
+                qpx = px - qx; qpy = py - qy; qpz = pz - qz
+                acx = cx - ax; acy = cy - ay; acz = cz - az
+                abx = bx - ax; aby = by - ay; abz = bz - az
+                nx, ny, nz = dmath.cross3(abx, aby, abz, acx, acy, acz)
+                d = qpx * nx + qpy * ny + qpz * nz
+                ok = libdevice.fabsf(d) >= EPSILON
+                if d < float32(0.0):
+                    p2x = qx; p2y = qy; p2z = qz
+                    qp2x = -qpx; qp2y = -qpy; qp2z = -qpz
+                else:
+                    p2x = px; p2y = py; p2z = pz
+                    qp2x = qpx; qp2y = qpy; qp2z = qpz
+                d2 = libdevice.fabsf(d)
+                apx = p2x - ax; apy = p2y - ay; apz = p2z - az
+                tparam = apx * nx + apy * ny + apz * nz
+                ok = ok and (tparam >= float32(0.0)) and (tparam <= d2)
+                ecx, ecy, ecz = dmath.cross3(qp2x, qp2y, qp2z, apx, apy, apz)
+                vparam = acx * ecx + acy * ecy + acz * ecz
+                ok = ok and (vparam >= float32(0.0)) and (vparam <= d2)
+                wparam = -(abx * ecx + aby * ecy + abz * ecz)
+                ok = ok and (wparam >= float32(0.0)) and ((vparam + wparam) <= d2)
+                if ok:
+                    p_intersect_flag[ep0] = uint8(1)
+                    p_intersect_flag[ep1] = uint8(1)
+                e += stride
+        grid.sync()
+
     # F2 display.run: segment A _display (per-particle) -> B _postline (per level, per entry) ->
     # C _post_triangles (C1 per-triangle normal/tangent, C2 per-owner v2t reduce) -> D _output.
-    # Sits at the frame-post head (the self-collision F1 slot is a G3 no-op), before F3; F3/F4
+    # Sits at the frame-post head after the self-collision F1 slot (SELF_END), before F3; F3/F4
     # are gated by their own bits so isolated PHASE_DISPLAY launches leave them untouched. Zero
     # atomics: postline children walk the entry CSR serially, v2t rows walk the owner CSR serially,
     # grid.sync between the four segments (and per postline level) orders every cross-thread write.

@@ -473,6 +473,13 @@ def closest_pt_point_segment_ratio(cx, cy, cz, ax, ay, az, bx, by, bz):
 @cuda.jit(device=True)
 def closest_pt_segment_segment(p1x, p1y, p1z, q1x, q1y, q1z,
                                p2x, p2y, p2z, q2x, q2y, q2z):
+    # G3a: parallel/collinear segments give denom = a*e - b*b ~ 0 (catastrophic cancellation), so `s`
+    # saturates to 0 or 1 on a sign that flips if the dot products round even 1 ULP differently. numpy
+    # (the oracle) never contracts a*b into an FMA; NVVM does by default, which flips that sign and
+    # diverges s/t by ~1.0. Force IEEE round-to-nearest multiplies (fmul_rn, no contraction) so a/e/b/
+    # f/c/denom/numerator are bit-identical to numpy -> s/t match. (Non-degenerate cases are unchanged
+    # to ~1 ULP.) The closest points themselves (c1/c2) stay invariant under the parallel s/t ambiguity.
+    fm = libdevice.fmul_rn
     d1x = q1x - p1x
     d1y = q1y - p1y
     d1z = q1z - p1z
@@ -482,10 +489,10 @@ def closest_pt_segment_segment(p1x, p1y, p1z, q1x, q1y, q1z,
     rx = p1x - p2x
     ry = p1y - p2y
     rz = p1z - p2z
-    a = d1x * d1x + d1y * d1y + d1z * d1z
-    e = d2x * d2x + d2y * d2y + d2z * d2z
-    f = d2x * rx + d2y * ry + d2z * rz
-    c = d1x * rx + d1y * ry + d1z * rz
+    a = fm(d1x, d1x) + fm(d1y, d1y) + fm(d1z, d1z)
+    e = fm(d2x, d2x) + fm(d2y, d2y) + fm(d2z, d2z)
+    f = fm(d2x, rx) + fm(d2y, ry) + fm(d2z, rz)
+    c = fm(d1x, rx) + fm(d1y, ry) + fm(d1z, rz)
 
     both = (a <= float32(1e-8)) and (e <= float32(1e-8))
     first = (a <= float32(1e-8)) and (not both)
@@ -494,13 +501,13 @@ def closest_pt_segment_segment(p1x, p1y, p1z, q1x, q1y, q1z,
     safe_a = a if a > float32(1e-30) else float32(1.0)
     safe_e = e if e > float32(1e-30) else float32(1.0)
 
-    b = d1x * d2x + d1y * d2y + d1z * d2z
-    denom = a * e - b * b
+    b = fm(d1x, d2x) + fm(d1y, d2y) + fm(d1z, d2z)
+    denom = fm(a, e) - fm(b, b)
     if libdevice.fabsf(denom) > float32(0.0):
-        s = saturate((b * f - c * e) / denom)
+        s = saturate((fm(b, f) - fm(c, e)) / denom)
     else:
         s = float32(0.0)
-    t = (b * s + f) / safe_e
+    t = (fm(b, s) + f) / safe_e
 
     if t < float32(0.0):
         s = saturate(-c / safe_a)
@@ -521,12 +528,12 @@ def closest_pt_segment_segment(p1x, p1y, p1z, q1x, q1y, q1z,
         s = float32(0.0)
         t = float32(0.0)
 
-    c1x = p1x + d1x * s
-    c1y = p1y + d1y * s
-    c1z = p1z + d1z * s
-    c2x = p2x + d2x * t
-    c2y = p2y + d2y * t
-    c2z = p2z + d2z * t
+    c1x = p1x + fm(d1x, s)
+    c1y = p1y + fm(d1y, s)
+    c1z = p1z + fm(d1z, s)
+    c2x = p2x + fm(d2x, t)
+    c2y = p2y + fm(d2y, t)
+    c2z = p2z + fm(d2z, t)
     return (s, t, c1x, c1y, c1z, c2x, c2y, c2z)
 
 
@@ -751,3 +758,107 @@ def mat4_mul_f64(out, a, b):
             for k in range(4):
                 acc += a[i, k] * b[k, j]
             out[i, j] = acc
+
+
+# ---------------------------------------------------------------------------
+# self-collision geometry (G3a). All f32 (the coordinator authorises f64 only for the
+# distance / collider gathers and per-team matrix paths; self-collision geometry is strict
+# f32). closest_pt_segment_segment / triangle_normal already exist above and are reused.
+# ---------------------------------------------------------------------------
+
+SELF_COLLISION_FIXED_MASS = float32(100.0)
+SELF_COLLISION_FRICTION_MASS = float32(10.0)
+SELF_COLLISION_CLOTH_MASS = float32(50.0)
+
+
+@cuda.jit(device=True)
+def calc_self_collision_inverse_mass(friction, fixed_mask, cloth_mass):
+    # mirrors math.calc_self_collision_inverse_mass
+    if fixed_mask:
+        mass = SELF_COLLISION_FIXED_MASS
+    else:
+        mass = float32(1.0) + friction * SELF_COLLISION_FRICTION_MASS
+    mass = mass + cloth_mass * SELF_COLLISION_CLOTH_MASS
+    return float32(1.0) / mass
+
+
+@cuda.jit(device=True)
+def closest_pt_point_triangle(px, py, pz, ax, ay, az, bx, by, bz, cx, cy, cz):
+    # mirrors math.closest_pt_point_triangle: returns (cpx, cpy, cpz, u, v, w). The oracle's
+    # priority-ordered np.where chain becomes an if/elif ladder (in_a > in_b > in_ab > in_c >
+    # in_ac > in_bc > in_face); every denom guard is where(|d|>0, d, 1) verbatim.
+    abx = bx - ax
+    aby = by - ay
+    abz = bz - az
+    acx = cx - ax
+    acy = cy - ay
+    acz = cz - az
+    apx = px - ax
+    apy = py - ay
+    apz = pz - az
+    d1 = abx * apx + aby * apy + abz * apz
+    d2 = acx * apx + acy * apy + acz * apz
+    bpx = px - bx
+    bpy = py - by
+    bpz = pz - bz
+    d3 = abx * bpx + aby * bpy + abz * bpz
+    d4 = acx * bpx + acy * bpy + acz * bpz
+    cpx = px - cx
+    cpy = py - cy
+    cpz = pz - cz
+    d5 = abx * cpx + aby * cpy + abz * cpz
+    d6 = acx * cpx + acy * cpy + acz * cpz
+    vc = d1 * d4 - d3 * d2
+    vb = d5 * d2 - d1 * d6
+    va = d3 * d6 - d5 * d4
+    zero = float32(0.0)
+    one = float32(1.0)
+    if d1 <= zero and d2 <= zero:
+        u = one
+        v = zero
+        w = zero
+    elif d3 >= zero and d4 <= d3:
+        u = zero
+        v = one
+        w = zero
+    elif vc <= zero and d1 >= zero and d3 <= zero:
+        den = d1 - d3
+        if not (libdevice.fabsf(den) > zero):
+            den = one
+        vab = d1 / den
+        u = one - vab
+        v = vab
+        w = zero
+    elif d6 >= zero and d5 <= d6:
+        u = zero
+        v = zero
+        w = one
+    elif vb <= zero and d2 >= zero and d6 <= zero:
+        den = d2 - d6
+        if not (libdevice.fabsf(den) > zero):
+            den = one
+        wac = d2 / den
+        u = one - wac
+        v = zero
+        w = wac
+    elif va <= zero and (d4 - d3) >= zero and (d5 - d6) >= zero:
+        g = (d4 - d3) + (d5 - d6)
+        if not (libdevice.fabsf(g) > zero):
+            g = one
+        wbc = (d4 - d3) / g
+        u = zero
+        v = one - wbc
+        w = wbc
+    else:
+        h = va + vb + vc
+        if not (libdevice.fabsf(h) > zero):
+            h = one
+        vf = vb / h
+        wf = vc / h
+        u = one - vf - wf
+        v = vf
+        w = wf
+    ptx = ax * u + bx * v + cx * w
+    pty = ay * u + by * v + cy * w
+    ptz = az * u + bz * v + cz * w
+    return (ptx, pty, ptz, u, v, w)
