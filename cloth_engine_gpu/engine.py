@@ -98,6 +98,11 @@ _INPUT_TEAM_FIELDS = ("enabled", "component_world_position", "component_world_ro
 _CONSUMABLE_TEAM_FIELDS = ("reset_pending", "time_reset_pending", "keep_teleport_pending",
                            "force_mode", "impact_force")
 _INPUT_UPLOAD_FIELDS = _INPUT_TEAM_FIELDS + _CONSUMABLE_TEAM_FIELDS
+# Self-collision use flags are DERIVED per frame by _self_frame_prepare (mirrors self_collision.
+# frame_begin) and fingerprint-cached on device, so they are not re-pushed every frame. They are the
+# engine's own state, not a world input -- upload_all must NOT overwrite them from world.team (which
+# the engine does not maintain), or a cached frame would run with the world's stale flags.
+_SELF_OWNED_TEAM_FIELDS = ("use_point", "use_edge", "use_triangle")
 # LOW-FREQUENCY CONFIG -- written ONLY by world.update_params (host config edit). This list
 # MUST equal blender_host.runtime._build_params keys (its only call site). None of these is a
 # kernel accumulator: the eight fields T0 resolve_sync copies to sync children are re-derived
@@ -170,6 +175,12 @@ class GpuEngine:
         # Largest per-frame self-collision candidate-pair count (max(total_ct, total_it)); 0 when
         # self-collision is inactive. Set by _self_frame_prepare, read by _blocks to size the grid.
         self._self_max_pairs = 0
+        # Fingerprint whose ct/it task tables + use flags are currently resident on device, and the
+        # cached (total_ct, total_it) for it. A steady self scene keeps this fingerprint every frame, so
+        # the ~20 small pageable task-table H2D copies fire once and are skipped thereafter (only
+        # scl_counts, whose FRAME_INDEX rotates, is re-pushed).
+        self._self_upload_shadow = None
+        self._self_upload_totals = (0, 0)
         # The kernel's real cooperative-residency block ceiling (register-limited, < _MAX_COOP_BLOCKS),
         # queried lazily once the megakernel is compiled and cached for the engine's lifetime.
         self._coop_max_blocks = None
@@ -413,6 +424,10 @@ class GpuEngine:
         self._self_task_cache = None
         # No self-collision prepared for this fresh layout yet -> base grid until the first self frame.
         self._self_max_pairs = 0
+        # A fresh load zeroes every self_state / self-team blob, so the resident task tables no longer
+        # match any prior fingerprint -> force the next self frame to re-upload them once.
+        self._self_upload_shadow = None
+        self._self_upload_totals = (0, 0)
 
     # ---- wind-zone per-frame upload -----------------------------------------
     def _zone_host(self, zones):
@@ -518,8 +533,10 @@ class GpuEngine:
 
     # ---- full-state sync (dev-harness isolated phase testing) ---------------
     def upload_all(self, world):
-        self.team.upload_many(device.dump_struct(world.team, self.program.num_teams),
-                              self.team.device.keys())
+        # Exclude the self-collision use flags: _self_frame_prepare owns them (fingerprint-cached), so
+        # re-pushing world.team's copy here would clobber a cached frame with stale flags.
+        team_keys = [k for k in self.team.device.keys() if k not in _SELF_OWNED_TEAM_FIELDS]
+        self.team.upload_many(device.dump_struct(world.team, self.program.num_teams), team_keys)
         self.particles.upload_many(device.dump_arena(world.particles, self.program.num_particles),
                                    self.particles.device.keys())
         self.colliders.upload_many(device.dump_arena(world.colliders, self.program.num_colliders),
@@ -868,14 +885,27 @@ class GpuEngine:
             self._self_max_pairs = 0
             return
         self._self_empty_uploaded = (not contact) and (not intersect)
-        total_ct = self._fill_task_table(contact, self.program.self_max_contact_tasks,
-                                         ("ct_kind", "ct_my_team", "ct_my_start", "ct_my_count",
-                                          "ct_tgt_team", "ct_tgt_start", "ct_tgt_count", "ct_same"),
-                                         "ct_pair_off", stream)
-        total_it = self._fill_task_table(intersect, self.program.self_max_intersect_tasks,
-                                         ("it_edge_team", "it_edge_start", "it_edge_count",
-                                          "it_tri_team", "it_tri_start", "it_tri_count", "it_same"),
-                                         "it_pair_off", stream)
+        # The ct/it task tables (columns + pair_off) and the use flags are a pure function of the task
+        # fingerprint; they live in self_state / non-input team columns that no per-frame upload touches
+        # (_INPUT_UPLOAD_FIELDS excludes use_point/edge/triangle), so once resident they stay valid. In
+        # steady-state playback the fingerprint is unchanged every frame -> skip these ~20 small pageable
+        # H2D copies (the dominant self-ON host cost, ~2 ms/frame) and reuse the cached pair totals. Only
+        # scl_counts is re-pushed below (its FRAME_INDEX rotates for the DIV=2 intersect split).
+        if fingerprint != self._self_upload_shadow:
+            total_ct = self._fill_task_table(contact, self.program.self_max_contact_tasks,
+                                             ("ct_kind", "ct_my_team", "ct_my_start", "ct_my_count",
+                                              "ct_tgt_team", "ct_tgt_start", "ct_tgt_count", "ct_same"),
+                                             "ct_pair_off", stream)
+            total_it = self._fill_task_table(intersect, self.program.self_max_intersect_tasks,
+                                             ("it_edge_team", "it_edge_start", "it_edge_count",
+                                              "it_tri_team", "it_tri_start", "it_tri_count", "it_same"),
+                                             "it_pair_off", stream)
+            self.team.device["use_point"].copy_to_device(use_point, stream=stream)
+            self.team.device["use_edge"].copy_to_device(use_edge, stream=stream)
+            self.team.device["use_triangle"].copy_to_device(use_triangle, stream=stream)
+            self._self_upload_totals = (total_ct, total_it)
+            self._self_upload_shadow = fingerprint
+        total_ct, total_it = self._self_upload_totals
         # Grid sizing hint for the n^2 broad phases: the larger of the two candidate-pair spaces.
         self._self_max_pairs = int(max(total_ct, total_it))
         counts = np.zeros(8, np.int32)
@@ -883,9 +913,6 @@ class GpuEngine:
         counts[kernels.SCL_USE_INTERSECT] = 1 if intersect else 0
         counts[kernels.SCL_FRAME_INDEX] = int(frame_index) % int(_defs.SELF_COLLISION_INTERSECT_DIV)
         self.self_state["scl_counts"].copy_to_device(counts, stream=stream)
-        self.team.device["use_point"].copy_to_device(use_point, stream=stream)
-        self.team.device["use_edge"].copy_to_device(use_edge, stream=stream)
-        self.team.device["use_triangle"].copy_to_device(use_triangle, stream=stream)
 
     def _fill_task_table(self, tasks, capacity, column_keys, pair_off_key, stream):
         """Pack a task list into fixed-capacity device columns + a prefix-sum pair-offset array
