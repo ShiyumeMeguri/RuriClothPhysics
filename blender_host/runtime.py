@@ -13,7 +13,18 @@ from . import frame_cache
 from ..cloth_kernel import compile as kernel_compile
 from ..cloth_kernel import defs
 from ..cloth_kernel import io as kernel_io
-from ..cloth_kernel import pipeline
+# G4 production wiring: drive the GPU backend (cloth_engine_gpu) through the same
+# run_frame(world, frame_globals) boundary the oracle used. The GPU engine package was
+# authored against the bare-python harness contract, where the repo root is on sys.path and
+# `cloth_kernel` is importable top-level (`from cloth_kernel import io`). Under Blender the
+# add-on loads as the `RuriClothPhysics` package, so `cloth_kernel` is NOT top-level and those
+# absolute imports raise ModuleNotFoundError. Alias the already-loaded oracle package to the
+# top-level name the engine expects (single module identity -- io/defs stay the same objects
+# runtime uses; no fallback, no duplicate state). Engine and oracle code are untouched.
+import sys as _sys
+from .. import cloth_kernel as _cloth_kernel_pkg
+_sys.modules.setdefault("cloth_kernel", _cloth_kernel_pkg)
+from ..cloth_engine_gpu import pipeline
 from ..cloth_kernel import world as kernel_world
 
 _world = kernel_world.World()
