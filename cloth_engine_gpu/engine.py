@@ -57,9 +57,80 @@ _STRUCT_TEAM_COLUMNS = ("valid", "p_start", "p_count", "t_start", "t_count",
                         "c_start", "c_count", "sp_start", "sp_count",
                         "se_start", "se_count", "st_start", "st_count")
 
+# ---- slim per-frame IO field partition (G2e-5) ------------------------------------------
+# Host write-surface proof (cloth_kernel.io + cloth_kernel.world + blender_host.runtime):
+# the resident engine keeps ALL simulation state on the device and re-uploads, each frame,
+# ONLY the fields the host actually mutates. The partition below is the sole authority for
+# what moves per frame.
+#
+# PER-FRAME INPUT -- io.set_team_frame_input writes these every frame; runtime.run_frame
+# additionally writes sync_target directly after the team loop. Uploaded every frame.
+_INPUT_TEAM_FIELDS = ("enabled", "component_world_position", "component_world_rotation",
+                      "component_world_scale", "culling_invisible", "distance_weight",
+                      "sync_target", "has_anchor", "anchor_position", "anchor_rotation")
+# CONSUMABLE (edge-triggered) INPUT -- host sets via world.request_reset / world.add_force,
+# the kernel clears them (team_time.frame_post clears the reset flags for every processed
+# team; force_mode / impact_force are cleared where running). Folded into the per-frame
+# upload AND read back each frame so the CPU mirrors the resident GPU for exactly these
+# host+kernel-shared fields. That makes the upload idempotent and clobber-free for teams the
+# host did not touch, and a repeated request_reset on an already-set-but-consumed team is
+# always re-detected -- with the KERNEL as the single source of truth for the post-frame
+# value (no fragile CPU duplication of its clear conditions, which depend on GPU-only
+# ``running`` state). This 5-field feedback is the low-cost field-level mechanism the brief
+# mandates for reset/force ("漏传即错"); it is NOT the 167-field table round-trip.
+_CONSUMABLE_TEAM_FIELDS = ("reset_pending", "time_reset_pending", "keep_teleport_pending",
+                           "force_mode", "impact_force")
+_INPUT_UPLOAD_FIELDS = _INPUT_TEAM_FIELDS + _CONSUMABLE_TEAM_FIELDS
+# LOW-FREQUENCY CONFIG -- written ONLY by world.update_params (host config edit). This list
+# MUST equal blender_host.runtime._build_params keys (its only call site). None of these is a
+# kernel accumulator: the eight fields T0 resolve_sync copies to sync children are re-derived
+# from the (correctly resident) parent every frame, so a byte fingerprint + upload-on-change
+# is exact and never clobbers resident state.
+_CONFIG_TEAM_FIELDS = (
+    "gravity", "gravity_direction", "gravity_falloff", "stablization_time",
+    "blend_weight_param", "damping_lut", "radius_lut", "normal_axis_vector",
+    "rotational_interpolation", "root_rotation", "animation_pose_ratio", "time_scale",
+    "tether_compression", "distance_lut", "bending_stiffness", "angle_use_restoration",
+    "angle_restoration_lut", "angle_restoration_attenuation", "angle_restoration_gravity_falloff",
+    "angle_use_limit", "angle_limit_lut", "angle_limit_stiffness", "motion_use_max_distance",
+    "motion_max_distance_lut", "motion_use_backstop", "motion_backstop_radius",
+    "motion_backstop_lut", "motion_stiffness", "collision_mode", "dynamic_friction",
+    "static_friction", "limit_distance_lut", "self_mode", "sync_mode", "self_thickness_lut",
+    "self_cloth_mass", "anchor_inertia", "world_inertia", "movement_inertia_smoothing",
+    "movement_speed_limit", "rotation_speed_limit", "local_inertia", "local_movement_speed_limit",
+    "local_rotation_speed_limit", "depth_inertia", "centrifugal_acceleration",
+    "particle_speed_limit", "teleport_mode", "teleport_distance", "teleport_rotation",
+    "wind_influence", "wind_frequency", "wind_turbulence", "wind_blend", "wind_synchronization",
+    "wind_depth_weight", "wind_moving", "spring_power", "spring_limit_distance",
+    "spring_normal_limit_ratio", "spring_noise")
+# collider host inputs (io.set_team_collider_input) + the production output particles that
+# io.team_output returns (runtime.run_frame reads only positions + out_rotations).
+_COLLIDER_INPUT_FIELDS = ("input_positions", "input_rotations", "input_scales", "enabled")
+_SLIM_OUTPUT_PARTICLE_FIELDS = ("positions", "out_rotations")
+
+# The three team input partitions must be disjoint (no field both static-config and
+# per-frame); a typo'd field name raises KeyError when StructStaging indexes the dtype.
+assert not (set(_INPUT_UPLOAD_FIELDS) & set(_CONFIG_TEAM_FIELDS))
+assert len(set(_INPUT_UPLOAD_FIELDS)) == len(_INPUT_UPLOAD_FIELDS)
+
+
+def _arena_subset_dtype(spec, fields):
+    """Build a struct dtype for a subset of a ChunkArena's fields (spec = arena.spec:
+    {name: (dtype, shape)}), so the narrow collider/particle bridges can stage them."""
+    items = []
+    for name in fields:
+        dtype, shape = spec[name]
+        items.append((name, dtype, shape) if shape else (name, dtype))
+    return np.dtype(items)
+
 
 class GpuEngine:
-    def __init__(self, world):
+    def __init__(self, world, io_mode="slim"):
+        # io_mode "slim": per-frame upload = host-mutated inputs only, readback = production
+        #   output particles + the 5-field consumable feedback (production / default).
+        # io_mode "full": whole-team blob round-trip every frame (G2e-4 behaviour) -- the
+        #   optional full-state path for the four-mode gate / bit-level equivalence checks.
+        self.io_mode = io_mode
         self.world = None
         self.signature = None
         self.program = None
@@ -67,6 +138,13 @@ class GpuEngine:
         self.particles = None
         self.colliders = None
         self.transforms = None
+        self.input_staging = None
+        self.feedback_staging = None
+        self.config_staging = None
+        self.collider_input_staging = None
+        self.particle_out_staging = None
+        self._config_shadow = None
+        self._zone_shadow = None
         self.load(world)
 
     # ---- lifecycle ----------------------------------------------------------
@@ -118,6 +196,23 @@ class GpuEngine:
                                          self.program.num_colliders)
         self.transforms = device.FieldSet(device.dump_arena(world.transforms, self.program.num_transforms),
                                           self.program.num_transforms)
+        # Narrow per-frame bridges (slim IO): far fewer marshalled args than the full team
+        # blob. Built from world dtypes (single source of truth); a bad field name raises here.
+        self.input_staging = staging.StructStaging(world.team.dtype, self.program.num_teams,
+                                                   fields=_INPUT_UPLOAD_FIELDS)
+        self.feedback_staging = staging.StructStaging(world.team.dtype, self.program.num_teams,
+                                                      fields=_CONSUMABLE_TEAM_FIELDS)
+        self.config_staging = staging.StructStaging(world.team.dtype, self.program.num_teams,
+                                                    fields=_CONFIG_TEAM_FIELDS)
+        particle_dtype = _arena_subset_dtype(world.particles.spec, _SLIM_OUTPUT_PARTICLE_FIELDS)
+        self.particle_out_staging = staging.StructStaging(particle_dtype, self.program.num_particles,
+                                                          fields=_SLIM_OUTPUT_PARTICLE_FIELDS)
+        if self.program.num_colliders > 0:
+            collider_dtype = _arena_subset_dtype(world.colliders.spec, _COLLIDER_INPUT_FIELDS)
+            self.collider_input_staging = staging.StructStaging(
+                collider_dtype, self.program.num_colliders, fields=_COLLIDER_INPUT_FIELDS)
+        else:
+            self.collider_input_staging = None
         self.static = {}
         for kernel_name, attr, field in kernels.STATIC_KERNEL_FIELDS:
             self.static[kernel_name] = device.upload_readonly(getattr(self.program, attr)[field])
@@ -149,9 +244,17 @@ class GpuEngine:
         # zone_count=0 launches (all 17 legacy phase tests) carry safe dummy args.
         self.n_zones = 0
         self.zones_dev = self._make_zone_arrays([])
+        # Reset the zone fingerprint so the next upload_zones re-establishes zones_dev (which
+        # this reload just reset to empty) rather than skipping on a stale match.
+        self._zone_shadow = None
+        # A (re)load just uploaded the current config to the device; take its fingerprint so
+        # slim frames only re-upload config on a genuine host update_params edit.
+        self.config_staging._repack_in(world.team)
+        self._config_shadow = self.config_staging._host.tobytes()
 
     # ---- wind-zone per-frame upload -----------------------------------------
-    def _make_zone_arrays(self, zones):
+    def _zone_host(self, zones):
+        """Pack list[WindZoneInput] into the 11 host SoA arrays (CPU only)."""
         n = max(len(zones), 1)
         host = {
             "zone_id": np.zeros(n, np.int32),
@@ -181,11 +284,25 @@ class GpuEngine:
                 else float(zone.zone_volume)
             if zone.attenuation_lut is not None:
                 host["attenuation_lut"][k] = zone.attenuation_lut
+        return host
+
+    def _make_zone_arrays(self, zones):
+        host = self._zone_host(zones)
         return {name: device.upload_readonly(host[name]) for name in _ZONE_ARG_ORDER}
 
     def upload_zones(self, zones):
+        # Zones are a low-frequency input (a static scene never re-uploads; animated wind
+        # re-uploads only when a value changes). Re-allocating 11 device arrays every frame
+        # via cuda.to_device is the single biggest per-frame transfer cost (~1.9 ms measured);
+        # a byte fingerprint skips it whenever the packed zone data is unchanged. The resident
+        # zones_dev arrays are read-only inputs the kernel never mutates, so they stay valid.
+        host = self._zone_host(zones)
+        fingerprint = b"".join(host[name].tobytes() for name in _ZONE_ARG_ORDER)
+        if len(zones) == self.n_zones and fingerprint == self._zone_shadow:
+            return
         self.n_zones = len(zones)
-        self.zones_dev = self._make_zone_arrays(zones)
+        self._zone_shadow = fingerprint
+        self.zones_dev = {name: device.upload_readonly(host[name]) for name in _ZONE_ARG_ORDER}
 
     def _blocks(self):
         needed = max(self.program.num_particles, self.program.num_teams, 1)
@@ -252,14 +369,30 @@ class GpuEngine:
             *csr_args, *direct_args, *scratch_args, int32(self.n_zones), *zone_args)
 
     # ---- production API -----------------------------------------------------
+    @staticmethod
+    def _sub_end(frame_globals):
+        """Substep iterations to run. update_count is capped at max_simulation_count
+        (team_time.advance: min(computed, max_simulation_count)), so every substep iteration
+        _k >= max_simulation_count is a fully gated no-op -- running MAX_SIM_COUNT of them
+        wastes that many barrier passes. Capping at min(MAX_SIM_COUNT, max_simulation_count)
+        is bit-identical (the dropped iterations do zero work) and never exceeds the previous
+        bound. Zero-semantic-risk launch tune; verified bit-for-bit in dev_harness."""
+        return min(kernels.MAX_SIM_COUNT, int(frame_globals.max_simulation_count))
+
     def step_frame(self, world, frame_globals):
         """One host frame: upload this frame's host-mutated inputs, run the whole
         pipeline in a single cooperative launch, read the outputs back into the world."""
         self.load(world)
-        self._upload_inputs(world)
+        if self.io_mode == "slim":
+            self._upload_inputs_slim(world)
+        else:
+            self._upload_inputs(world)
         self.upload_zones(frame_globals.zones)
-        self.launch(kernels.ALL_PHASES, 0, kernels.MAX_SIM_COUNT, frame_globals)
-        self._download_outputs(world)
+        self.launch(kernels.ALL_PHASES, 0, self._sub_end(frame_globals), frame_globals)
+        if self.io_mode == "slim":
+            self._download_outputs_slim(world)
+        else:
+            self._download_outputs(world)
 
     def step_frame_captured(self, world, frame_globals, capture=None):
         """Same frame as step_frame, but driven as segments so the gate can read any
@@ -326,3 +459,45 @@ class GpuEngine:
         blocks, threads = self._team_bridge_grid()
         self.team_staging.download(world.team, self.team, blocks, threads)
         self.download_particles(world, list(self._OUTPUT_PARTICLE_FIELDS))
+
+    # ---- slim per-frame IO (production default) -----------------------------
+    # Resident simulation state stays on the device untouched. Each frame only the fields the
+    # host actually mutates go up (per-frame inputs + consumable flags always; low-frequency
+    # config on a fingerprint change), and only the production output particles + the 5-field
+    # consumable feedback come back. This drops the two 145-arg whole-team bridge kernels --
+    # the measured IO floor (their cost is per marshalled argument, independent of team count)
+    # -- to narrow bridges of ~15 / 5 / 2 args.
+    def _collider_bridge_grid(self):
+        blocks = (max(self.program.num_colliders, 1) + _THREADS - 1) // _THREADS
+        return blocks, _THREADS
+
+    def _particle_bridge_grid(self):
+        blocks = (max(self.program.num_particles, 1) + _THREADS - 1) // _THREADS
+        return blocks, _THREADS
+
+    def _upload_inputs_slim(self, world):
+        tblocks, tthreads = self._team_bridge_grid()
+        self.input_staging.upload(world.team, self.team, tblocks, tthreads)
+        self.transforms.upload("world", world.transforms.arrays["world"][:self.program.num_transforms])
+        if self.collider_input_staging is not None:
+            cblocks, cthreads = self._collider_bridge_grid()
+            self.collider_input_staging.upload(world.colliders.arrays, self.colliders, cblocks, cthreads)
+        self._maybe_upload_config(world, tblocks, tthreads)
+
+    def _maybe_upload_config(self, world, blocks, threads):
+        # Byte fingerprint of the config columns; upload only on a genuine host update_params
+        # edit. Steady-state playback never touches config, so this is repack + memcmp only.
+        self.config_staging._repack_in(world.team)
+        fingerprint = self.config_staging._host.tobytes()
+        if fingerprint == self._config_shadow:
+            return
+        self._config_shadow = fingerprint
+        self.config_staging.stage.copy_to_device(self.config_staging._host)
+        soa = [self.team.device[name] for name in self.config_staging.field_order]
+        self.config_staging._explode[blocks, threads](self.config_staging.stage, *soa)
+
+    def _download_outputs_slim(self, world):
+        pblocks, pthreads = self._particle_bridge_grid()
+        self.particle_out_staging.download(world.particles.arrays, self.particles, pblocks, pthreads)
+        tblocks, tthreads = self._team_bridge_grid()
+        self.feedback_staging.download(world.team, self.team, tblocks, tthreads)
