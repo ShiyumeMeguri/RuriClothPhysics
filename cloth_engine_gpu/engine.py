@@ -178,6 +178,22 @@ class GpuEngine:
             parts.append(edge_pairs[name].tobytes())
         return b"".join(parts)
 
+    # scratch device buffers (runtime-only accumulators): (key, shape-factory, dtype). Folded into the
+    # resident blobs like every other field; segments are cleared by their owning phase before use.
+    _SCRATCH_SPECS = (
+        ("dcorr", ("p", 3), np.float32),
+        ("dcorr_fixed", ("p", 3), np.int32),
+        ("dcount", ("p",), np.int32),
+        ("col_friction_fixed", ("p",), np.int32),
+        ("col_normal_fixed", ("p", 3), np.int32),
+        # T0 resolve_sync gather snapshot: 22 scalars/team (7 time + 8 param + 3 cwp + 4 cwr) so the
+        # child write reads a pre-gather copy of its sync_top row (mutual-sync race safe).
+        ("sync_snapshot", ("t", 22), np.float32),
+        # F2 display._post_triangles per-triangle stash (authorised f64), indexed by global triangle row.
+        ("tri_normal_f64", ("tri", 3), np.float64),
+        ("tri_tangent_f64", ("tri", 3), np.float64),
+    )
+
     def load(self, world):
         signature = self._structure_signature(world)
         if self.world is world and self.signature == signature:
@@ -185,66 +201,92 @@ class GpuEngine:
         self.world = world
         self.signature = signature
         self.program = build_program(world)
-        self.team = device.FieldSet(device.dump_struct(world.team, self.program.num_teams),
-                                    self.program.num_teams)
-        # Whole-team round-trip goes as one blob transfer + a struct<->SoA bridge kernel,
-        # not 167 per-field transfers (measured 20 ms -> ~1 ms; see staging.py).
-        self.team_staging = staging.StructStaging(world.team.dtype, self.program.num_teams)
-        self.particles = device.FieldSet(device.dump_arena(world.particles, self.program.num_particles),
-                                         self.program.num_particles)
-        self.colliders = device.FieldSet(device.dump_arena(world.colliders, self.program.num_colliders),
-                                         self.program.num_colliders)
-        self.transforms = device.FieldSet(device.dump_arena(world.transforms, self.program.num_transforms),
-                                          self.program.num_transforms)
-        # Narrow per-frame bridges (slim IO): far fewer marshalled args than the full team
-        # blob. Built from world dtypes (single source of truth); a bad field name raises here.
-        self.input_staging = staging.StructStaging(world.team.dtype, self.program.num_teams,
-                                                   fields=_INPUT_UPLOAD_FIELDS)
-        self.feedback_staging = staging.StructStaging(world.team.dtype, self.program.num_teams,
-                                                      fields=_CONSUMABLE_TEAM_FIELDS)
-        self.config_staging = staging.StructStaging(world.team.dtype, self.program.num_teams,
-                                                    fields=_CONFIG_TEAM_FIELDS)
-        particle_dtype = _arena_subset_dtype(world.particles.spec, _SLIM_OUTPUT_PARTICLE_FIELDS)
-        self.particle_out_staging = staging.StructStaging(particle_dtype, self.program.num_particles,
-                                                          fields=_SLIM_OUTPUT_PARTICLE_FIELDS)
-        if self.program.num_colliders > 0:
-            collider_dtype = _arena_subset_dtype(world.colliders.spec, _COLLIDER_INPUT_FIELDS)
-            self.collider_input_staging = staging.StructStaging(
-                collider_dtype, self.program.num_colliders, fields=_COLLIDER_INPUT_FIELDS)
-        else:
-            self.collider_input_staging = None
+        num_teams = self.program.num_teams
+        num_particles = self.program.num_particles
+        num_colliders = self.program.num_colliders
+        num_transforms = self.program.num_transforms
+
+        team_host = device.dump_struct(world.team, num_teams)
+        particle_host = device.dump_arena(world.particles, num_particles)
+        collider_host = device.dump_arena(world.colliders, num_colliders)
+        transform_host = device.dump_arena(world.transforms, num_transforms)
+        # FieldSets record host dtypes only (for bool-restoring readback); their device arrays are
+        # blob views injected below, so per-field upload / readback and the staging bridges keep
+        # working while the megakernel takes one blob per dtype family instead of ~290 field arrays.
+        self.team = device.FieldSet(team_host, num_teams, allocate=False)
+        self.particles = device.FieldSet(particle_host, num_particles, allocate=False)
+        self.colliders = device.FieldSet(collider_host, num_colliders, allocate=False)
+        self.transforms = device.FieldSet(transform_host, num_transforms, allocate=False)
         self.static = {}
+
+        # Ordered resident host arrays == RESIDENT_BLOB_LAYOUT order (== the old signature order): the
+        # single ordered source the blobs / offs / lens / kernel view-reconstruction all agree on.
+        ordered = []
+        targets = []
+        for name in kernels.TEAM_KERNEL_FIELDS:
+            ordered.append(team_host[name]); targets.append((self.team, name))
+        for name in kernels.PARTICLE_KERNEL_FIELDS:
+            ordered.append(particle_host[name]); targets.append((self.particles, name))
+        for name in kernels.TRANSFORM_KERNEL_FIELDS:
+            ordered.append(transform_host[name]); targets.append((self.transforms, name))
+        for name in kernels.COLLIDER_KERNEL_FIELDS:
+            ordered.append(collider_host[name]); targets.append((self.colliders, name))
         for kernel_name, attr, field in kernels.STATIC_KERNEL_FIELDS:
-            self.static[kernel_name] = device.upload_readonly(getattr(self.program, attr)[field])
+            ordered.append(getattr(self.program, attr)[field]); targets.append((self.static, kernel_name))
         for off_name, ord_name, attr in kernels.STATIC_CSR_FIELDS:
             csr = getattr(self.program, attr)
-            self.static[off_name] = device.upload_readonly(csr.offsets)
-            self.static[ord_name] = device.upload_readonly(csr.order)
+            ordered.append(csr.offsets); targets.append((self.static, off_name))
+            ordered.append(csr.order); targets.append((self.static, ord_name))
         for name in kernels.STATIC_DIRECT_FIELDS:
-            self.static[name] = device.upload_readonly(getattr(self.program, name))
-        np_particles = max(self.program.num_particles, 1)
-        nt = max(self.program.num_teams, 1)
-        n_tri = max(self.program.num_triangle_entries, 1)
-        self.scratch = {
-            "dcorr": cuda.device_array((np_particles, 3), np.float32),
-            "dcorr_fixed": cuda.device_array((np_particles, 3), np.int32),
-            "dcount": cuda.device_array((np_particles,), np.int32),
-            "col_friction_fixed": cuda.device_array((np_particles,), np.int32),
-            "col_normal_fixed": cuda.device_array((np_particles, 3), np.int32),
-            # T0 resolve_sync gather snapshot: 22 scalars/team (7 time + 8 param +
-            # 3 component_world_position + 4 component_world_rotation) so the child
-            # write reads a pre-gather copy of its sync_top row (mutual-sync race safe).
-            "sync_snapshot": cuda.device_array((nt, 22), np.float32),
-            # F2 display._post_triangles per-triangle stash (authorised f64, mirrors the oracle's
-            # f64 normal cast + full-f64 tangent), device-resident, indexed by global triangle row.
-            "tri_normal_f64": cuda.device_array((n_tri, 3), np.float64),
-            "tri_tangent_f64": cuda.device_array((n_tri, 3), np.float64),
-        }
-        # Wind zones are variable-length and re-uploaded each frame; start empty so
-        # zone_count=0 launches (all 17 legacy phase tests) carry safe dummy args.
+            ordered.append(getattr(self.program, name)); targets.append((self.static, name))
+        self.scratch = {}
+        dims = {"p": max(num_particles, 1), "t": max(num_teams, 1),
+                "tri": max(self.program.num_triangle_entries, 1)}
+        for key, shape, dtype in self._SCRATCH_SPECS:
+            resolved = tuple(dims[s] if isinstance(s, str) else s for s in shape)
+            ordered.append(np.zeros(resolved, dtype)); targets.append((self.scratch, key))
+
+        self._assert_layout(ordered)
+        self.blobs, self.offs, self.lens, views = device.build_blobs(ordered, kernels.RESIDENT_BLOB_GROUPS)
+        for (container, key), view in zip(targets, views):
+            if isinstance(container, device.FieldSet):
+                container.set_view(key, view)
+            else:
+                container[key] = view
+        # Struct/arena fields the kernel does NOT consume (present in the host dtype but absent from the
+        # *_KERNEL_FIELDS surface -- e.g. team self_mode / self_thickness_lut / step_active) still need
+        # resident device arrays for the whole-table round-trip (io_mode="full" / config_staging /
+        # upload_all / download_*). They are never kernel arguments, so keep them as standalone
+        # allocations rather than blob slots (adding them to the blobs would just bloat offs/lens).
+        for fieldset, host in ((self.team, team_host), (self.particles, particle_host),
+                               (self.colliders, collider_host), (self.transforms, transform_host)):
+            for name in fieldset.host_dtypes:
+                if name not in fieldset.device:
+                    fieldset.set_view(name, cuda.to_device(device._device_friendly(host[name])))
+
+        # Whole-team round-trip goes as one blob transfer + a struct<->SoA bridge kernel (not 167
+        # per-field transfers); the narrow per-frame bridges carry far fewer marshalled args. All
+        # bridges write/read the blob views the FieldSets now hold. Built from world dtypes (single
+        # source of truth); a bad field name raises here.
+        self.team_staging = staging.StructStaging(world.team.dtype, num_teams)
+        self.input_staging = staging.StructStaging(world.team.dtype, num_teams, fields=_INPUT_UPLOAD_FIELDS)
+        self.feedback_staging = staging.StructStaging(world.team.dtype, num_teams, fields=_CONSUMABLE_TEAM_FIELDS)
+        self.config_staging = staging.StructStaging(world.team.dtype, num_teams, fields=_CONFIG_TEAM_FIELDS)
+        particle_dtype = _arena_subset_dtype(world.particles.spec, _SLIM_OUTPUT_PARTICLE_FIELDS)
+        self.particle_out_staging = staging.StructStaging(particle_dtype, num_particles,
+                                                          fields=_SLIM_OUTPUT_PARTICLE_FIELDS)
+        if num_colliders > 0:
+            collider_dtype = _arena_subset_dtype(world.colliders.spec, _COLLIDER_INPUT_FIELDS)
+            self.collider_input_staging = staging.StructStaging(
+                collider_dtype, num_colliders, fields=_COLLIDER_INPUT_FIELDS)
+        else:
+            self.collider_input_staging = None
+
+        # Wind zones are variable-length and re-uploaded each frame as their own per-dtype blob set
+        # (same aggregation, separate lifecycle); start empty so zone_count=0 launches carry safe args.
         self.n_zones = 0
-        self.zones_dev = self._make_zone_arrays([])
-        # Reset the zone fingerprint so the next upload_zones re-establishes zones_dev (which
+        self.zone_blobs, self.zone_offs, self.zone_lens = self._zone_blobs([])
+        # Reset the zone fingerprint so the next upload_zones re-establishes the zone blobs (which
         # this reload just reset to empty) rather than skipping on a stale match.
         self._zone_shadow = None
         # A (re)load just uploaded the current config to the device; take its fingerprint so
@@ -293,23 +335,45 @@ class GpuEngine:
                 host["attenuation_lut"][k] = zone.attenuation_lut
         return host
 
-    def _make_zone_arrays(self, zones):
+    def _zone_blobs(self, zones):
+        """Aggregate the 11 zone SoA arrays into per-(family,shape) zone blobs + offs/lens (same
+        mechanism as the resident blobs, its own variable-length lifecycle). Returns (blobs, offs, lens)."""
         host = self._zone_host(zones)
-        return {name: device.upload_readonly(host[name]) for name in _ZONE_ARG_ORDER}
+        ordered = [host[name] for name in _ZONE_ARG_ORDER]
+        blobs, offs, lens, _views = device.build_blobs(ordered, kernels.ZONE_BLOB_GROUPS)
+        return blobs, offs, lens
+
+    @staticmethod
+    def _assert_layout(ordered):
+        """Drift guard: the positionally-built resident arrays must match the RESIDENT_BLOB_LAYOUT
+        registry (blob group + per-row) that the kernel view-reconstruction preamble is generated
+        from. A mismatch means a world dtype/shape changed without updating the layout + preamble."""
+        layout = kernels.RESIDENT_BLOB_LAYOUT
+        assert len(ordered) == len(layout), "resident slot count %d != layout %d" % (len(ordered), len(layout))
+        for slot, array in enumerate(ordered):
+            param, group, per_row = layout[slot]
+            array = np.ascontiguousarray(array)
+            dtype = np.uint8 if array.dtype == np.bool_ else array.dtype
+            got = device.group_name(device._DTYPE_FAMILY[np.dtype(dtype)], array.shape[1:])
+            assert got == group, "slot %d (%s): group %s != %s" % (slot, param, got, group)
+            assert tuple(int(x) for x in array.shape[1:]) == tuple(per_row), \
+                "slot %d (%s): per_row %s != %s" % (slot, param, tuple(array.shape[1:]), tuple(per_row))
 
     def upload_zones(self, zones):
-        # Zones are a low-frequency input (a static scene never re-uploads; animated wind
-        # re-uploads only when a value changes). Re-allocating 11 device arrays every frame
-        # via cuda.to_device is the single biggest per-frame transfer cost (~1.9 ms measured);
-        # a byte fingerprint skips it whenever the packed zone data is unchanged. The resident
-        # zones_dev arrays are read-only inputs the kernel never mutates, so they stay valid.
+        # Zones are a low-frequency input (a static scene never re-uploads; animated wind re-uploads
+        # only when a value changes). Rebuilding the zone blobs every frame was the single biggest
+        # per-frame transfer cost (~1.9 ms measured); a byte fingerprint skips it whenever the packed
+        # zone data is unchanged. The resident zone blobs are read-only inputs the kernel never
+        # mutates, so they stay valid across skipped frames.
         host = self._zone_host(zones)
         fingerprint = b"".join(host[name].tobytes() for name in _ZONE_ARG_ORDER)
         if len(zones) == self.n_zones and fingerprint == self._zone_shadow:
             return
         self.n_zones = len(zones)
         self._zone_shadow = fingerprint
-        self.zones_dev = {name: device.upload_readonly(host[name]) for name in _ZONE_ARG_ORDER}
+        ordered = [host[name] for name in _ZONE_ARG_ORDER]
+        self.zone_blobs, self.zone_offs, self.zone_lens = device.build_blobs(
+            ordered, kernels.ZONE_BLOB_GROUPS)[:3]
 
     def _blocks(self):
         needed = max(self.program.num_particles, self.program.num_teams, 1)
@@ -352,28 +416,21 @@ class GpuEngine:
                 np.float32(power[2]), np.float32(power[3]))
 
     def launch(self, phase_mask, sub_begin, sub_end, frame_globals, stream=0):
+        # G2e-7: the whole resident field set is 17 per-(family,shape) blobs (+ int64 offs/lens), zones
+        # are 6 zone blobs (+ offs/lens). The kernel reconstructs every field as an axis-0 slice of its
+        # blob at entry, so this is 27 array args + 12 scalars instead of ~290 field arrays -- the
+        # ~1.4 ms/launch host marshalling floor is gone. Blobs are splatted in RESIDENT_BLOB_GROUPS /
+        # ZONE_BLOB_GROUPS order, which is exactly the signature order the preamble was generated from.
         fdt, sim_dt, msc, gts, pw0, pw1, pw2, pw3 = self._frame_scalars(frame_globals)
-        team_args = [self.team.get(name) for name in kernels.TEAM_KERNEL_FIELDS]
-        particle_args = [self.particles.get(name) for name in kernels.PARTICLE_KERNEL_FIELDS]
-        transform_args = [self.transforms.get(name) for name in kernels.TRANSFORM_KERNEL_FIELDS]
-        collider_args = [self.colliders.get(name) for name in kernels.COLLIDER_KERNEL_FIELDS]
-        static_args = [self.static[name] for name, _, _ in kernels.STATIC_KERNEL_FIELDS]
-        csr_args = []
-        for off_name, ord_name, _ in kernels.STATIC_CSR_FIELDS:
-            csr_args.append(self.static[off_name])
-            csr_args.append(self.static[ord_name])
-        direct_args = [self.static[name] for name in kernels.STATIC_DIRECT_FIELDS]
-        scratch_args = [self.scratch["dcorr"], self.scratch["dcorr_fixed"], self.scratch["dcount"],
-                        self.scratch["col_friction_fixed"], self.scratch["col_normal_fixed"],
-                        self.scratch["sync_snapshot"], self.scratch["tri_normal_f64"],
-                        self.scratch["tri_tangent_f64"]]
-        zone_args = [self.zones_dev[name] for name in _ZONE_ARG_ORDER]
         blocks = self._blocks()
         kernels.frame_kernel[blocks, _THREADS, stream](
             int32(phase_mask), int32(sub_begin), int32(sub_end),
             fdt, sim_dt, msc, gts, pw0, pw1, pw2, pw3,
-            *team_args, *particle_args, *transform_args, *collider_args, *static_args,
-            *csr_args, *direct_args, *scratch_args, int32(self.n_zones), *zone_args)
+            *[self.blobs[group] for group in kernels.RESIDENT_BLOB_GROUPS],
+            self.offs, self.lens,
+            int32(self.n_zones),
+            *[self.zone_blobs[group] for group in kernels.ZONE_BLOB_GROUPS],
+            self.zone_offs, self.zone_lens)
 
     # ---- production API -----------------------------------------------------
     @staticmethod

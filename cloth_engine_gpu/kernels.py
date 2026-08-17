@@ -2044,100 +2044,15 @@ def do_output_particle(p, mt, p_rotations, p_vertex_to_transform_rotations,
 def frame_kernel(phase_mask, sub_begin, sub_end,
                  fdt, sim_dt, max_sim_count, global_time_scale,
                  power0, power1, power2, power3,
-                 t_enabled, t_valid, t_cws, t_time_reset,
-                 t_time, t_old_time, t_now_update, t_old_update, t_frame_update, t_frame_old,
-                 t_frame_dt, t_time_scale, t_now_time_scale, t_update_count, t_skip_count,
-                 t_running, t_tether_compression,
-                 t_frame_interpolation, t_depth_inertia, t_inertia_vector, t_step_vector,
-                 t_inertia_rotation, t_step_rotation, t_old_world_position, t_velocity_weight,
-                 t_damping_lut, t_force_mode, t_gravity_direction, t_gravity, t_gravity_ratio,
-                 t_impact_force, t_scale_ratio, t_normal_axis_vector, t_spring_limit_distance,
-                 t_spring_normal_limit_ratio, t_spring_power, t_spring_noise,
-                 t_wind_seed, t_wind_synchronization, t_wind_blend, t_wind_turbulence,
-                 t_wind_count, t_wind_main, t_wind_time, t_wind_dirq, t_wind_zone_turbulence,
-                 t_wind_influence, t_wind_depth_weight, t_moving_wind_main, t_wind_moving,
-                 t_moving_wind_time, t_moving_wind_dirq,
-                 t_static_friction, t_dynamic_friction, t_particle_speed_limit,
-                 t_angular_velocity, t_centrifugal_acceleration, t_rotation_axis,
-                 t_now_world_position,
-                 t_is_spring, t_animation_pose_ratio, t_init_scale, t_distance_lut,
-                 t_motion_use_max_distance, t_motion_use_backstop, t_motion_stiffness,
-                 t_motion_backstop_radius, t_radius_lut, t_motion_max_distance_lut,
-                 t_motion_backstop_lut,
-                 t_bending_stiffness, t_negative_scale_sign,
-                 t_negative_scale_direction, t_negative_scale_quaternion, t_is_negative_scale,
-                 t_component_world_position, t_component_world_rotation,
-                 t_old_component_world_position, t_old_component_world_rotation,
-                 t_old_component_world_scale,
-                 t_frame_world_position, t_frame_world_rotation, t_frame_world_scale,
-                 t_old_frame_world_position, t_old_frame_world_rotation, t_old_frame_world_scale,
-                 t_anchor_position, t_anchor_rotation,
-                 t_old_anchor_position, t_old_anchor_rotation, t_anchor_component_local_position,
-                 t_reset_pending, t_keep_teleport_pending, t_inertia_shift,
-                 t_negative_scale_teleport,
-                 t_now_world_rotation, t_old_world_rotation,
-                 t_step_move_inertia_ratio, t_step_rotation_inertia_ratio,
-                 t_local_inertia, t_local_movement_speed_limit, t_local_rotation_speed_limit,
-                 t_gravity_dot, t_init_local_gravity_direction, t_gravity_falloff,
-                 t_stablization_time, t_blend_weight, t_blend_weight_param, t_distance_weight,
-                 t_frame_moving_speed, t_frame_moving_direction, t_moving_wind_direction,
-                 t_wind_frequency,
-                 t_collision_mode, t_limit_distance_lut, t_negative_scale_matrix,
-                 t_negative_scale_change, t_frame_component_shift_vector,
-                 t_frame_component_shift_rotation,
-                 t_sync_target, t_sync_top, t_negative_scale_triangle_sign,
-                 t_smoothing_velocity, t_has_anchor, t_had_anchor, t_anchor_inertia,
-                 t_world_inertia, t_movement_inertia_smoothing, t_movement_speed_limit,
-                 t_rotation_speed_limit, t_teleport_mode, t_teleport_distance,
-                 t_teleport_rotation, t_culling_invisible, t_wind_direction, t_wind_zone_id,
-                 t_angle_use_limit, t_angle_use_restoration, t_angle_limit_lut,
-                 t_angle_limit_stiffness, t_angle_restoration_lut,
-                 t_angle_restoration_attenuation, t_angle_restoration_gravity_falloff,
-                 t_rotational_interpolation, t_root_rotation,
-                 p_team, p_local_positions, p_local_normals, p_local_tangents,
-                 p_skin_indices, p_skin_weights, p_positions, p_rotations,
-                 p_next_positions, p_velocity_positions, p_step_basic_positions, p_vertex_root,
-                 p_old_anim_positions, p_old_anim_rotations, p_base_positions, p_base_rotations,
-                 p_step_basic_rotations, p_depth, p_velocities, p_old_positions, p_friction,
-                 p_vertex_root_local, p_collision_normals, p_static_friction, p_real_velocities,
-                 p_attr_move, p_vertex_local_positions, p_vertex_local_rotations,
-                 p_old_rotations, p_display_positions, p_vertex_bind_pose_rotations,
-                 p_vertex_parent, p_albuf_length, p_albuf_local_pos, p_albuf_local_rot,
-                 p_albuf_restore, p_albuf_rotation,
-                 p_uv, p_attr_zero_distance, p_attr_invalid, p_temp_base_positions,
-                 p_temp_base_rotations, p_normal_adjustment_rotations,
-                 p_vertex_to_transform_rotations, p_out_rotations,
-                 x_world, x_bind,
-                 c_team, c_kind, c_center, c_size, c_axis, c_aligned, c_enabled,
-                 c_enabled_prev, c_active, c_input_positions, c_input_rotations, c_input_scales,
-                 c_frame_pos, c_frame_rot, c_frame_scl, c_old_frame_pos, c_old_frame_rot,
-                 c_now_pos, c_now_rot, c_old_pos, c_old_rot,
-                 c_work_radius, c_work_old_pos, c_work_next_pos, c_work_rot, c_work_inv_old_rot,
-                 c_work_aabb_min, c_work_aabb_max,
-                 st_tether_particle, st_tether_team,
-                 st_move_particle, st_move_team, st_fixed_particle, st_fixed_team,
-                 st_spring_particle, st_spring_team,
-                 st_distance_target, st_distance_rest,
-                 st_motion_particle, st_motion_team,
-                 st_bending_team, st_bending_pair, st_bending_rest, st_bending_sign,
-                 st_point_pair_collider, st_edge_pair_collider, st_collision_edge,
-                 st_center_fixed_particle, st_angle_buffered_particle,
-                 st_triangle_team, st_triangle_particles,
-                 st_v2t_triangle, st_v2t_flip_normal, st_v2t_flip_tangent,
-                 csr_distance_offsets, csr_distance_order,
-                 csr_point_pair_offsets, csr_point_pair_order,
-                 csr_edge_pair_offsets, csr_edge_pair_order,
-                 csr_center_fixed_offsets, csr_center_fixed_order,
-                 csr_v2t_offsets, csr_v2t_order,
-                 fk_yes_offsets, fk_yes, fk_yes_parent, fk_no_offsets, fk_no, baseline_entries,
-                 angle_pass_offsets, angle_pass_vertices, angle_pass_parents,
-                 postline_entry_offsets, postline_entry_vertices,
-                 postline_child_offsets, postline_child_vertices, st_display_update_move_mask,
-                 sc_dcorr, sc_dcorr_fixed, sc_dcount, sc_col_friction_fixed, sc_col_normal_fixed,
-                 sc_sync, sc_tri_normal_f64, sc_tri_tangent_f64,
-                 n_zones, z_zone_id, z_mode, z_is_addition, z_main, z_turbulence,
-                 z_world_position, z_world_direction, z_world_to_local, z_size,
-                 z_zone_volume, z_attenuation_lut):
+                 blob_u8_s, blob_f32_v3, blob_f32_s, blob_i32_s, blob_f32_v4,
+                 blob_f32_v16, blob_i8_s, blob_f32_m4x4, blob_f64_m4x4, blob_f32_v2,
+                 blob_f32_m4x3, blob_i32_v4, blob_f32_m2x3, blob_i32_v2, blob_i32_v3,
+                 blob_f32_v22, blob_f64_v3,
+                 offs, lens,
+                 n_zones,
+                 zone_i32_s, zone_u8_s, zone_f32_s, zone_f32_v3, zone_f64_m4x4,
+                 zone_f32_v16,
+                 zone_offs, zone_lens):
     grid = cg.this_grid()
     tid = cuda.grid(1)
     stride = cuda.gridsize(1)
@@ -2147,6 +2062,299 @@ def frame_kernel(phase_mask, sub_begin, sub_end,
     # 7-block grid). tid == threadIdx.x for block 0, so it doubles as the block lane index there.
     bid = cuda.blockIdx.x
     bdim = cuda.blockDim.x
+
+    # ---- view reconstruction: each field is an axis-0 slice of its (family,per_row) blob
+    # (reshape-free so cache=True pickles). RESIDENT_BLOB_LAYOUT[k]=(param,group,per_row);
+    # offs[k]=row base, lens[k]=row count into blob_<group>. ----
+    t_enabled = blob_u8_s[offs[0]:offs[0] + lens[0]]
+    t_valid = blob_u8_s[offs[1]:offs[1] + lens[1]]
+    t_cws = blob_f32_v3[offs[2]:offs[2] + lens[2]]
+    t_time_reset = blob_u8_s[offs[3]:offs[3] + lens[3]]
+    t_time = blob_f32_s[offs[4]:offs[4] + lens[4]]
+    t_old_time = blob_f32_s[offs[5]:offs[5] + lens[5]]
+    t_now_update = blob_f32_s[offs[6]:offs[6] + lens[6]]
+    t_old_update = blob_f32_s[offs[7]:offs[7] + lens[7]]
+    t_frame_update = blob_f32_s[offs[8]:offs[8] + lens[8]]
+    t_frame_old = blob_f32_s[offs[9]:offs[9] + lens[9]]
+    t_frame_dt = blob_f32_s[offs[10]:offs[10] + lens[10]]
+    t_time_scale = blob_f32_s[offs[11]:offs[11] + lens[11]]
+    t_now_time_scale = blob_f32_s[offs[12]:offs[12] + lens[12]]
+    t_update_count = blob_i32_s[offs[13]:offs[13] + lens[13]]
+    t_skip_count = blob_i32_s[offs[14]:offs[14] + lens[14]]
+    t_running = blob_u8_s[offs[15]:offs[15] + lens[15]]
+    t_tether_compression = blob_f32_s[offs[16]:offs[16] + lens[16]]
+    t_frame_interpolation = blob_f32_s[offs[17]:offs[17] + lens[17]]
+    t_depth_inertia = blob_f32_s[offs[18]:offs[18] + lens[18]]
+    t_inertia_vector = blob_f32_v3[offs[19]:offs[19] + lens[19]]
+    t_step_vector = blob_f32_v3[offs[20]:offs[20] + lens[20]]
+    t_inertia_rotation = blob_f32_v4[offs[21]:offs[21] + lens[21]]
+    t_step_rotation = blob_f32_v4[offs[22]:offs[22] + lens[22]]
+    t_old_world_position = blob_f32_v3[offs[23]:offs[23] + lens[23]]
+    t_velocity_weight = blob_f32_s[offs[24]:offs[24] + lens[24]]
+    t_damping_lut = blob_f32_v16[offs[25]:offs[25] + lens[25]]
+    t_force_mode = blob_i8_s[offs[26]:offs[26] + lens[26]]
+    t_gravity_direction = blob_f32_v3[offs[27]:offs[27] + lens[27]]
+    t_gravity = blob_f32_s[offs[28]:offs[28] + lens[28]]
+    t_gravity_ratio = blob_f32_s[offs[29]:offs[29] + lens[29]]
+    t_impact_force = blob_f32_v3[offs[30]:offs[30] + lens[30]]
+    t_scale_ratio = blob_f32_s[offs[31]:offs[31] + lens[31]]
+    t_normal_axis_vector = blob_f32_v3[offs[32]:offs[32] + lens[32]]
+    t_spring_limit_distance = blob_f32_s[offs[33]:offs[33] + lens[33]]
+    t_spring_normal_limit_ratio = blob_f32_s[offs[34]:offs[34] + lens[34]]
+    t_spring_power = blob_f32_s[offs[35]:offs[35] + lens[35]]
+    t_spring_noise = blob_f32_s[offs[36]:offs[36] + lens[36]]
+    t_wind_seed = blob_i32_s[offs[37]:offs[37] + lens[37]]
+    t_wind_synchronization = blob_f32_s[offs[38]:offs[38] + lens[38]]
+    t_wind_blend = blob_f32_s[offs[39]:offs[39] + lens[39]]
+    t_wind_turbulence = blob_f32_s[offs[40]:offs[40] + lens[40]]
+    t_wind_count = blob_i8_s[offs[41]:offs[41] + lens[41]]
+    t_wind_main = blob_f32_v4[offs[42]:offs[42] + lens[42]]
+    t_wind_time = blob_f32_v4[offs[43]:offs[43] + lens[43]]
+    t_wind_dirq = blob_f32_m4x4[offs[44]:offs[44] + lens[44]]
+    t_wind_zone_turbulence = blob_f32_v4[offs[45]:offs[45] + lens[45]]
+    t_wind_influence = blob_f32_s[offs[46]:offs[46] + lens[46]]
+    t_wind_depth_weight = blob_f32_s[offs[47]:offs[47] + lens[47]]
+    t_moving_wind_main = blob_f32_s[offs[48]:offs[48] + lens[48]]
+    t_wind_moving = blob_f32_s[offs[49]:offs[49] + lens[49]]
+    t_moving_wind_time = blob_f32_s[offs[50]:offs[50] + lens[50]]
+    t_moving_wind_dirq = blob_f32_v4[offs[51]:offs[51] + lens[51]]
+    t_static_friction = blob_f32_s[offs[52]:offs[52] + lens[52]]
+    t_dynamic_friction = blob_f32_s[offs[53]:offs[53] + lens[53]]
+    t_particle_speed_limit = blob_f32_s[offs[54]:offs[54] + lens[54]]
+    t_angular_velocity = blob_f32_s[offs[55]:offs[55] + lens[55]]
+    t_centrifugal_acceleration = blob_f32_s[offs[56]:offs[56] + lens[56]]
+    t_rotation_axis = blob_f32_v3[offs[57]:offs[57] + lens[57]]
+    t_now_world_position = blob_f32_v3[offs[58]:offs[58] + lens[58]]
+    t_is_spring = blob_u8_s[offs[59]:offs[59] + lens[59]]
+    t_animation_pose_ratio = blob_f32_s[offs[60]:offs[60] + lens[60]]
+    t_init_scale = blob_f32_v3[offs[61]:offs[61] + lens[61]]
+    t_distance_lut = blob_f32_v16[offs[62]:offs[62] + lens[62]]
+    t_motion_use_max_distance = blob_u8_s[offs[63]:offs[63] + lens[63]]
+    t_motion_use_backstop = blob_u8_s[offs[64]:offs[64] + lens[64]]
+    t_motion_stiffness = blob_f32_s[offs[65]:offs[65] + lens[65]]
+    t_motion_backstop_radius = blob_f32_s[offs[66]:offs[66] + lens[66]]
+    t_radius_lut = blob_f32_v16[offs[67]:offs[67] + lens[67]]
+    t_motion_max_distance_lut = blob_f32_v16[offs[68]:offs[68] + lens[68]]
+    t_motion_backstop_lut = blob_f32_v16[offs[69]:offs[69] + lens[69]]
+    t_bending_stiffness = blob_f32_s[offs[70]:offs[70] + lens[70]]
+    t_negative_scale_sign = blob_f32_s[offs[71]:offs[71] + lens[71]]
+    t_negative_scale_direction = blob_f32_v3[offs[72]:offs[72] + lens[72]]
+    t_negative_scale_quaternion = blob_f32_v4[offs[73]:offs[73] + lens[73]]
+    t_is_negative_scale = blob_u8_s[offs[74]:offs[74] + lens[74]]
+    t_component_world_position = blob_f32_v3[offs[75]:offs[75] + lens[75]]
+    t_component_world_rotation = blob_f32_v4[offs[76]:offs[76] + lens[76]]
+    t_old_component_world_position = blob_f32_v3[offs[77]:offs[77] + lens[77]]
+    t_old_component_world_rotation = blob_f32_v4[offs[78]:offs[78] + lens[78]]
+    t_old_component_world_scale = blob_f32_v3[offs[79]:offs[79] + lens[79]]
+    t_frame_world_position = blob_f32_v3[offs[80]:offs[80] + lens[80]]
+    t_frame_world_rotation = blob_f32_v4[offs[81]:offs[81] + lens[81]]
+    t_frame_world_scale = blob_f32_v3[offs[82]:offs[82] + lens[82]]
+    t_old_frame_world_position = blob_f32_v3[offs[83]:offs[83] + lens[83]]
+    t_old_frame_world_rotation = blob_f32_v4[offs[84]:offs[84] + lens[84]]
+    t_old_frame_world_scale = blob_f32_v3[offs[85]:offs[85] + lens[85]]
+    t_anchor_position = blob_f32_v3[offs[86]:offs[86] + lens[86]]
+    t_anchor_rotation = blob_f32_v4[offs[87]:offs[87] + lens[87]]
+    t_old_anchor_position = blob_f32_v3[offs[88]:offs[88] + lens[88]]
+    t_old_anchor_rotation = blob_f32_v4[offs[89]:offs[89] + lens[89]]
+    t_anchor_component_local_position = blob_f32_v3[offs[90]:offs[90] + lens[90]]
+    t_reset_pending = blob_u8_s[offs[91]:offs[91] + lens[91]]
+    t_keep_teleport_pending = blob_u8_s[offs[92]:offs[92] + lens[92]]
+    t_inertia_shift = blob_u8_s[offs[93]:offs[93] + lens[93]]
+    t_negative_scale_teleport = blob_u8_s[offs[94]:offs[94] + lens[94]]
+    t_now_world_rotation = blob_f32_v4[offs[95]:offs[95] + lens[95]]
+    t_old_world_rotation = blob_f32_v4[offs[96]:offs[96] + lens[96]]
+    t_step_move_inertia_ratio = blob_f32_s[offs[97]:offs[97] + lens[97]]
+    t_step_rotation_inertia_ratio = blob_f32_s[offs[98]:offs[98] + lens[98]]
+    t_local_inertia = blob_f32_s[offs[99]:offs[99] + lens[99]]
+    t_local_movement_speed_limit = blob_f32_s[offs[100]:offs[100] + lens[100]]
+    t_local_rotation_speed_limit = blob_f32_s[offs[101]:offs[101] + lens[101]]
+    t_gravity_dot = blob_f32_s[offs[102]:offs[102] + lens[102]]
+    t_init_local_gravity_direction = blob_f32_v3[offs[103]:offs[103] + lens[103]]
+    t_gravity_falloff = blob_f32_s[offs[104]:offs[104] + lens[104]]
+    t_stablization_time = blob_f32_s[offs[105]:offs[105] + lens[105]]
+    t_blend_weight = blob_f32_s[offs[106]:offs[106] + lens[106]]
+    t_blend_weight_param = blob_f32_s[offs[107]:offs[107] + lens[107]]
+    t_distance_weight = blob_f32_s[offs[108]:offs[108] + lens[108]]
+    t_frame_moving_speed = blob_f32_s[offs[109]:offs[109] + lens[109]]
+    t_frame_moving_direction = blob_f32_v3[offs[110]:offs[110] + lens[110]]
+    t_moving_wind_direction = blob_f32_v3[offs[111]:offs[111] + lens[111]]
+    t_wind_frequency = blob_f32_s[offs[112]:offs[112] + lens[112]]
+    t_collision_mode = blob_i8_s[offs[113]:offs[113] + lens[113]]
+    t_limit_distance_lut = blob_f32_v16[offs[114]:offs[114] + lens[114]]
+    t_negative_scale_matrix = blob_f64_m4x4[offs[115]:offs[115] + lens[115]]
+    t_negative_scale_change = blob_f32_v3[offs[116]:offs[116] + lens[116]]
+    t_frame_component_shift_vector = blob_f32_v3[offs[117]:offs[117] + lens[117]]
+    t_frame_component_shift_rotation = blob_f32_v4[offs[118]:offs[118] + lens[118]]
+    t_sync_target = blob_i32_s[offs[119]:offs[119] + lens[119]]
+    t_sync_top = blob_i32_s[offs[120]:offs[120] + lens[120]]
+    t_negative_scale_triangle_sign = blob_f32_v2[offs[121]:offs[121] + lens[121]]
+    t_smoothing_velocity = blob_f32_v3[offs[122]:offs[122] + lens[122]]
+    t_has_anchor = blob_u8_s[offs[123]:offs[123] + lens[123]]
+    t_had_anchor = blob_u8_s[offs[124]:offs[124] + lens[124]]
+    t_anchor_inertia = blob_f32_s[offs[125]:offs[125] + lens[125]]
+    t_world_inertia = blob_f32_s[offs[126]:offs[126] + lens[126]]
+    t_movement_inertia_smoothing = blob_f32_s[offs[127]:offs[127] + lens[127]]
+    t_movement_speed_limit = blob_f32_s[offs[128]:offs[128] + lens[128]]
+    t_rotation_speed_limit = blob_f32_s[offs[129]:offs[129] + lens[129]]
+    t_teleport_mode = blob_i8_s[offs[130]:offs[130] + lens[130]]
+    t_teleport_distance = blob_f32_s[offs[131]:offs[131] + lens[131]]
+    t_teleport_rotation = blob_f32_s[offs[132]:offs[132] + lens[132]]
+    t_culling_invisible = blob_u8_s[offs[133]:offs[133] + lens[133]]
+    t_wind_direction = blob_f32_m4x3[offs[134]:offs[134] + lens[134]]
+    t_wind_zone_id = blob_i32_v4[offs[135]:offs[135] + lens[135]]
+    t_angle_use_limit = blob_u8_s[offs[136]:offs[136] + lens[136]]
+    t_angle_use_restoration = blob_u8_s[offs[137]:offs[137] + lens[137]]
+    t_angle_limit_lut = blob_f32_v16[offs[138]:offs[138] + lens[138]]
+    t_angle_limit_stiffness = blob_f32_s[offs[139]:offs[139] + lens[139]]
+    t_angle_restoration_lut = blob_f32_v16[offs[140]:offs[140] + lens[140]]
+    t_angle_restoration_attenuation = blob_f32_s[offs[141]:offs[141] + lens[141]]
+    t_angle_restoration_gravity_falloff = blob_f32_s[offs[142]:offs[142] + lens[142]]
+    t_rotational_interpolation = blob_f32_s[offs[143]:offs[143] + lens[143]]
+    t_root_rotation = blob_f32_s[offs[144]:offs[144] + lens[144]]
+    p_team = blob_i32_s[offs[145]:offs[145] + lens[145]]
+    p_local_positions = blob_f32_v3[offs[146]:offs[146] + lens[146]]
+    p_local_normals = blob_f32_v3[offs[147]:offs[147] + lens[147]]
+    p_local_tangents = blob_f32_v3[offs[148]:offs[148] + lens[148]]
+    p_skin_indices = blob_i32_v4[offs[149]:offs[149] + lens[149]]
+    p_skin_weights = blob_f32_v4[offs[150]:offs[150] + lens[150]]
+    p_positions = blob_f32_v3[offs[151]:offs[151] + lens[151]]
+    p_rotations = blob_f32_v4[offs[152]:offs[152] + lens[152]]
+    p_next_positions = blob_f32_v3[offs[153]:offs[153] + lens[153]]
+    p_velocity_positions = blob_f32_v3[offs[154]:offs[154] + lens[154]]
+    p_step_basic_positions = blob_f32_v3[offs[155]:offs[155] + lens[155]]
+    p_vertex_root = blob_i32_s[offs[156]:offs[156] + lens[156]]
+    p_old_anim_positions = blob_f32_v3[offs[157]:offs[157] + lens[157]]
+    p_old_anim_rotations = blob_f32_v4[offs[158]:offs[158] + lens[158]]
+    p_base_positions = blob_f32_v3[offs[159]:offs[159] + lens[159]]
+    p_base_rotations = blob_f32_v4[offs[160]:offs[160] + lens[160]]
+    p_step_basic_rotations = blob_f32_v4[offs[161]:offs[161] + lens[161]]
+    p_depth = blob_f32_s[offs[162]:offs[162] + lens[162]]
+    p_velocities = blob_f32_v3[offs[163]:offs[163] + lens[163]]
+    p_old_positions = blob_f32_v3[offs[164]:offs[164] + lens[164]]
+    p_friction = blob_f32_s[offs[165]:offs[165] + lens[165]]
+    p_vertex_root_local = blob_i32_s[offs[166]:offs[166] + lens[166]]
+    p_collision_normals = blob_f32_v3[offs[167]:offs[167] + lens[167]]
+    p_static_friction = blob_f32_s[offs[168]:offs[168] + lens[168]]
+    p_real_velocities = blob_f32_v3[offs[169]:offs[169] + lens[169]]
+    p_attr_move = blob_u8_s[offs[170]:offs[170] + lens[170]]
+    p_vertex_local_positions = blob_f32_v3[offs[171]:offs[171] + lens[171]]
+    p_vertex_local_rotations = blob_f32_v4[offs[172]:offs[172] + lens[172]]
+    p_old_rotations = blob_f32_v4[offs[173]:offs[173] + lens[173]]
+    p_display_positions = blob_f32_v3[offs[174]:offs[174] + lens[174]]
+    p_vertex_bind_pose_rotations = blob_f32_v4[offs[175]:offs[175] + lens[175]]
+    p_vertex_parent = blob_i32_s[offs[176]:offs[176] + lens[176]]
+    p_albuf_length = blob_f32_s[offs[177]:offs[177] + lens[177]]
+    p_albuf_local_pos = blob_f32_v3[offs[178]:offs[178] + lens[178]]
+    p_albuf_local_rot = blob_f32_v4[offs[179]:offs[179] + lens[179]]
+    p_albuf_restore = blob_f32_v3[offs[180]:offs[180] + lens[180]]
+    p_albuf_rotation = blob_f32_v4[offs[181]:offs[181] + lens[181]]
+    p_uv = blob_f32_v2[offs[182]:offs[182] + lens[182]]
+    p_attr_zero_distance = blob_u8_s[offs[183]:offs[183] + lens[183]]
+    p_attr_invalid = blob_u8_s[offs[184]:offs[184] + lens[184]]
+    p_temp_base_positions = blob_f32_v3[offs[185]:offs[185] + lens[185]]
+    p_temp_base_rotations = blob_f32_v4[offs[186]:offs[186] + lens[186]]
+    p_normal_adjustment_rotations = blob_f32_v4[offs[187]:offs[187] + lens[187]]
+    p_vertex_to_transform_rotations = blob_f32_v4[offs[188]:offs[188] + lens[188]]
+    p_out_rotations = blob_f32_v4[offs[189]:offs[189] + lens[189]]
+    x_world = blob_f32_m4x4[offs[190]:offs[190] + lens[190]]
+    x_bind = blob_f32_m4x4[offs[191]:offs[191] + lens[191]]
+    c_team = blob_i32_s[offs[192]:offs[192] + lens[192]]
+    c_kind = blob_i32_s[offs[193]:offs[193] + lens[193]]
+    c_center = blob_f32_v3[offs[194]:offs[194] + lens[194]]
+    c_size = blob_f32_v3[offs[195]:offs[195] + lens[195]]
+    c_axis = blob_f32_v3[offs[196]:offs[196] + lens[196]]
+    c_aligned = blob_u8_s[offs[197]:offs[197] + lens[197]]
+    c_enabled = blob_u8_s[offs[198]:offs[198] + lens[198]]
+    c_enabled_prev = blob_u8_s[offs[199]:offs[199] + lens[199]]
+    c_active = blob_u8_s[offs[200]:offs[200] + lens[200]]
+    c_input_positions = blob_f32_v3[offs[201]:offs[201] + lens[201]]
+    c_input_rotations = blob_f32_v4[offs[202]:offs[202] + lens[202]]
+    c_input_scales = blob_f32_v3[offs[203]:offs[203] + lens[203]]
+    c_frame_pos = blob_f32_v3[offs[204]:offs[204] + lens[204]]
+    c_frame_rot = blob_f32_v4[offs[205]:offs[205] + lens[205]]
+    c_frame_scl = blob_f32_v3[offs[206]:offs[206] + lens[206]]
+    c_old_frame_pos = blob_f32_v3[offs[207]:offs[207] + lens[207]]
+    c_old_frame_rot = blob_f32_v4[offs[208]:offs[208] + lens[208]]
+    c_now_pos = blob_f32_v3[offs[209]:offs[209] + lens[209]]
+    c_now_rot = blob_f32_v4[offs[210]:offs[210] + lens[210]]
+    c_old_pos = blob_f32_v3[offs[211]:offs[211] + lens[211]]
+    c_old_rot = blob_f32_v4[offs[212]:offs[212] + lens[212]]
+    c_work_radius = blob_f32_v2[offs[213]:offs[213] + lens[213]]
+    c_work_old_pos = blob_f32_m2x3[offs[214]:offs[214] + lens[214]]
+    c_work_next_pos = blob_f32_m2x3[offs[215]:offs[215] + lens[215]]
+    c_work_rot = blob_f32_v4[offs[216]:offs[216] + lens[216]]
+    c_work_inv_old_rot = blob_f32_v4[offs[217]:offs[217] + lens[217]]
+    c_work_aabb_min = blob_f32_v3[offs[218]:offs[218] + lens[218]]
+    c_work_aabb_max = blob_f32_v3[offs[219]:offs[219] + lens[219]]
+    st_tether_particle = blob_i32_s[offs[220]:offs[220] + lens[220]]
+    st_tether_team = blob_i32_s[offs[221]:offs[221] + lens[221]]
+    st_move_particle = blob_i32_s[offs[222]:offs[222] + lens[222]]
+    st_move_team = blob_i32_s[offs[223]:offs[223] + lens[223]]
+    st_fixed_particle = blob_i32_s[offs[224]:offs[224] + lens[224]]
+    st_fixed_team = blob_i32_s[offs[225]:offs[225] + lens[225]]
+    st_spring_particle = blob_i32_s[offs[226]:offs[226] + lens[226]]
+    st_spring_team = blob_i32_s[offs[227]:offs[227] + lens[227]]
+    st_distance_target = blob_i32_s[offs[228]:offs[228] + lens[228]]
+    st_distance_rest = blob_f32_s[offs[229]:offs[229] + lens[229]]
+    st_motion_particle = blob_i32_s[offs[230]:offs[230] + lens[230]]
+    st_motion_team = blob_i32_s[offs[231]:offs[231] + lens[231]]
+    st_bending_team = blob_i32_s[offs[232]:offs[232] + lens[232]]
+    st_bending_pair = blob_i32_v4[offs[233]:offs[233] + lens[233]]
+    st_bending_rest = blob_f32_s[offs[234]:offs[234] + lens[234]]
+    st_bending_sign = blob_i8_s[offs[235]:offs[235] + lens[235]]
+    st_point_pair_collider = blob_i32_s[offs[236]:offs[236] + lens[236]]
+    st_edge_pair_collider = blob_i32_s[offs[237]:offs[237] + lens[237]]
+    st_collision_edge = blob_i32_v2[offs[238]:offs[238] + lens[238]]
+    st_center_fixed_particle = blob_i32_s[offs[239]:offs[239] + lens[239]]
+    st_angle_buffered_particle = blob_i32_s[offs[240]:offs[240] + lens[240]]
+    st_triangle_team = blob_i32_s[offs[241]:offs[241] + lens[241]]
+    st_triangle_particles = blob_i32_v3[offs[242]:offs[242] + lens[242]]
+    st_v2t_triangle = blob_i32_s[offs[243]:offs[243] + lens[243]]
+    st_v2t_flip_normal = blob_f32_s[offs[244]:offs[244] + lens[244]]
+    st_v2t_flip_tangent = blob_f32_s[offs[245]:offs[245] + lens[245]]
+    csr_distance_offsets = blob_i32_s[offs[246]:offs[246] + lens[246]]
+    csr_distance_order = blob_i32_s[offs[247]:offs[247] + lens[247]]
+    csr_point_pair_offsets = blob_i32_s[offs[248]:offs[248] + lens[248]]
+    csr_point_pair_order = blob_i32_s[offs[249]:offs[249] + lens[249]]
+    csr_edge_pair_offsets = blob_i32_s[offs[250]:offs[250] + lens[250]]
+    csr_edge_pair_order = blob_i32_s[offs[251]:offs[251] + lens[251]]
+    csr_center_fixed_offsets = blob_i32_s[offs[252]:offs[252] + lens[252]]
+    csr_center_fixed_order = blob_i32_s[offs[253]:offs[253] + lens[253]]
+    csr_v2t_offsets = blob_i32_s[offs[254]:offs[254] + lens[254]]
+    csr_v2t_order = blob_i32_s[offs[255]:offs[255] + lens[255]]
+    fk_yes_offsets = blob_i32_s[offs[256]:offs[256] + lens[256]]
+    fk_yes = blob_i32_s[offs[257]:offs[257] + lens[257]]
+    fk_yes_parent = blob_i32_s[offs[258]:offs[258] + lens[258]]
+    fk_no_offsets = blob_i32_s[offs[259]:offs[259] + lens[259]]
+    fk_no = blob_i32_s[offs[260]:offs[260] + lens[260]]
+    baseline_entries = blob_i32_s[offs[261]:offs[261] + lens[261]]
+    angle_pass_offsets = blob_i32_s[offs[262]:offs[262] + lens[262]]
+    angle_pass_vertices = blob_i32_s[offs[263]:offs[263] + lens[263]]
+    angle_pass_parents = blob_i32_s[offs[264]:offs[264] + lens[264]]
+    postline_entry_offsets = blob_i32_s[offs[265]:offs[265] + lens[265]]
+    postline_entry_vertices = blob_i32_s[offs[266]:offs[266] + lens[266]]
+    postline_child_offsets = blob_i32_s[offs[267]:offs[267] + lens[267]]
+    postline_child_vertices = blob_i32_s[offs[268]:offs[268] + lens[268]]
+    st_display_update_move_mask = blob_u8_s[offs[269]:offs[269] + lens[269]]
+    sc_dcorr = blob_f32_v3[offs[270]:offs[270] + lens[270]]
+    sc_dcorr_fixed = blob_i32_v3[offs[271]:offs[271] + lens[271]]
+    sc_dcount = blob_i32_s[offs[272]:offs[272] + lens[272]]
+    sc_col_friction_fixed = blob_i32_s[offs[273]:offs[273] + lens[273]]
+    sc_col_normal_fixed = blob_i32_v3[offs[274]:offs[274] + lens[274]]
+    sc_sync = blob_f32_v22[offs[275]:offs[275] + lens[275]]
+    sc_tri_normal_f64 = blob_f64_v3[offs[276]:offs[276] + lens[276]]
+    sc_tri_tangent_f64 = blob_f64_v3[offs[277]:offs[277] + lens[277]]
+    z_zone_id = zone_i32_s[zone_offs[0]:zone_offs[0] + zone_lens[0]]
+    z_mode = zone_i32_s[zone_offs[1]:zone_offs[1] + zone_lens[1]]
+    z_is_addition = zone_u8_s[zone_offs[2]:zone_offs[2] + zone_lens[2]]
+    z_main = zone_f32_s[zone_offs[3]:zone_offs[3] + zone_lens[3]]
+    z_turbulence = zone_f32_s[zone_offs[4]:zone_offs[4] + zone_lens[4]]
+    z_world_position = zone_f32_v3[zone_offs[5]:zone_offs[5] + zone_lens[5]]
+    z_world_direction = zone_f32_v3[zone_offs[6]:zone_offs[6] + zone_lens[6]]
+    z_world_to_local = zone_f64_m4x4[zone_offs[7]:zone_offs[7] + zone_lens[7]]
+    z_size = zone_f32_v3[zone_offs[8]:zone_offs[8] + zone_lens[8]]
+    z_zone_volume = zone_f32_s[zone_offs[9]:zone_offs[9] + zone_lens[9]]
+    z_attenuation_lut = zone_f32_v16[zone_offs[10]:zone_offs[10] + zone_lens[10]]
     num_teams = t_enabled.shape[0]
 
     num_particles = p_team.shape[0]
@@ -4358,4 +4566,338 @@ STATIC_DIRECT_FIELDS = (
     "angle_pass_offsets", "angle_pass_vertices", "angle_pass_parents",
     "postline_entry_offsets", "postline_entry_vertices",
     "postline_child_offsets", "postline_child_vertices", "display_update_move_mask",
+)
+
+
+# ---- G2e-7 blob aggregation registry (cache-preserving group-by-shape) ---------------------
+# The megakernel takes one contiguous device blob per (dtype-family, per-row-shape) group, so
+# each field is a plain AXIS-0 SLICE of a shaped blob -- no device-code reshape (numba-cuda links
+# reshape_funcs.cu, which cache=True cannot pickle). offs[k]/lens[k] are the row base/count of
+# slot k into blob_<group>; the slot index matches the reconstruction preamble atop frame_kernel.
+# engine.build_blobs() assembles the group blobs from the same ordered field list and asserts
+# group/per_row against this table. Adding a field for G3 = append its *_KERNEL_FIELDS entry + one
+# layout row + one preamble slice (+ a new group blob only if its (family,shape) is new); the
+# SIGNATURE changes only when a brand-new (family,shape) group appears.
+RESIDENT_BLOB_GROUPS = (
+    "u8_s",
+    "f32_v3",
+    "f32_s",
+    "i32_s",
+    "f32_v4",
+    "f32_v16",
+    "i8_s",
+    "f32_m4x4",
+    "f64_m4x4",
+    "f32_v2",
+    "f32_m4x3",
+    "i32_v4",
+    "f32_m2x3",
+    "i32_v2",
+    "i32_v3",
+    "f32_v22",
+    "f64_v3",
+)
+
+ZONE_BLOB_GROUPS = (
+    "i32_s",
+    "u8_s",
+    "f32_s",
+    "f32_v3",
+    "f64_m4x4",
+    "f32_v16",
+)
+
+RESIDENT_BLOB_LAYOUT = (
+    ('t_enabled', 'u8_s', ()),
+    ('t_valid', 'u8_s', ()),
+    ('t_cws', 'f32_v3', (3,)),
+    ('t_time_reset', 'u8_s', ()),
+    ('t_time', 'f32_s', ()),
+    ('t_old_time', 'f32_s', ()),
+    ('t_now_update', 'f32_s', ()),
+    ('t_old_update', 'f32_s', ()),
+    ('t_frame_update', 'f32_s', ()),
+    ('t_frame_old', 'f32_s', ()),
+    ('t_frame_dt', 'f32_s', ()),
+    ('t_time_scale', 'f32_s', ()),
+    ('t_now_time_scale', 'f32_s', ()),
+    ('t_update_count', 'i32_s', ()),
+    ('t_skip_count', 'i32_s', ()),
+    ('t_running', 'u8_s', ()),
+    ('t_tether_compression', 'f32_s', ()),
+    ('t_frame_interpolation', 'f32_s', ()),
+    ('t_depth_inertia', 'f32_s', ()),
+    ('t_inertia_vector', 'f32_v3', (3,)),
+    ('t_step_vector', 'f32_v3', (3,)),
+    ('t_inertia_rotation', 'f32_v4', (4,)),
+    ('t_step_rotation', 'f32_v4', (4,)),
+    ('t_old_world_position', 'f32_v3', (3,)),
+    ('t_velocity_weight', 'f32_s', ()),
+    ('t_damping_lut', 'f32_v16', (16,)),
+    ('t_force_mode', 'i8_s', ()),
+    ('t_gravity_direction', 'f32_v3', (3,)),
+    ('t_gravity', 'f32_s', ()),
+    ('t_gravity_ratio', 'f32_s', ()),
+    ('t_impact_force', 'f32_v3', (3,)),
+    ('t_scale_ratio', 'f32_s', ()),
+    ('t_normal_axis_vector', 'f32_v3', (3,)),
+    ('t_spring_limit_distance', 'f32_s', ()),
+    ('t_spring_normal_limit_ratio', 'f32_s', ()),
+    ('t_spring_power', 'f32_s', ()),
+    ('t_spring_noise', 'f32_s', ()),
+    ('t_wind_seed', 'i32_s', ()),
+    ('t_wind_synchronization', 'f32_s', ()),
+    ('t_wind_blend', 'f32_s', ()),
+    ('t_wind_turbulence', 'f32_s', ()),
+    ('t_wind_count', 'i8_s', ()),
+    ('t_wind_main', 'f32_v4', (4,)),
+    ('t_wind_time', 'f32_v4', (4,)),
+    ('t_wind_dirq', 'f32_m4x4', (4, 4)),
+    ('t_wind_zone_turbulence', 'f32_v4', (4,)),
+    ('t_wind_influence', 'f32_s', ()),
+    ('t_wind_depth_weight', 'f32_s', ()),
+    ('t_moving_wind_main', 'f32_s', ()),
+    ('t_wind_moving', 'f32_s', ()),
+    ('t_moving_wind_time', 'f32_s', ()),
+    ('t_moving_wind_dirq', 'f32_v4', (4,)),
+    ('t_static_friction', 'f32_s', ()),
+    ('t_dynamic_friction', 'f32_s', ()),
+    ('t_particle_speed_limit', 'f32_s', ()),
+    ('t_angular_velocity', 'f32_s', ()),
+    ('t_centrifugal_acceleration', 'f32_s', ()),
+    ('t_rotation_axis', 'f32_v3', (3,)),
+    ('t_now_world_position', 'f32_v3', (3,)),
+    ('t_is_spring', 'u8_s', ()),
+    ('t_animation_pose_ratio', 'f32_s', ()),
+    ('t_init_scale', 'f32_v3', (3,)),
+    ('t_distance_lut', 'f32_v16', (16,)),
+    ('t_motion_use_max_distance', 'u8_s', ()),
+    ('t_motion_use_backstop', 'u8_s', ()),
+    ('t_motion_stiffness', 'f32_s', ()),
+    ('t_motion_backstop_radius', 'f32_s', ()),
+    ('t_radius_lut', 'f32_v16', (16,)),
+    ('t_motion_max_distance_lut', 'f32_v16', (16,)),
+    ('t_motion_backstop_lut', 'f32_v16', (16,)),
+    ('t_bending_stiffness', 'f32_s', ()),
+    ('t_negative_scale_sign', 'f32_s', ()),
+    ('t_negative_scale_direction', 'f32_v3', (3,)),
+    ('t_negative_scale_quaternion', 'f32_v4', (4,)),
+    ('t_is_negative_scale', 'u8_s', ()),
+    ('t_component_world_position', 'f32_v3', (3,)),
+    ('t_component_world_rotation', 'f32_v4', (4,)),
+    ('t_old_component_world_position', 'f32_v3', (3,)),
+    ('t_old_component_world_rotation', 'f32_v4', (4,)),
+    ('t_old_component_world_scale', 'f32_v3', (3,)),
+    ('t_frame_world_position', 'f32_v3', (3,)),
+    ('t_frame_world_rotation', 'f32_v4', (4,)),
+    ('t_frame_world_scale', 'f32_v3', (3,)),
+    ('t_old_frame_world_position', 'f32_v3', (3,)),
+    ('t_old_frame_world_rotation', 'f32_v4', (4,)),
+    ('t_old_frame_world_scale', 'f32_v3', (3,)),
+    ('t_anchor_position', 'f32_v3', (3,)),
+    ('t_anchor_rotation', 'f32_v4', (4,)),
+    ('t_old_anchor_position', 'f32_v3', (3,)),
+    ('t_old_anchor_rotation', 'f32_v4', (4,)),
+    ('t_anchor_component_local_position', 'f32_v3', (3,)),
+    ('t_reset_pending', 'u8_s', ()),
+    ('t_keep_teleport_pending', 'u8_s', ()),
+    ('t_inertia_shift', 'u8_s', ()),
+    ('t_negative_scale_teleport', 'u8_s', ()),
+    ('t_now_world_rotation', 'f32_v4', (4,)),
+    ('t_old_world_rotation', 'f32_v4', (4,)),
+    ('t_step_move_inertia_ratio', 'f32_s', ()),
+    ('t_step_rotation_inertia_ratio', 'f32_s', ()),
+    ('t_local_inertia', 'f32_s', ()),
+    ('t_local_movement_speed_limit', 'f32_s', ()),
+    ('t_local_rotation_speed_limit', 'f32_s', ()),
+    ('t_gravity_dot', 'f32_s', ()),
+    ('t_init_local_gravity_direction', 'f32_v3', (3,)),
+    ('t_gravity_falloff', 'f32_s', ()),
+    ('t_stablization_time', 'f32_s', ()),
+    ('t_blend_weight', 'f32_s', ()),
+    ('t_blend_weight_param', 'f32_s', ()),
+    ('t_distance_weight', 'f32_s', ()),
+    ('t_frame_moving_speed', 'f32_s', ()),
+    ('t_frame_moving_direction', 'f32_v3', (3,)),
+    ('t_moving_wind_direction', 'f32_v3', (3,)),
+    ('t_wind_frequency', 'f32_s', ()),
+    ('t_collision_mode', 'i8_s', ()),
+    ('t_limit_distance_lut', 'f32_v16', (16,)),
+    ('t_negative_scale_matrix', 'f64_m4x4', (4, 4)),
+    ('t_negative_scale_change', 'f32_v3', (3,)),
+    ('t_frame_component_shift_vector', 'f32_v3', (3,)),
+    ('t_frame_component_shift_rotation', 'f32_v4', (4,)),
+    ('t_sync_target', 'i32_s', ()),
+    ('t_sync_top', 'i32_s', ()),
+    ('t_negative_scale_triangle_sign', 'f32_v2', (2,)),
+    ('t_smoothing_velocity', 'f32_v3', (3,)),
+    ('t_has_anchor', 'u8_s', ()),
+    ('t_had_anchor', 'u8_s', ()),
+    ('t_anchor_inertia', 'f32_s', ()),
+    ('t_world_inertia', 'f32_s', ()),
+    ('t_movement_inertia_smoothing', 'f32_s', ()),
+    ('t_movement_speed_limit', 'f32_s', ()),
+    ('t_rotation_speed_limit', 'f32_s', ()),
+    ('t_teleport_mode', 'i8_s', ()),
+    ('t_teleport_distance', 'f32_s', ()),
+    ('t_teleport_rotation', 'f32_s', ()),
+    ('t_culling_invisible', 'u8_s', ()),
+    ('t_wind_direction', 'f32_m4x3', (4, 3)),
+    ('t_wind_zone_id', 'i32_v4', (4,)),
+    ('t_angle_use_limit', 'u8_s', ()),
+    ('t_angle_use_restoration', 'u8_s', ()),
+    ('t_angle_limit_lut', 'f32_v16', (16,)),
+    ('t_angle_limit_stiffness', 'f32_s', ()),
+    ('t_angle_restoration_lut', 'f32_v16', (16,)),
+    ('t_angle_restoration_attenuation', 'f32_s', ()),
+    ('t_angle_restoration_gravity_falloff', 'f32_s', ()),
+    ('t_rotational_interpolation', 'f32_s', ()),
+    ('t_root_rotation', 'f32_s', ()),
+    ('p_team', 'i32_s', ()),
+    ('p_local_positions', 'f32_v3', (3,)),
+    ('p_local_normals', 'f32_v3', (3,)),
+    ('p_local_tangents', 'f32_v3', (3,)),
+    ('p_skin_indices', 'i32_v4', (4,)),
+    ('p_skin_weights', 'f32_v4', (4,)),
+    ('p_positions', 'f32_v3', (3,)),
+    ('p_rotations', 'f32_v4', (4,)),
+    ('p_next_positions', 'f32_v3', (3,)),
+    ('p_velocity_positions', 'f32_v3', (3,)),
+    ('p_step_basic_positions', 'f32_v3', (3,)),
+    ('p_vertex_root', 'i32_s', ()),
+    ('p_old_anim_positions', 'f32_v3', (3,)),
+    ('p_old_anim_rotations', 'f32_v4', (4,)),
+    ('p_base_positions', 'f32_v3', (3,)),
+    ('p_base_rotations', 'f32_v4', (4,)),
+    ('p_step_basic_rotations', 'f32_v4', (4,)),
+    ('p_depth', 'f32_s', ()),
+    ('p_velocities', 'f32_v3', (3,)),
+    ('p_old_positions', 'f32_v3', (3,)),
+    ('p_friction', 'f32_s', ()),
+    ('p_vertex_root_local', 'i32_s', ()),
+    ('p_collision_normals', 'f32_v3', (3,)),
+    ('p_static_friction', 'f32_s', ()),
+    ('p_real_velocities', 'f32_v3', (3,)),
+    ('p_attr_move', 'u8_s', ()),
+    ('p_vertex_local_positions', 'f32_v3', (3,)),
+    ('p_vertex_local_rotations', 'f32_v4', (4,)),
+    ('p_old_rotations', 'f32_v4', (4,)),
+    ('p_display_positions', 'f32_v3', (3,)),
+    ('p_vertex_bind_pose_rotations', 'f32_v4', (4,)),
+    ('p_vertex_parent', 'i32_s', ()),
+    ('p_albuf_length', 'f32_s', ()),
+    ('p_albuf_local_pos', 'f32_v3', (3,)),
+    ('p_albuf_local_rot', 'f32_v4', (4,)),
+    ('p_albuf_restore', 'f32_v3', (3,)),
+    ('p_albuf_rotation', 'f32_v4', (4,)),
+    ('p_uv', 'f32_v2', (2,)),
+    ('p_attr_zero_distance', 'u8_s', ()),
+    ('p_attr_invalid', 'u8_s', ()),
+    ('p_temp_base_positions', 'f32_v3', (3,)),
+    ('p_temp_base_rotations', 'f32_v4', (4,)),
+    ('p_normal_adjustment_rotations', 'f32_v4', (4,)),
+    ('p_vertex_to_transform_rotations', 'f32_v4', (4,)),
+    ('p_out_rotations', 'f32_v4', (4,)),
+    ('x_world', 'f32_m4x4', (4, 4)),
+    ('x_bind', 'f32_m4x4', (4, 4)),
+    ('c_team', 'i32_s', ()),
+    ('c_kind', 'i32_s', ()),
+    ('c_center', 'f32_v3', (3,)),
+    ('c_size', 'f32_v3', (3,)),
+    ('c_axis', 'f32_v3', (3,)),
+    ('c_aligned', 'u8_s', ()),
+    ('c_enabled', 'u8_s', ()),
+    ('c_enabled_prev', 'u8_s', ()),
+    ('c_active', 'u8_s', ()),
+    ('c_input_positions', 'f32_v3', (3,)),
+    ('c_input_rotations', 'f32_v4', (4,)),
+    ('c_input_scales', 'f32_v3', (3,)),
+    ('c_frame_pos', 'f32_v3', (3,)),
+    ('c_frame_rot', 'f32_v4', (4,)),
+    ('c_frame_scl', 'f32_v3', (3,)),
+    ('c_old_frame_pos', 'f32_v3', (3,)),
+    ('c_old_frame_rot', 'f32_v4', (4,)),
+    ('c_now_pos', 'f32_v3', (3,)),
+    ('c_now_rot', 'f32_v4', (4,)),
+    ('c_old_pos', 'f32_v3', (3,)),
+    ('c_old_rot', 'f32_v4', (4,)),
+    ('c_work_radius', 'f32_v2', (2,)),
+    ('c_work_old_pos', 'f32_m2x3', (2, 3)),
+    ('c_work_next_pos', 'f32_m2x3', (2, 3)),
+    ('c_work_rot', 'f32_v4', (4,)),
+    ('c_work_inv_old_rot', 'f32_v4', (4,)),
+    ('c_work_aabb_min', 'f32_v3', (3,)),
+    ('c_work_aabb_max', 'f32_v3', (3,)),
+    ('st_tether_particle', 'i32_s', ()),
+    ('st_tether_team', 'i32_s', ()),
+    ('st_move_particle', 'i32_s', ()),
+    ('st_move_team', 'i32_s', ()),
+    ('st_fixed_particle', 'i32_s', ()),
+    ('st_fixed_team', 'i32_s', ()),
+    ('st_spring_particle', 'i32_s', ()),
+    ('st_spring_team', 'i32_s', ()),
+    ('st_distance_target', 'i32_s', ()),
+    ('st_distance_rest', 'f32_s', ()),
+    ('st_motion_particle', 'i32_s', ()),
+    ('st_motion_team', 'i32_s', ()),
+    ('st_bending_team', 'i32_s', ()),
+    ('st_bending_pair', 'i32_v4', (4,)),
+    ('st_bending_rest', 'f32_s', ()),
+    ('st_bending_sign', 'i8_s', ()),
+    ('st_point_pair_collider', 'i32_s', ()),
+    ('st_edge_pair_collider', 'i32_s', ()),
+    ('st_collision_edge', 'i32_v2', (2,)),
+    ('st_center_fixed_particle', 'i32_s', ()),
+    ('st_angle_buffered_particle', 'i32_s', ()),
+    ('st_triangle_team', 'i32_s', ()),
+    ('st_triangle_particles', 'i32_v3', (3,)),
+    ('st_v2t_triangle', 'i32_s', ()),
+    ('st_v2t_flip_normal', 'f32_s', ()),
+    ('st_v2t_flip_tangent', 'f32_s', ()),
+    ('csr_distance_offsets', 'i32_s', ()),
+    ('csr_distance_order', 'i32_s', ()),
+    ('csr_point_pair_offsets', 'i32_s', ()),
+    ('csr_point_pair_order', 'i32_s', ()),
+    ('csr_edge_pair_offsets', 'i32_s', ()),
+    ('csr_edge_pair_order', 'i32_s', ()),
+    ('csr_center_fixed_offsets', 'i32_s', ()),
+    ('csr_center_fixed_order', 'i32_s', ()),
+    ('csr_v2t_offsets', 'i32_s', ()),
+    ('csr_v2t_order', 'i32_s', ()),
+    ('fk_yes_offsets', 'i32_s', ()),
+    ('fk_yes', 'i32_s', ()),
+    ('fk_yes_parent', 'i32_s', ()),
+    ('fk_no_offsets', 'i32_s', ()),
+    ('fk_no', 'i32_s', ()),
+    ('baseline_entries', 'i32_s', ()),
+    ('angle_pass_offsets', 'i32_s', ()),
+    ('angle_pass_vertices', 'i32_s', ()),
+    ('angle_pass_parents', 'i32_s', ()),
+    ('postline_entry_offsets', 'i32_s', ()),
+    ('postline_entry_vertices', 'i32_s', ()),
+    ('postline_child_offsets', 'i32_s', ()),
+    ('postline_child_vertices', 'i32_s', ()),
+    ('st_display_update_move_mask', 'u8_s', ()),
+    ('sc_dcorr', 'f32_v3', (3,)),
+    ('sc_dcorr_fixed', 'i32_v3', (3,)),
+    ('sc_dcount', 'i32_s', ()),
+    ('sc_col_friction_fixed', 'i32_s', ()),
+    ('sc_col_normal_fixed', 'i32_v3', (3,)),
+    ('sc_sync', 'f32_v22', (22,)),
+    ('sc_tri_normal_f64', 'f64_v3', (3,)),
+    ('sc_tri_tangent_f64', 'f64_v3', (3,)),
+)
+
+ZONE_BLOB_LAYOUT = (
+    ('z_zone_id', 'i32_s', ()),
+    ('z_mode', 'i32_s', ()),
+    ('z_is_addition', 'u8_s', ()),
+    ('z_main', 'f32_s', ()),
+    ('z_turbulence', 'f32_s', ()),
+    ('z_world_position', 'f32_v3', (3,)),
+    ('z_world_direction', 'f32_v3', (3,)),
+    ('z_world_to_local', 'f64_m4x4', (4, 4)),
+    ('z_size', 'f32_v3', (3,)),
+    ('z_zone_volume', 'f32_s', ()),
+    ('z_attenuation_lut', 'f32_v16', (16,)),
 )
