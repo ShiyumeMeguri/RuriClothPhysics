@@ -3470,11 +3470,17 @@ def frame_kernel(phase_mask, sub_begin, sub_end,
             ip_cap = ip_edge.shape[0]
             g = tid
             while g < total_it:
-                task = int32(-1)
-                for kk in range(num_it_slots):
-                    if it_pair_off[kk] <= g and g < it_pair_off[kk + 1]:
-                        task = kk
-                        break
+                # binary search the sorted pair-offset prefix (first kk with it_pair_off[kk+1] > g),
+                # same task the old O(capacity) linear scan found (tail slots are a zero-width plateau).
+                lo = int32(0)
+                hi = num_it_slots
+                while lo < hi:
+                    mid = (lo + hi) >> 1
+                    if it_pair_off[mid + 1] <= g:
+                        lo = mid + 1
+                    else:
+                        hi = mid
+                task = lo
                 tgt_team = it_tri_team[task]
                 # broad_phase + _detect_intersect skip: target grid_size / max primitive size > eps.
                 if t_self_grid_size[tgt_team] > EPSILON and t_self_max_primitive_size[tgt_team] > EPSILON:
@@ -4501,11 +4507,18 @@ def frame_kernel(phase_mask, sub_begin, sub_end,
                 if phase_mask & PHASE_SELF_STEP:
                     g = tid
                     while g < total_ct:
-                        task = int32(-1)
-                        for kk in range(num_ct_slots):
-                            if ct_pair_off[kk] <= g and g < ct_pair_off[kk + 1]:
-                                task = kk
-                                break
+                        # binary search the sorted pair-offset prefix for the task owning global pair g
+                        # (first kk with ct_pair_off[kk+1] > g). Same task the old O(capacity) linear scan
+                        # found -- inactive tail slots are a zero-width plateau at total, and g < total.
+                        lo = int32(0)
+                        hi = num_ct_slots
+                        while lo < hi:
+                            mid = (lo + hi) >> 1
+                            if ct_pair_off[mid + 1] <= g:
+                                lo = mid + 1
+                            else:
+                                hi = mid
+                        task = lo
                         tgt_team = ct_tgt_team[task]
                         if t_self_grid_size[tgt_team] > EPSILON:
                             tgt_count = ct_tgt_count[task]
