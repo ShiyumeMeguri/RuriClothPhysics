@@ -251,6 +251,13 @@ class GpuEngine:
         # slim frames only re-upload config on a genuine host update_params edit.
         self.config_staging._repack_in(world.team)
         self._config_shadow = self.config_staging._host.tobytes()
+        # One CUDA stream + a pinned mirror of the per-frame transform-world matrices, so the slim
+        # production path queues upload -> cooperative launch -> readback on a single stream and pays
+        # one synchronize instead of ~9 blocking pageable transfers (each ~0.1 ms of WDDM overhead).
+        self.stream = cuda.stream()
+        world_field = world.transforms.arrays["world"]
+        self._world_pinned = cuda.pinned_array(
+            (max(self.program.num_transforms, 1),) + world_field.shape[1:], dtype=world_field.dtype)
 
     # ---- wind-zone per-frame upload -----------------------------------------
     def _zone_host(self, zones):
@@ -344,7 +351,7 @@ class GpuEngine:
                 np.float32(power[0]), np.float32(power[1]),
                 np.float32(power[2]), np.float32(power[3]))
 
-    def launch(self, phase_mask, sub_begin, sub_end, frame_globals):
+    def launch(self, phase_mask, sub_begin, sub_end, frame_globals, stream=0):
         fdt, sim_dt, msc, gts, pw0, pw1, pw2, pw3 = self._frame_scalars(frame_globals)
         team_args = [self.team.get(name) for name in kernels.TEAM_KERNEL_FIELDS]
         particle_args = [self.particles.get(name) for name in kernels.PARTICLE_KERNEL_FIELDS]
@@ -362,7 +369,7 @@ class GpuEngine:
                         self.scratch["tri_tangent_f64"]]
         zone_args = [self.zones_dev[name] for name in _ZONE_ARG_ORDER]
         blocks = self._blocks()
-        kernels.frame_kernel[blocks, _THREADS](
+        kernels.frame_kernel[blocks, _THREADS, stream](
             int32(phase_mask), int32(sub_begin), int32(sub_end),
             fdt, sim_dt, msc, gts, pw0, pw1, pw2, pw3,
             *team_args, *particle_args, *transform_args, *collider_args, *static_args,
@@ -384,15 +391,45 @@ class GpuEngine:
         pipeline in a single cooperative launch, read the outputs back into the world."""
         self.load(world)
         if self.io_mode == "slim":
-            self._upload_inputs_slim(world)
-        else:
-            self._upload_inputs(world)
+            self._step_frame_slim(world, frame_globals)
+            return
+        self._upload_inputs(world)
         self.upload_zones(frame_globals.zones)
         self.launch(kernels.ALL_PHASES, 0, self._sub_end(frame_globals), frame_globals)
-        if self.io_mode == "slim":
-            self._download_outputs_slim(world)
-        else:
-            self._download_outputs(world)
+        self._download_outputs(world)
+
+    def _step_frame_slim(self, world, frame_globals):
+        """Production slim path fused on one CUDA stream: queue every per-frame input H2D (from
+        pinned mirrors) + the two upload bridges, the cooperative megakernel, and both output
+        bridges + D2H, then pay a SINGLE stream synchronize before the CPU repacks the pinned
+        outputs. The default stream is in-order, so correctness is identical to the blocking path
+        (dev-harness test_slim_equivalence proves it bit-for-bit); the win is collapsing ~9 blocking
+        pageable transfers into one fenced async batch. Zones/config are byte-fingerprinted and,
+        in steady-state playback, never re-upload; when a value genuinely changes they fire once
+        on the same stream before the launch reads them."""
+        stream = self.stream
+        tblocks, tthreads = self._team_bridge_grid()
+        self.input_staging.upload_async(world.team, self.team, tblocks, tthreads, stream)
+        nt = self.program.num_transforms
+        if nt > 0:
+            self._world_pinned[:nt] = world.transforms.arrays["world"][:nt]
+            self.transforms.device["world"].copy_to_device(self._world_pinned[:nt], stream=stream)
+        if self.collider_input_staging is not None:
+            cblocks, cthreads = self._collider_bridge_grid()
+            self.collider_input_staging.upload_async(
+                world.colliders.arrays, self.colliders, cblocks, cthreads, stream)
+        self._maybe_upload_config(world, tblocks, tthreads, stream)
+        # Zones are byte-fingerprinted: in steady-state playback this is a no-op (never fires), so the
+        # whole slim frame stays on one stream. A genuine zone change re-uploads once (synchronously)
+        # before the launch is queued, so the launch still reads the current zones.
+        self.upload_zones(frame_globals.zones)
+        self.launch(kernels.ALL_PHASES, 0, self._sub_end(frame_globals), frame_globals, stream=stream)
+        pblocks, pthreads = self._particle_bridge_grid()
+        self.particle_out_staging.download_issue(self.particles, pblocks, pthreads, stream)
+        self.feedback_staging.download_issue(self.team, tblocks, tthreads, stream)
+        stream.synchronize()
+        self.particle_out_staging.download_finish(world.particles.arrays)
+        self.feedback_staging.download_finish(world.team)
 
     def step_frame_captured(self, world, frame_globals, capture=None):
         """Same frame as step_frame, but driven as segments so the gate can read any
@@ -484,7 +521,7 @@ class GpuEngine:
             self.collider_input_staging.upload(world.colliders.arrays, self.colliders, cblocks, cthreads)
         self._maybe_upload_config(world, tblocks, tthreads)
 
-    def _maybe_upload_config(self, world, blocks, threads):
+    def _maybe_upload_config(self, world, blocks, threads, stream=0):
         # Byte fingerprint of the config columns; upload only on a genuine host update_params
         # edit. Steady-state playback never touches config, so this is repack + memcmp only.
         self.config_staging._repack_in(world.team)
@@ -492,9 +529,9 @@ class GpuEngine:
         if fingerprint == self._config_shadow:
             return
         self._config_shadow = fingerprint
-        self.config_staging.stage.copy_to_device(self.config_staging._host)
+        self.config_staging.stage.copy_to_device(self.config_staging._host, stream=stream)
         soa = [self.team.device[name] for name in self.config_staging.field_order]
-        self.config_staging._explode[blocks, threads](self.config_staging.stage, *soa)
+        self.config_staging._explode[blocks, threads, stream](self.config_staging.stage, *soa)
 
     def _download_outputs_slim(self, world):
         pblocks, pthreads = self._particle_bridge_grid()

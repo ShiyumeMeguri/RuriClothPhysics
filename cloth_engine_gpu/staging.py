@@ -121,7 +121,11 @@ class StructStaging:
         self.aligned_dtype = _aligned_like(sub_dtype)
         self.count = max(int(count), 1)
         self.stage = cuda.device_array(self.count, self.aligned_dtype)
-        self._host = np.zeros(self.count, self.aligned_dtype)
+        # Page-locked (pinned) host mirror: makes copy_to_device / copy_to_host asynchronous on a
+        # stream (pageable memory forces a blocking sync per transfer), so the slim per-frame IO can
+        # queue all H2D/kernel/D2H ops on one stream and pay a single synchronize instead of ~9.
+        self._host = cuda.pinned_array(self.count, dtype=self.aligned_dtype)
+        self._host[:] = 0
         self._explode, self._implode = _bridge_kernels(self.aligned_dtype)
 
     def _repack_in(self, source):
@@ -152,4 +156,24 @@ class StructStaging:
         soa = [fieldset.device[name] for name in self.field_order]
         self._implode[blocks, threads](self.stage, *soa)
         self.stage.copy_to_host(self._host)
+        self._repack_out(target)
+
+    # ---- async single-stream variants (slim per-frame IO) -------------------
+    def upload_async(self, source, fieldset, blocks, threads, stream):
+        """Same as ``upload`` but queued on ``stream`` (async H2D from the pinned host + explode);
+        no synchronize -- the caller fences the whole frame once."""
+        self._repack_in(source)
+        self.stage.copy_to_device(self._host, stream=stream)
+        soa = [fieldset.device[name] for name in self.field_order]
+        self._explode[blocks, threads, stream](self.stage, *soa)
+
+    def download_issue(self, fieldset, blocks, threads, stream):
+        """Queue implode + async D2H on ``stream`` (no synchronize). Pair with ``download_finish``
+        after the caller's single stream fence to repack the pinned host into ``target``."""
+        soa = [fieldset.device[name] for name in self.field_order]
+        self._implode[blocks, threads, stream](self.stage, *soa)
+        self.stage.copy_to_host(self._host, stream=stream)
+
+    def download_finish(self, target):
+        """CPU repack of the pinned host mirror into ``target`` (call only after the stream fence)."""
         self._repack_out(target)
