@@ -19,6 +19,7 @@ from cloth_kernel import defs as _defs
 
 from . import device
 from . import kernels
+from . import staging
 from .program import build_program
 
 _MAX_COOP_BLOCKS = 544
@@ -32,11 +33,35 @@ _ZONE_ARG_ORDER = ("zone_id", "mode", "is_addition", "main", "turbulence",
                    "world_position", "world_direction", "world_to_local",
                    "size", "zone_volume", "attenuation_lut")
 
+# Phase-bit groups matching the megakernel body layout: [frame-pre][for _k in
+# range(sub_begin,sub_end): substep][frame-post]. A full frame is one launch of
+# ALL_PHASES over (0, MAX_SIM_COUNT); the captured path fires the same kernel as
+# frame-pre-only -> per-substep -> frame-post-only segments (the phase gates mask the
+# WORK while every grid.sync barrier still runs, and a kernel boundary is a strictly
+# stronger memory fence than grid.sync, so segmented == single bit-for-bit).
+FRAME_PRE_PHASES = int(kernels.PHASE_SYNC | kernels.PHASE_ADVANCE | kernels.PHASE_BASE_POSE
+                       | kernels.PHASE_CENTER | kernels.PHASE_PARTICLES_PRE
+                       | kernels.PHASE_COLLIDER_PRE)
+STEP_PHASES = int(kernels.PHASE_TEAM_STEP | kernels.PHASE_COLLIDER_START
+                  | kernels.PHASE_PARTICLES_STEP | kernels.PHASE_BASELINE | kernels.PHASE_TETHER
+                  | kernels.PHASE_DISTANCE_A | kernels.PHASE_ANGLE | kernels.PHASE_BENDING
+                  | kernels.PHASE_COLLIDER_SOLVE | kernels.PHASE_DISTANCE_B | kernels.PHASE_MOTION
+                  | kernels.PHASE_STEP_POST | kernels.PHASE_COLLIDER_END)
+FRAME_POST_PHASES = int(kernels.PHASE_DISPLAY | kernels.PHASE_COLLIDER_POST
+                        | kernels.PHASE_TEAM_POST)
+
+# team structural columns (chunk pointers + valid) -- register/unregister move these;
+# collider/pair CONTENT is folded in separately so a same-count collider rebind (which
+# can reuse the freed [start,count) block, leaving these columns untouched) is still caught.
+_STRUCT_TEAM_COLUMNS = ("valid", "p_start", "p_count", "t_start", "t_count",
+                        "c_start", "c_count", "sp_start", "sp_count",
+                        "se_start", "se_count", "st_start", "st_count")
+
 
 class GpuEngine:
     def __init__(self, world):
         self.world = None
-        self.generation = None
+        self.signature = None
         self.program = None
         self.team = None
         self.particles = None
@@ -46,19 +71,47 @@ class GpuEngine:
 
     # ---- lifecycle ----------------------------------------------------------
     @staticmethod
-    def _generation(world):
-        return (id(world), len(world.entries),
-                int(world.team["p_start"].sum()), int(world.team["p_count"].sum()))
+    def _structure_signature(world):
+        """Cheap structural fingerprint of the resident Program layout. Reload when it
+        changes. Covers every mutation that invalidates the device Program:
+
+        * register_team / unregister_team -> team count and the chunk-pointer columns move
+          (and any team grow lengthens the column bytes);
+        * update_colliders -> the collider static table (kind/center/size/axis/aligned) and
+          the point/edge-pair mapping are rebuilt. A same-count rebind can reuse the freed
+          [start,count) block, leaving the team columns byte-identical, so the collider and
+          pair CONTENT is hashed in directly rather than trusting the chunk pointers.
+
+        Pure per-frame state (positions, time, world matrices, params via update_params /
+        request_reset / add_force) is deliberately excluded, so a running scenario never
+        triggers a spurious reload. Byte equality is exact -- no hash-collision blind spot."""
+        team = world.team
+        parts = [len(team).to_bytes(8, "little")]
+        for name in _STRUCT_TEAM_COLUMNS:
+            parts.append(np.ascontiguousarray(team[name]).tobytes())
+        colliders = world.colliders.arrays
+        for name in ("team", "kind", "center", "size", "axis", "aligned"):
+            parts.append(colliders[name].tobytes())
+        point_pairs = world.point_pairs.arrays
+        for name in ("team", "particle", "collider"):
+            parts.append(point_pairs[name].tobytes())
+        edge_pairs = world.edge_pairs.arrays
+        for name in ("team", "edge", "collider"):
+            parts.append(edge_pairs[name].tobytes())
+        return b"".join(parts)
 
     def load(self, world):
-        generation = self._generation(world)
-        if self.world is world and self.generation == generation:
+        signature = self._structure_signature(world)
+        if self.world is world and self.signature == signature:
             return
         self.world = world
-        self.generation = generation
+        self.signature = signature
         self.program = build_program(world)
         self.team = device.FieldSet(device.dump_struct(world.team, self.program.num_teams),
                                     self.program.num_teams)
+        # Whole-team round-trip goes as one blob transfer + a struct<->SoA bridge kernel,
+        # not 167 per-field transfers (measured 20 ms -> ~1 ms; see staging.py).
+        self.team_staging = staging.StructStaging(world.team.dtype, self.program.num_teams)
         self.particles = device.FieldSet(device.dump_arena(world.particles, self.program.num_particles),
                                          self.program.num_particles)
         self.colliders = device.FieldSet(device.dump_arena(world.colliders, self.program.num_colliders),
@@ -198,41 +251,78 @@ class GpuEngine:
             *team_args, *particle_args, *transform_args, *collider_args, *static_args,
             *csr_args, *direct_args, *scratch_args, int32(self.n_zones), *zone_args)
 
-    # ---- production API (grows as phases land) ------------------------------
+    # ---- production API -----------------------------------------------------
     def step_frame(self, world, frame_globals):
+        """One host frame: upload this frame's host-mutated inputs, run the whole
+        pipeline in a single cooperative launch, read the outputs back into the world."""
         self.load(world)
         self._upload_inputs(world)
         self.upload_zones(frame_globals.zones)
         self.launch(kernels.ALL_PHASES, 0, kernels.MAX_SIM_COUNT, frame_globals)
         self._download_outputs(world)
 
-    def step_frame_captured(self, world, frame_globals):
-        # segmented launch for per-substep assertions: (pre,0,0) then per-k, then post.
+    def step_frame_captured(self, world, frame_globals, capture=None):
+        """Same frame as step_frame, but driven as segments so the gate can read any
+        field between segments (frame-pre, each substep, frame-post). ``capture`` is an
+        iterable of ``(fieldset_name, field_name)`` snapshotted at every boundary; the
+        returned dict is ``{"frame_pre":..., "substeps":[...per k...], "frame_post":...}``.
+        The device end-state is bit-identical to step_frame (same kernel, same phase
+        order); the multi-frame loop still lives in the host (never one launch per frame,
+        to stay under the 2 s TDR)."""
         self.load(world)
         self._upload_inputs(world)
         self.upload_zones(frame_globals.zones)
-        self.launch(kernels.ALL_PHASES, 0, kernels.MAX_SIM_COUNT, frame_globals)
+        captured = self.launch_segmented(frame_globals, capture)
         self._download_outputs(world)
+        return captured
 
-    # input/output field routing (extended as phases land). During bring-up the
-    # dev-harness uses upload_all/download_* instead, so these stay minimal + honest.
-    _INPUT_TEAM_FIELDS = ("enabled", "valid", "component_world_position",
-                          "component_world_rotation", "component_world_scale",
-                          "culling_invisible", "distance_weight", "sync_target",
-                          "has_anchor", "anchor_position", "anchor_rotation",
-                          "force_mode", "impact_force", "time_scale")
-    _OUTPUT_PARTICLE_FIELDS = ("positions", "out_rotations", "velocities", "display_positions")
-    _OUTPUT_TEAM_FIELDS = ("wind_count", "wind_zone_id")
+    def launch_segmented(self, frame_globals, capture=None):
+        captured = {"frame_pre": None, "substeps": [], "frame_post": None}
+        self.launch(FRAME_PRE_PHASES, 0, 0, frame_globals)
+        if capture is not None:
+            captured["frame_pre"] = self._capture_fields(capture)
+        for k in range(kernels.MAX_SIM_COUNT):
+            self.launch(STEP_PHASES, k, k + 1, frame_globals)
+            if capture is not None:
+                captured["substeps"].append(self._capture_fields(capture))
+        self.launch(FRAME_POST_PHASES, 0, 0, frame_globals)
+        if capture is not None:
+            captured["frame_post"] = self._capture_fields(capture)
+        return captured
+
+    def _capture_fields(self, capture):
+        snapshot = {}
+        for fieldset_name, field_name in capture:
+            snapshot[(fieldset_name, field_name)] = getattr(self, fieldset_name).download(field_name)
+        return snapshot
+
+    # Per-frame upload is the zero-missed-field superset: the whole team struct (the host
+    # may touch any team field via set_team_frame_input / update_params / request_reset /
+    # add_force between frames), the transform world matrices, and the collider host inputs.
+    # Particles are never host-mutated post-registration, so they stay resident (uploaded
+    # once at load / reload) and are only read back.
+    _OUTPUT_PARTICLE_FIELDS = ("positions", "out_rotations", "velocities")
+
+    def _team_bridge_grid(self):
+        blocks = (max(self.program.num_teams, 1) + _THREADS - 1) // _THREADS
+        return blocks, _THREADS
 
     def _upload_inputs(self, world):
-        self.team.upload_many(device.dump_struct(world.team, self.program.num_teams),
-                              [n for n in self._INPUT_TEAM_FIELDS if n in self.team.device])
-        self.transforms.upload_many(device.dump_arena(world.transforms, self.program.num_transforms),
-                                    ["world"])
-        self.colliders.upload_many(device.dump_arena(world.colliders, self.program.num_colliders),
-                                   [n for n in ("input_positions", "input_rotations", "input_scales",
-                                                "enabled") if n in self.colliders.device])
+        blocks, threads = self._team_bridge_grid()
+        self.team_staging.upload(world.team, self.team, blocks, threads)
+        # Only the host-mutated arena fields, sliced directly (no full-arena dump): the
+        # transform world matrices and the collider host inputs. Everything else the arenas
+        # hold is either static (uploaded at load) or GPU-resident.
+        self.transforms.upload("world", world.transforms.arrays["world"][:self.program.num_transforms])
+        collider_arrays = world.colliders.arrays
+        for name in ("input_positions", "input_rotations", "input_scales", "enabled"):
+            if name in self.colliders.device:
+                self.colliders.upload(name, collider_arrays[name][:self.program.num_colliders])
 
     def _download_outputs(self, world):
+        # Whole team read back so the CPU stays a byte-exact mirror of the resident GPU
+        # team (next frame's full-team upload must not clobber GPU state with stale CPU
+        # values); particles limited to the production output fields io.team_output needs.
+        blocks, threads = self._team_bridge_grid()
+        self.team_staging.download(world.team, self.team, blocks, threads)
         self.download_particles(world, list(self._OUTPUT_PARTICLE_FIELDS))
-        self.download_team(world, list(self._OUTPUT_TEAM_FIELDS))
