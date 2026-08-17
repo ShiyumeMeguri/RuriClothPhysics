@@ -2155,7 +2155,7 @@ def frame_kernel(phase_mask, sub_begin, sub_end,
     # ----- FRAME-PRE -----
     # T0 team_time.resolve_sync (per ENABLED team; gate = enabled only, not the
     # frame mask). Pass a: resolve sync_top by climbing sync_target (<=8 hops).
-    if phase_mask & PHASE_SYNC:
+    if bid == 0 and (phase_mask & PHASE_SYNC) != 0:
         i = tid
         while i < num_teams:
             if t_enabled[i] != 0:
@@ -2170,11 +2170,11 @@ def frame_kernel(phase_mask, sub_begin, sub_end,
                             break
                         top = upper
                     t_sync_top[i] = top
-            i += stride
-    grid.sync()
+            i += bdim
+    cuda.syncthreads()
     # Pass b: snapshot each child's sync_top row (the gather RHS) into sc_sync so
     # the write pass reads pre-gather values (mutual-sync A<->B swap is race-safe).
-    if phase_mask & PHASE_SYNC:
+    if bid == 0 and (phase_mask & PHASE_SYNC) != 0:
         i = tid
         while i < num_teams:
             if t_enabled[i] != 0 and t_sync_top[i] > 0:
@@ -2201,10 +2201,10 @@ def frame_kernel(phase_mask, sub_begin, sub_end,
                 sc_sync[i, 19] = t_component_world_rotation[top, 1]
                 sc_sync[i, 20] = t_component_world_rotation[top, 2]
                 sc_sync[i, 21] = t_component_world_rotation[top, 3]
-            i += stride
-    grid.sync()
+            i += bdim
+    cuda.syncthreads()
     # Pass c: write children from the snapshot.
-    if phase_mask & PHASE_SYNC:
+    if bid == 0 and (phase_mask & PHASE_SYNC) != 0:
         i = tid
         while i < num_teams:
             if t_enabled[i] != 0 and t_sync_top[i] > 0:
@@ -2230,7 +2230,7 @@ def frame_kernel(phase_mask, sub_begin, sub_end,
                 t_component_world_rotation[i, 1] = sc_sync[i, 19]
                 t_component_world_rotation[i, 2] = sc_sync[i, 20]
                 t_component_world_rotation[i, 3] = sc_sync[i, 21]
-            i += stride
+            i += bdim
     grid.sync()
 
     if phase_mask & PHASE_ADVANCE:
@@ -3297,9 +3297,13 @@ def frame_kernel(phase_mask, sub_begin, sub_end,
                 e += stride
         grid.sync()
 
-        # --- S4 baseline.run FK: per-level grid.sync wall (parent written at level < L) ---
+        # --- S4 baseline.run FK: block-0 walks all levels (yes then no per level) with
+        # __syncthreads() between them instead of a grid.sync (parent step_basic of level L was
+        # written at level < L; the intra-block barrier keeps that read-before-write order). Each
+        # vertex's write is unique, so the 7-block-stride -> block-0-stride move is bit-exact; max
+        # level = 92 < blockDim. Blocks != 0 skip the work and wait at the single exit wall. ---
         for lvl in range(num_fk_levels):
-            if phase_mask & PHASE_BASELINE:
+            if bid == 0 and (phase_mask & PHASE_BASELINE) != 0:
                 ys = fk_yes_offsets[lvl]
                 ye = fk_yes_offsets[lvl + 1]
                 i = ys + tid
@@ -3333,12 +3337,12 @@ def frame_kernel(phase_mask, sub_begin, sub_end,
                         p_step_basic_rotations[v, 1] = qy
                         p_step_basic_rotations[v, 2] = qz
                         p_step_basic_rotations[v, 3] = qw
-                    i += stride
-            grid.sync()
+                    i += bdim
+            cuda.syncthreads()
             # oracle applies each level's yes (skin from parent) BEFORE its no (negative-
             # scale root flip); a root can be both a parent here and a no-entry, so the
             # yes reads must complete before the no writes.
-            if phase_mask & PHASE_BASELINE:
+            if bid == 0 and (phase_mask & PHASE_BASELINE) != 0:
                 ns = fk_no_offsets[lvl]
                 ne = fk_no_offsets[lvl + 1]
                 i = ns + tid
@@ -3367,8 +3371,11 @@ def frame_kernel(phase_mask, sub_begin, sub_end,
                         p_step_basic_rotations[v, 1] = lqy
                         p_step_basic_rotations[v, 2] = lqz
                         p_step_basic_rotations[v, 3] = lqw
-                    i += stride
-            grid.sync()
+                    i += bdim
+            cuda.syncthreads()
+        grid.sync()
+        # baseline apply (animation_pose_ratio blend) stays a multi-block grid-stride pass over
+        # all entries; the grid.sync above made block 0's FK writes globally visible first.
         if phase_mask & PHASE_BASELINE:
             i = tid
             while i < n_baseline:
@@ -4090,8 +4097,11 @@ def frame_kernel(phase_mask, sub_begin, sub_end,
                                     t_negative_scale_direction)
             p += stride
     grid.sync()
+    # Block-0 walks the postline levels with __syncthreads(): children sit one level below the
+    # entry, so the level barrier keeps child-writes visible to the parent-entry read; each
+    # entry's write is unique (owner-grouped CSR), so block-0-stride is bit-exact (max level 28).
     for lvl in range(num_postline_levels):
-        if phase_mask & PHASE_DISPLAY:
+        if bid == 0 and (phase_mask & PHASE_DISPLAY) != 0:
             pl_start = postline_entry_offsets[lvl]
             pl_end = postline_entry_offsets[lvl + 1]
             i = pl_start + tid
@@ -4108,8 +4118,9 @@ def frame_kernel(phase_mask, sub_begin, sub_end,
                                       t_rotational_interpolation, t_root_rotation, t_blend_weight,
                                       t_animation_pose_ratio, t_negative_scale_direction,
                                       t_negative_scale_quaternion)
-                i += stride
-        grid.sync()
+                i += bdim
+        cuda.syncthreads()
+    grid.sync()
     if phase_mask & PHASE_DISPLAY:
         tri_idx = tid
         while tri_idx < num_triangles:
