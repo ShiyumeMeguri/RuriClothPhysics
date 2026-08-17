@@ -44,8 +44,28 @@ PHASE_SYNC = int32(1 << 18)          # T0 team_time.resolve_sync (frame-pre, per
 PHASE_CENTER = int32(1 << 19)        # C0 center.run + select_team_wind (frame-pre, per-team)
 PHASE_ANGLE = int32(1 << 20)         # S7 angle.run (substep; limit + restoration passes)
 PHASE_DISPLAY = int32(1 << 21)       # F2 display.run (frame-post; _display/_postline/_post_triangles/_output)
+PHASE_SELF_BEGIN = int32(1 << 22)    # G3a self_collision.frame_begin intersect broad-phase (frame-pre)
+PHASE_SELF_STEP = int32(1 << 23)     # G3a self_collision.step (substep; update_primitives+detect / update / solve)
+PHASE_SELF_END = int32(1 << 24)      # G3a self_collision.frame_end intersect narrow-phase (frame-post)
 
 ALL_PHASES = int32(-1)
+
+# self-collision constants (mirror cloth_kernel.defs); n^2 broad-phase per D1.
+SELF_COLLISION_SCR = float32(2.0)
+SELF_COLLISION_SOLVER_ITERATION = 4
+SELF_COLLISION_INTERSECT_DIV = int32(2)
+SELF_COLLISION_UNIFORM_GRID_SCALE = float32(3.0)
+SELF_COLLISION_FIXED_MASS = float32(100.0)
+SELF_COLLISION_FRICTION_MASS = float32(10.0)
+SELF_COLLISION_CLOTH_MASS = float32(50.0)
+SELF_COLLISION_POINT_TRIANGLE_ANGLE_COS = float32(math.cos(math.radians(60.0)))
+# scl_counts[] index layout (single i32 array; kernel atomics on [0]/[1]/[2], reads [3]/[4]/[5]).
+SCL_EE_COUNT = 0
+SCL_PT_COUNT = 1
+SCL_IP_COUNT = 2
+SCL_ERROR = 3
+SCL_USE_INTERSECT = 4
+SCL_FRAME_INDEX = 5
 
 MAX_SIM_COUNT = 5
 
@@ -2344,6 +2364,91 @@ def frame_kernel(phase_mask, sub_begin, sub_end,
     sc_sync = blob_f32_v22[offs[275]:offs[275] + lens[275]]
     sc_tri_normal_f64 = blob_f64_v3[offs[276]:offs[276] + lens[276]]
     sc_tri_tangent_f64 = blob_f64_v3[offs[277]:offs[277] + lens[277]]
+    sfp_team = blob_i32_s[offs[278]:offs[278] + lens[278]]
+    sfp_particles = blob_i32_v3[offs[279]:offs[279] + lens[279]]
+    sfp_fix = blob_u8_s[offs[280]:offs[280] + lens[280]]
+    sfp_all_fix = blob_u8_s[offs[281]:offs[281] + lens[281]]
+    sfp_ignore = blob_u8_s[offs[282]:offs[282] + lens[282]]
+    sfp_prim_depth = blob_f32_s[offs[283]:offs[283] + lens[283]]
+    sfp_inv_mass = blob_f32_v3[offs[284]:offs[284] + lens[284]]
+    sfp_thickness = blob_f32_s[offs[285]:offs[285] + lens[285]]
+    sfp_aabb_min = blob_f32_v3[offs[286]:offs[286] + lens[286]]
+    sfp_aabb_max = blob_f32_v3[offs[287]:offs[287] + lens[287]]
+    sfp_intersect = blob_u8_s[offs[288]:offs[288] + lens[288]]
+    sfp_use = blob_u8_s[offs[289]:offs[289] + lens[289]]
+    sfe_team = blob_i32_s[offs[290]:offs[290] + lens[290]]
+    sfe_particles = blob_i32_v3[offs[291]:offs[291] + lens[291]]
+    sfe_fix = blob_u8_s[offs[292]:offs[292] + lens[292]]
+    sfe_all_fix = blob_u8_s[offs[293]:offs[293] + lens[293]]
+    sfe_ignore = blob_u8_s[offs[294]:offs[294] + lens[294]]
+    sfe_prim_depth = blob_f32_s[offs[295]:offs[295] + lens[295]]
+    sfe_inv_mass = blob_f32_v3[offs[296]:offs[296] + lens[296]]
+    sfe_thickness = blob_f32_s[offs[297]:offs[297] + lens[297]]
+    sfe_aabb_min = blob_f32_v3[offs[298]:offs[298] + lens[298]]
+    sfe_aabb_max = blob_f32_v3[offs[299]:offs[299] + lens[299]]
+    sfe_intersect = blob_u8_s[offs[300]:offs[300] + lens[300]]
+    sfe_use = blob_u8_s[offs[301]:offs[301] + lens[301]]
+    sft_team = blob_i32_s[offs[302]:offs[302] + lens[302]]
+    sft_particles = blob_i32_v3[offs[303]:offs[303] + lens[303]]
+    sft_fix = blob_u8_s[offs[304]:offs[304] + lens[304]]
+    sft_all_fix = blob_u8_s[offs[305]:offs[305] + lens[305]]
+    sft_ignore = blob_u8_s[offs[306]:offs[306] + lens[306]]
+    sft_prim_depth = blob_f32_s[offs[307]:offs[307] + lens[307]]
+    sft_inv_mass = blob_f32_v3[offs[308]:offs[308] + lens[308]]
+    sft_thickness = blob_f32_s[offs[309]:offs[309] + lens[309]]
+    sft_aabb_min = blob_f32_v3[offs[310]:offs[310] + lens[310]]
+    sft_aabb_max = blob_f32_v3[offs[311]:offs[311] + lens[311]]
+    sft_intersect = blob_u8_s[offs[312]:offs[312] + lens[312]]
+    sft_use = blob_u8_s[offs[313]:offs[313] + lens[313]]
+    t_use_point = blob_u8_s[offs[314]:offs[314] + lens[314]]
+    t_use_edge = blob_u8_s[offs[315]:offs[315] + lens[315]]
+    t_use_triangle = blob_u8_s[offs[316]:offs[316] + lens[316]]
+    t_self_grid_size = blob_f32_s[offs[317]:offs[317] + lens[317]]
+    t_self_max_primitive_size = blob_f32_s[offs[318]:offs[318] + lens[318]]
+    t_self_mode = blob_i8_s[offs[319]:offs[319] + lens[319]]
+    t_sync_mode = blob_i8_s[offs[320]:offs[320] + lens[320]]
+    t_self_thickness_lut = blob_f32_v16[offs[321]:offs[321] + lens[321]]
+    t_self_cloth_mass = blob_f32_s[offs[322]:offs[322] + lens[322]]
+    t_sp_start = blob_i32_s[offs[323]:offs[323] + lens[323]]
+    t_sp_count = blob_i32_s[offs[324]:offs[324] + lens[324]]
+    t_se_start = blob_i32_s[offs[325]:offs[325] + lens[325]]
+    t_se_count = blob_i32_s[offs[326]:offs[326] + lens[326]]
+    t_st_start = blob_i32_s[offs[327]:offs[327] + lens[327]]
+    t_st_count = blob_i32_s[offs[328]:offs[328] + lens[328]]
+    p_intersect_flag = blob_u8_s[offs[329]:offs[329] + lens[329]]
+    ee_my = blob_i32_s[offs[330]:offs[330] + lens[330]]
+    ee_target = blob_i32_s[offs[331]:offs[331] + lens[331]]
+    ee_thickness = blob_f32_s[offs[332]:offs[332] + lens[332]]
+    ee_s = blob_f32_s[offs[333]:offs[333] + lens[333]]
+    ee_t = blob_f32_s[offs[334]:offs[334] + lens[334]]
+    ee_n = blob_f32_v3[offs[335]:offs[335] + lens[335]]
+    ee_enable = blob_u8_s[offs[336]:offs[336] + lens[336]]
+    pt_my = blob_i32_s[offs[337]:offs[337] + lens[337]]
+    pt_target = blob_i32_s[offs[338]:offs[338] + lens[338]]
+    pt_thickness = blob_f32_s[offs[339]:offs[339] + lens[339]]
+    pt_sign = blob_f32_s[offs[340]:offs[340] + lens[340]]
+    pt_enable = blob_u8_s[offs[341]:offs[341] + lens[341]]
+    scl_counts = blob_i32_s[offs[342]:offs[342] + lens[342]]
+    ct_kind = blob_i32_s[offs[343]:offs[343] + lens[343]]
+    ct_my_team = blob_i32_s[offs[344]:offs[344] + lens[344]]
+    ct_my_start = blob_i32_s[offs[345]:offs[345] + lens[345]]
+    ct_my_count = blob_i32_s[offs[346]:offs[346] + lens[346]]
+    ct_tgt_team = blob_i32_s[offs[347]:offs[347] + lens[347]]
+    ct_tgt_start = blob_i32_s[offs[348]:offs[348] + lens[348]]
+    ct_tgt_count = blob_i32_s[offs[349]:offs[349] + lens[349]]
+    ct_same = blob_u8_s[offs[350]:offs[350] + lens[350]]
+    ct_pair_off = blob_i32_s[offs[351]:offs[351] + lens[351]]
+    it_edge_team = blob_i32_s[offs[352]:offs[352] + lens[352]]
+    it_edge_start = blob_i32_s[offs[353]:offs[353] + lens[353]]
+    it_edge_count = blob_i32_s[offs[354]:offs[354] + lens[354]]
+    it_tri_team = blob_i32_s[offs[355]:offs[355] + lens[355]]
+    it_tri_start = blob_i32_s[offs[356]:offs[356] + lens[356]]
+    it_tri_count = blob_i32_s[offs[357]:offs[357] + lens[357]]
+    it_same = blob_u8_s[offs[358]:offs[358] + lens[358]]
+    it_pair_off = blob_i32_s[offs[359]:offs[359] + lens[359]]
+    ip_edge = blob_i32_s[offs[360]:offs[360] + lens[360]]
+    ip_tri = blob_i32_s[offs[361]:offs[361] + lens[361]]
+    scl_max_fixed = blob_i32_s[offs[362]:offs[362] + lens[362]]
     z_zone_id = zone_i32_s[zone_offs[0]:zone_offs[0] + zone_lens[0]]
     z_mode = zone_i32_s[zone_offs[1]:zone_offs[1] + zone_lens[1]]
     z_is_addition = zone_u8_s[zone_offs[2]:zone_offs[2] + zone_lens[2]]
@@ -4568,6 +4673,38 @@ STATIC_DIRECT_FIELDS = (
     "postline_child_offsets", "postline_child_vertices", "display_update_move_mask",
 )
 
+# ---- G3a self-collision registration (appended to the ordered field list AFTER scratch, so every
+# new slot takes a fresh tail index and no existing preamble slice / layout row moves) ------------
+# Primitive arena fields the kernel consumes (self_points / self_edges / self_triangles share this
+# layout). cell_key is NOT registered (D1: n^2 AABB pair test, no uniform grid). fix / intersect are
+# packed host-side into a u8 bitmask (bit0/1/2) so no new (u8, (3,)) blob group is introduced.
+PRIMITIVE_KERNEL_FIELDS = (
+    "team", "particles", "fix", "all_fix", "ignore", "prim_depth",
+    "inv_mass", "thickness", "aabb_min", "aabb_max", "intersect", "use",
+)
+# team self-collision fields (kernel-read config / structure + kernel-written grid sizes).
+SELF_TEAM_KERNEL_FIELDS = (
+    "use_point", "use_edge", "use_triangle", "self_grid_size", "self_max_primitive_size",
+    "self_mode", "sync_mode", "self_thickness_lut", "self_cloth_mass",
+    "sp_start", "sp_count", "se_start", "se_count", "st_start", "st_count",
+)
+# particle self-collision fields (intersect flag set by frame_end, read by update_primitives).
+SELF_PARTICLE_KERNEL_FIELDS = ("intersect_flag",)
+# self-collision device state buffers (host-sized capacities): EE/PT contact tables, atomic counters,
+# host-built contact/intersect task tables (uploaded each frame), the intersect-pair table, and the
+# per-team fixed-point max-primitive-size accumulator. Order == engine._self_state_ordered().
+SELF_STATE_KERNEL_FIELDS = (
+    "ee_my", "ee_target", "ee_thickness", "ee_s", "ee_t", "ee_n", "ee_enable",
+    "pt_my", "pt_target", "pt_thickness", "pt_sign", "pt_enable",
+    "scl_counts",
+    "ct_kind", "ct_my_team", "ct_my_start", "ct_my_count", "ct_tgt_team", "ct_tgt_start",
+    "ct_tgt_count", "ct_same", "ct_pair_off",
+    "it_edge_team", "it_edge_start", "it_edge_count", "it_tri_team", "it_tri_start",
+    "it_tri_count", "it_same", "it_pair_off",
+    "ip_edge", "ip_tri",
+    "scl_max_fixed",
+)
+
 
 # ---- G2e-7 blob aggregation registry (cache-preserving group-by-shape) ---------------------
 # The megakernel takes one contiguous device blob per (dtype-family, per-row-shape) group, so
@@ -4886,6 +5023,91 @@ RESIDENT_BLOB_LAYOUT = (
     ('sc_sync', 'f32_v22', (22,)),
     ('sc_tri_normal_f64', 'f64_v3', (3,)),
     ('sc_tri_tangent_f64', 'f64_v3', (3,)),
+    ('sfp_team', 'i32_s', ()),
+    ('sfp_particles', 'i32_v3', (3,)),
+    ('sfp_fix', 'u8_s', ()),
+    ('sfp_all_fix', 'u8_s', ()),
+    ('sfp_ignore', 'u8_s', ()),
+    ('sfp_prim_depth', 'f32_s', ()),
+    ('sfp_inv_mass', 'f32_v3', (3,)),
+    ('sfp_thickness', 'f32_s', ()),
+    ('sfp_aabb_min', 'f32_v3', (3,)),
+    ('sfp_aabb_max', 'f32_v3', (3,)),
+    ('sfp_intersect', 'u8_s', ()),
+    ('sfp_use', 'u8_s', ()),
+    ('sfe_team', 'i32_s', ()),
+    ('sfe_particles', 'i32_v3', (3,)),
+    ('sfe_fix', 'u8_s', ()),
+    ('sfe_all_fix', 'u8_s', ()),
+    ('sfe_ignore', 'u8_s', ()),
+    ('sfe_prim_depth', 'f32_s', ()),
+    ('sfe_inv_mass', 'f32_v3', (3,)),
+    ('sfe_thickness', 'f32_s', ()),
+    ('sfe_aabb_min', 'f32_v3', (3,)),
+    ('sfe_aabb_max', 'f32_v3', (3,)),
+    ('sfe_intersect', 'u8_s', ()),
+    ('sfe_use', 'u8_s', ()),
+    ('sft_team', 'i32_s', ()),
+    ('sft_particles', 'i32_v3', (3,)),
+    ('sft_fix', 'u8_s', ()),
+    ('sft_all_fix', 'u8_s', ()),
+    ('sft_ignore', 'u8_s', ()),
+    ('sft_prim_depth', 'f32_s', ()),
+    ('sft_inv_mass', 'f32_v3', (3,)),
+    ('sft_thickness', 'f32_s', ()),
+    ('sft_aabb_min', 'f32_v3', (3,)),
+    ('sft_aabb_max', 'f32_v3', (3,)),
+    ('sft_intersect', 'u8_s', ()),
+    ('sft_use', 'u8_s', ()),
+    ('t_use_point', 'u8_s', ()),
+    ('t_use_edge', 'u8_s', ()),
+    ('t_use_triangle', 'u8_s', ()),
+    ('t_self_grid_size', 'f32_s', ()),
+    ('t_self_max_primitive_size', 'f32_s', ()),
+    ('t_self_mode', 'i8_s', ()),
+    ('t_sync_mode', 'i8_s', ()),
+    ('t_self_thickness_lut', 'f32_v16', (16,)),
+    ('t_self_cloth_mass', 'f32_s', ()),
+    ('t_sp_start', 'i32_s', ()),
+    ('t_sp_count', 'i32_s', ()),
+    ('t_se_start', 'i32_s', ()),
+    ('t_se_count', 'i32_s', ()),
+    ('t_st_start', 'i32_s', ()),
+    ('t_st_count', 'i32_s', ()),
+    ('p_intersect_flag', 'u8_s', ()),
+    ('ee_my', 'i32_s', ()),
+    ('ee_target', 'i32_s', ()),
+    ('ee_thickness', 'f32_s', ()),
+    ('ee_s', 'f32_s', ()),
+    ('ee_t', 'f32_s', ()),
+    ('ee_n', 'f32_v3', (3,)),
+    ('ee_enable', 'u8_s', ()),
+    ('pt_my', 'i32_s', ()),
+    ('pt_target', 'i32_s', ()),
+    ('pt_thickness', 'f32_s', ()),
+    ('pt_sign', 'f32_s', ()),
+    ('pt_enable', 'u8_s', ()),
+    ('scl_counts', 'i32_s', ()),
+    ('ct_kind', 'i32_s', ()),
+    ('ct_my_team', 'i32_s', ()),
+    ('ct_my_start', 'i32_s', ()),
+    ('ct_my_count', 'i32_s', ()),
+    ('ct_tgt_team', 'i32_s', ()),
+    ('ct_tgt_start', 'i32_s', ()),
+    ('ct_tgt_count', 'i32_s', ()),
+    ('ct_same', 'u8_s', ()),
+    ('ct_pair_off', 'i32_s', ()),
+    ('it_edge_team', 'i32_s', ()),
+    ('it_edge_start', 'i32_s', ()),
+    ('it_edge_count', 'i32_s', ()),
+    ('it_tri_team', 'i32_s', ()),
+    ('it_tri_start', 'i32_s', ()),
+    ('it_tri_count', 'i32_s', ()),
+    ('it_same', 'u8_s', ()),
+    ('it_pair_off', 'i32_s', ()),
+    ('ip_edge', 'i32_s', ()),
+    ('ip_tri', 'i32_s', ()),
+    ('scl_max_fixed', 'i32_s', ()),
 )
 
 ZONE_BLOB_LAYOUT = (

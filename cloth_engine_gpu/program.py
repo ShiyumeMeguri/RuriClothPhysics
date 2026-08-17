@@ -96,6 +96,20 @@ class Program:
         self.num_colliders = 0
         self.num_triangle_entries = 0
 
+        # G3a self-collision: live primitive-arena extents + worst-case device table capacities
+        # (sized from the structural primitive counts, INDEPENDENT of the runtime self_mode/sync
+        # config so a config change -- config is not in the reload signature -- never overflows a
+        # too-small table). Bounds assume every team could run FULL_MESH self AND sync to the team
+        # with the most primitives.
+        self.num_self_points = 0
+        self.num_self_edges = 0
+        self.num_self_triangles = 0
+        self.self_cap_ee = 1
+        self.self_cap_pt = 1
+        self.self_cap_ip = 1
+        self.self_max_contact_tasks = 1
+        self.self_max_intersect_tasks = 1
+
         # per-accumulator CSR groupings (summation-order preserving)
         self.distance_csr = None          # key = distance particle (global)
         self.point_pair_csr = None        # key = point-pair particle (global)
@@ -185,6 +199,10 @@ def build_program(world):
     program.num_particles = _live_extent(world.team, "p_start", "p_count")
     program.num_transforms = _live_extent(world.team, "t_start", "t_count")
     program.num_colliders = _live_extent(world.team, "c_start", "c_count")
+    program.num_self_points = _live_extent(world.team, "sp_start", "sp_count")
+    program.num_self_edges = _live_extent(world.team, "se_start", "se_count")
+    program.num_self_triangles = _live_extent(world.team, "st_start", "st_count")
+    _compute_self_capacities(program, world)
 
     program.distance = _arena_dump(world.distance, ("team", "particle", "target", "rest"))
     program.bending = _arena_dump(world.bending, ("team", "pair", "rest", "sign"))
@@ -234,6 +252,34 @@ def build_program(world):
     program.display_update_move_mask = _build_update_move_mask(
         program.update_move["particle"], n_particles)
     return program
+
+
+def _compute_self_capacities(program, world):
+    """Worst-case device table capacities for self-collision (D3). Sized from structural per-team
+    primitive counts, assuming every team could run FULL_MESH self collision AND sync to the team
+    with the most primitives -- a safe upper bound independent of the runtime self_mode/sync_target
+    (which are per-frame/config, not in the reload signature). The exact per-frame candidate-pair
+    count (and the >3e7 FAIL guard, D1) is computed host-side each frame from the actual task set."""
+    tt = world.team
+    nt = program.num_teams
+    se = tt["se_count"][:nt].astype(np.int64)
+    sp = tt["sp_count"][:nt].astype(np.int64)
+    st = tt["st_count"][:nt].astype(np.int64)
+    max_se = int(se.max()) if nt else 0
+    max_sp = int(sp.max()) if nt else 0
+    max_st = int(st.max()) if nt else 0
+    # EE: self se^2 + sync se*max_partner_se. PT: self sp*st + sync PT (sp*max_st) + sync TP (st*max_sp).
+    # IP (intersect edge-triangle): self se*st + sync se*max_st + sync max_se*st.
+    cap_ee = int((se * se).sum() + (se * max_se).sum())
+    cap_pt = int((sp * st).sum() + (sp * max_st).sum() + (st * max_sp).sum())
+    cap_ip = int((se * st).sum() + (se * max_st).sum() + (st * max_se).sum())
+    program.self_cap_ee = max(cap_ee, 1)
+    program.self_cap_pt = max(cap_pt, 1)
+    program.self_cap_ip = max(cap_ip, 1)
+    # task-slot bounds: per team up to 2 self tasks (EE + PT) + 3 sync tasks (EE + TP + PT);
+    # intersect up to 1 self + 2 sync per team.
+    program.self_max_contact_tasks = max(nt * 5, 1)
+    program.self_max_intersect_tasks = max(nt * 3, 1)
 
 
 def _flatten_postline(levels, level_csr):

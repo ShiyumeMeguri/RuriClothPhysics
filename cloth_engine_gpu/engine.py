@@ -41,14 +41,21 @@ _ZONE_ARG_ORDER = ("zone_id", "mode", "is_addition", "main", "turbulence",
 # stronger memory fence than grid.sync, so segmented == single bit-for-bit).
 FRAME_PRE_PHASES = int(kernels.PHASE_SYNC | kernels.PHASE_ADVANCE | kernels.PHASE_BASE_POSE
                        | kernels.PHASE_CENTER | kernels.PHASE_PARTICLES_PRE
-                       | kernels.PHASE_COLLIDER_PRE)
+                       | kernels.PHASE_COLLIDER_PRE | kernels.PHASE_SELF_BEGIN)
 STEP_PHASES = int(kernels.PHASE_TEAM_STEP | kernels.PHASE_COLLIDER_START
                   | kernels.PHASE_PARTICLES_STEP | kernels.PHASE_BASELINE | kernels.PHASE_TETHER
                   | kernels.PHASE_DISTANCE_A | kernels.PHASE_ANGLE | kernels.PHASE_BENDING
                   | kernels.PHASE_COLLIDER_SOLVE | kernels.PHASE_DISTANCE_B | kernels.PHASE_MOTION
-                  | kernels.PHASE_STEP_POST | kernels.PHASE_COLLIDER_END)
+                  | kernels.PHASE_STEP_POST | kernels.PHASE_COLLIDER_END | kernels.PHASE_SELF_STEP)
 FRAME_POST_PHASES = int(kernels.PHASE_DISPLAY | kernels.PHASE_COLLIDER_POST
-                        | kernels.PHASE_TEAM_POST)
+                        | kernels.PHASE_TEAM_POST | kernels.PHASE_SELF_END)
+
+# G3a self-collision: contact-task kind codes (device ct_kind) and the per-frame pair-count FAIL
+# guard (D1: a scene whose total n^2 candidate pairs exceeds this sets the error flag rather than
+# silently truncating). EE / PT are the two normalized contact kinds (TP is stored flipped to PT).
+_SELF_TASK_EE = 0
+_SELF_TASK_PT = 1
+_SELF_PAIR_GUARD = 30_000_000
 
 # team structural columns (chunk pointers + valid) -- register/unregister move these;
 # collider/pair CONTENT is folded in separately so a same-count collider rebind (which
@@ -145,6 +152,10 @@ class GpuEngine:
         self.particle_out_staging = None
         self._config_shadow = None
         self._zone_shadow = None
+        self.self_points = None
+        self.self_edges = None
+        self.self_triangles = None
+        self.self_state = {}
         self.load(world)
 
     # ---- lifecycle ----------------------------------------------------------
@@ -193,6 +204,56 @@ class GpuEngine:
         ("tri_normal_f64", ("tri", 3), np.float64),
         ("tri_tangent_f64", ("tri", 3), np.float64),
     )
+
+    @staticmethod
+    def _dump_primitive(arena, count):
+        """Host dump of a self-collision primitive arena (PRIMITIVE_KERNEL_FIELDS). cell_key is
+        dropped (n^2 broad-phase, no grid); the (3,) bool ``fix`` / ``intersect`` masks are packed
+        into a single uint8 (bit0/1/2) so no new (u8,(3,)) blob group is introduced (signature stays
+        39). aabb / inv_mass / thickness / intersect / use are kernel-written (start as dumped)."""
+        a = arena.arrays
+
+        def pack(field):
+            m = a[field][:count].astype(np.uint8)
+            if count == 0:
+                return np.zeros(0, np.uint8)
+            return np.ascontiguousarray(m[:, 0] | (m[:, 1] << 1) | (m[:, 2] << 2))
+
+        u8 = lambda name: np.ascontiguousarray(a[name][:count].astype(np.uint8))
+        raw = lambda name: np.ascontiguousarray(a[name][:count])
+        return {"team": raw("team"), "particles": raw("particles"), "fix": pack("fix"),
+                "all_fix": u8("all_fix"), "ignore": u8("ignore"), "prim_depth": raw("prim_depth"),
+                "inv_mass": raw("inv_mass"), "thickness": raw("thickness"),
+                "aabb_min": raw("aabb_min"), "aabb_max": raw("aabb_max"),
+                "intersect": pack("intersect"), "use": u8("use")}
+
+    def _self_state_ordered(self):
+        """The self_state device buffers in RESIDENT_BLOB_LAYOUT tail order (== SELF_STATE_KERNEL_FIELDS).
+        Capacities come from the Program (worst-case, structural). All start zeroed; the contact/
+        intersect task tables and scl_counts are (re)written host-side each frame before launch."""
+        p = self.program
+        nt = max(p.num_teams, 1)
+        ce, cp, ci = p.self_cap_ee, p.self_cap_pt, p.self_cap_ip
+        mct, mit = p.self_max_contact_tasks, p.self_max_intersect_tasks
+        i32 = lambda n: np.zeros(int(n), np.int32)
+        f32 = lambda n: np.zeros(int(n), np.float32)
+        u8 = lambda n: np.zeros(int(n), np.uint8)
+        return [
+            ("ee_my", i32(ce)), ("ee_target", i32(ce)), ("ee_thickness", f32(ce)),
+            ("ee_s", f32(ce)), ("ee_t", f32(ce)), ("ee_n", np.zeros((int(ce), 3), np.float32)),
+            ("ee_enable", u8(ce)),
+            ("pt_my", i32(cp)), ("pt_target", i32(cp)), ("pt_thickness", f32(cp)),
+            ("pt_sign", f32(cp)), ("pt_enable", u8(cp)),
+            ("scl_counts", i32(8)),
+            ("ct_kind", i32(mct)), ("ct_my_team", i32(mct)), ("ct_my_start", i32(mct)),
+            ("ct_my_count", i32(mct)), ("ct_tgt_team", i32(mct)), ("ct_tgt_start", i32(mct)),
+            ("ct_tgt_count", i32(mct)), ("ct_same", u8(mct)), ("ct_pair_off", i32(mct + 1)),
+            ("it_edge_team", i32(mit)), ("it_edge_start", i32(mit)), ("it_edge_count", i32(mit)),
+            ("it_tri_team", i32(mit)), ("it_tri_start", i32(mit)), ("it_tri_count", i32(mit)),
+            ("it_same", u8(mit)), ("it_pair_off", i32(mit + 1)),
+            ("ip_edge", i32(ci)), ("ip_tri", i32(ci)),
+            ("scl_max_fixed", i32(nt)),
+        ]
 
     def load(self, world):
         signature = self._structure_signature(world)
@@ -245,6 +306,27 @@ class GpuEngine:
         for key, shape, dtype in self._SCRATCH_SPECS:
             resolved = tuple(dims[s] if isinstance(s, str) else s for s in shape)
             ordered.append(np.zeros(resolved, dtype)); targets.append((self.scratch, key))
+
+        # G3a self-collision resident state, appended AFTER scratch so every slot takes a fresh tail
+        # index (no existing preamble slice / layout row moves). Order == RESIDENT_BLOB_LAYOUT tail:
+        # 3 primitive arenas, the self team fields, intersect_flag, then the self_state buffers.
+        sp_host = self._dump_primitive(world.self_points, self.program.num_self_points)
+        se_host = self._dump_primitive(world.self_edges, self.program.num_self_edges)
+        st_host = self._dump_primitive(world.self_triangles, self.program.num_self_triangles)
+        self.self_points = device.FieldSet(sp_host, self.program.num_self_points, allocate=False)
+        self.self_edges = device.FieldSet(se_host, self.program.num_self_edges, allocate=False)
+        self.self_triangles = device.FieldSet(st_host, self.program.num_self_triangles, allocate=False)
+        for fieldset, host in ((self.self_points, sp_host), (self.self_edges, se_host),
+                               (self.self_triangles, st_host)):
+            for name in kernels.PRIMITIVE_KERNEL_FIELDS:
+                ordered.append(host[name]); targets.append((fieldset, name))
+        for name in kernels.SELF_TEAM_KERNEL_FIELDS:
+            ordered.append(team_host[name]); targets.append((self.team, name))
+        for name in kernels.SELF_PARTICLE_KERNEL_FIELDS:
+            ordered.append(particle_host[name]); targets.append((self.particles, name))
+        self.self_state = {}
+        for key, array in self._self_state_ordered():
+            ordered.append(array); targets.append((self.self_state, key))
 
         self._assert_layout(ordered)
         self.blobs, self.offs, self.lens, views = device.build_blobs(ordered, kernels.RESIDENT_BLOB_GROUPS)
@@ -389,6 +471,36 @@ class GpuEngine:
                                    self.colliders.device.keys())
         self.transforms.upload_many(device.dump_arena(world.transforms, self.program.num_transforms),
                                     self.transforms.device.keys())
+        self.upload_self_primitives(world)
+
+    def upload_self_primitives(self, world):
+        """Re-pack (fix/intersect masks) and upload the three self-collision primitive arenas.
+        Used by the dev harness to set the device 'before phase X' primitive state from the world."""
+        for fieldset, arena, count in (
+                (self.self_points, world.self_points, self.program.num_self_points),
+                (self.self_edges, world.self_edges, self.program.num_self_edges),
+                (self.self_triangles, world.self_triangles, self.program.num_self_triangles)):
+            fieldset.upload_many(self._dump_primitive(arena, count), fieldset.device.keys())
+
+    def download_self_primitive(self, arena_name, names=None):
+        """Read back a primitive arena's fields; fix/intersect are unpacked from the u8 bitmask into
+        (count, 3) bool arrays so the dev harness can compare against the oracle arena directly."""
+        fieldset = getattr(self, arena_name)
+        names = names or list(fieldset.device.keys())
+        out = {}
+        for name in names:
+            raw = fieldset.device[name].copy_to_host()
+            if name in ("fix", "intersect"):
+                out[name] = np.stack([(raw >> bit) & 1 for bit in range(3)], axis=1).astype(bool)
+            elif name in ("all_fix", "ignore", "use"):
+                out[name] = raw.astype(bool)
+            else:
+                out[name] = raw
+        return out
+
+    def download_self_state(self, names=None):
+        names = names or list(self.self_state.keys())
+        return {name: self.self_state[name].copy_to_host() for name in names}
 
     def download_team(self, world, names=None):
         names = names or list(self.team.device.keys())
@@ -452,6 +564,7 @@ class GpuEngine:
             return
         self._upload_inputs(world)
         self.upload_zones(frame_globals.zones)
+        self._self_frame_prepare(world, frame_globals.frame_index)
         self.launch(kernels.ALL_PHASES, 0, self._sub_end(frame_globals), frame_globals)
         self._download_outputs(world)
 
@@ -480,6 +593,7 @@ class GpuEngine:
         # whole slim frame stays on one stream. A genuine zone change re-uploads once (synchronously)
         # before the launch is queued, so the launch still reads the current zones.
         self.upload_zones(frame_globals.zones)
+        self._self_frame_prepare(world, frame_globals.frame_index, stream)
         self.launch(kernels.ALL_PHASES, 0, self._sub_end(frame_globals), frame_globals, stream=stream)
         pblocks, pthreads = self._particle_bridge_grid()
         self.particle_out_staging.download_issue(self.particles, pblocks, pthreads, stream)
@@ -499,6 +613,7 @@ class GpuEngine:
         self.load(world)
         self._upload_inputs(world)
         self.upload_zones(frame_globals.zones)
+        self._self_frame_prepare(world, frame_globals.frame_index)
         captured = self.launch_segmented(frame_globals, capture)
         self._download_outputs(world)
         return captured
@@ -595,3 +710,105 @@ class GpuEngine:
         self.particle_out_staging.download(world.particles.arrays, self.particles, pblocks, pthreads)
         tblocks, tthreads = self._team_bridge_grid()
         self.feedback_staging.download(world.team, self.team, tblocks, tthreads)
+
+    # ---- G3a self-collision per-frame host prep + upload ---------------------
+    def _self_frame_prepare(self, world, frame_index, stream=0):
+        """Mirror of cloth_kernel.self_collision.frame_begin's TEAM-LEVEL logic (D2: the use_point/
+        edge/triangle flags and the (EE/PT/TP) contact + intersect task pairs are frame-level pure
+        team logic -> host). Builds this frame's device task tables + use flags + reset counters and
+        uploads them. TP is stored flipped to PT (my=points, target=triangles). Cross-team (sync)
+        tasks carry same_object=0 (no connection filter, no EE self-dedup)."""
+        tt = world.team
+        nt = self.program.num_teams
+        cws = tt["component_world_scale"][:nt]
+        scale_alive = np.abs(cws).min(axis=1) >= 1e-6
+        frame_mask = tt["enabled"][:nt] & tt["valid"][:nt] & scale_alive
+        frame_teams = np.flatnonzero(frame_mask)
+        use_point = np.zeros(nt, np.uint8)
+        use_edge = np.zeros(nt, np.uint8)
+        use_triangle = np.zeros(nt, np.uint8)
+        contact = []      # (kind, my_team, my_start, my_count, tgt_team, tgt_start, tgt_count, same)
+        intersect = []    # (edge_team, edge_start, edge_count, tri_team, tri_start, tri_count, same)
+        full = _defs.SELF_MODE_FULL_MESH
+        for slot in frame_teams:
+            row = tt[slot]
+            self_mode = int(row["self_mode"])
+            sync_mode = int(row["sync_mode"])
+            partner = int(row["sync_target"])
+            if partner <= 0 or not tt["valid"][partner] or not tt["enabled"][partner] or partner == slot:
+                partner = 0
+            se_c = int(row["se_count"]); se_s = int(row["se_start"])
+            st_c = int(row["st_count"]); st_s = int(row["st_start"])
+            sp_c = int(row["sp_count"]); sp_s = int(row["sp_start"])
+            has_edge = se_c > 0
+            has_tri = st_c > 0
+            if self_mode == full:
+                if has_edge:
+                    use_edge[slot] = 1
+                    contact.append((_SELF_TASK_EE, slot, se_s, se_c, slot, se_s, se_c, 1))
+                if has_tri:
+                    use_point[slot] = 1
+                    use_triangle[slot] = 1
+                    contact.append((_SELF_TASK_PT, slot, sp_s, sp_c, slot, st_s, st_c, 1))
+                if has_edge and has_tri:
+                    intersect.append((slot, se_s, se_c, slot, st_s, st_c, 1))
+            if sync_mode == full and partner > 0:
+                prow = tt[partner]
+                p_se = int(prow["se_count"]); p_se_s = int(prow["se_start"])
+                p_st = int(prow["st_count"]); p_st_s = int(prow["st_start"])
+                p_sp = int(prow["sp_count"]); p_sp_s = int(prow["sp_start"])
+                p_edge = p_se > 0
+                p_tri = p_st > 0
+                if has_edge and p_edge:
+                    use_edge[slot] = 1
+                    use_edge[partner] = 1
+                    contact.append((_SELF_TASK_EE, slot, se_s, se_c, partner, p_se_s, p_se, 0))
+                if has_tri:  # oracle 'TP' (my triangles slot, tgt points partner) -> flipped PT
+                    use_triangle[slot] = 1
+                    use_point[partner] = 1
+                    contact.append((_SELF_TASK_PT, partner, p_sp_s, p_sp, slot, st_s, st_c, 0))
+                if p_tri:  # oracle 'PT' (my points slot, tgt triangles partner)
+                    use_point[slot] = 1
+                    use_triangle[partner] = 1
+                    contact.append((_SELF_TASK_PT, slot, sp_s, sp_c, partner, p_st_s, p_st, 0))
+                if has_edge and p_tri:
+                    intersect.append((slot, se_s, se_c, partner, p_st_s, p_st, 0))
+                if has_tri and p_edge:
+                    intersect.append((partner, p_se_s, p_se, slot, st_s, st_c, 0))
+        total_ct = self._fill_task_table(contact, self.program.self_max_contact_tasks,
+                                         ("ct_kind", "ct_my_team", "ct_my_start", "ct_my_count",
+                                          "ct_tgt_team", "ct_tgt_start", "ct_tgt_count", "ct_same"),
+                                         "ct_pair_off", stream)
+        total_it = self._fill_task_table(intersect, self.program.self_max_intersect_tasks,
+                                         ("it_edge_team", "it_edge_start", "it_edge_count",
+                                          "it_tri_team", "it_tri_start", "it_tri_count", "it_same"),
+                                         "it_pair_off", stream)
+        counts = np.zeros(8, np.int32)
+        counts[kernels.SCL_ERROR] = 1 if (total_ct > _SELF_PAIR_GUARD or total_it > _SELF_PAIR_GUARD) else 0
+        counts[kernels.SCL_USE_INTERSECT] = 1 if intersect else 0
+        counts[kernels.SCL_FRAME_INDEX] = int(frame_index) % int(_defs.SELF_COLLISION_INTERSECT_DIV)
+        self.self_state["scl_counts"].copy_to_device(counts, stream=stream)
+        self.team.device["use_point"].copy_to_device(use_point, stream=stream)
+        self.team.device["use_edge"].copy_to_device(use_edge, stream=stream)
+        self.team.device["use_triangle"].copy_to_device(use_triangle, stream=stream)
+
+    def _fill_task_table(self, tasks, capacity, column_keys, pair_off_key, stream):
+        """Pack a task list into fixed-capacity device columns + a prefix-sum pair-offset array
+        (pair_off[k] = pairs before task k; pair_off[capacity] = total). Inactive tail slots keep
+        pair_count 0 so no global pair index ever maps to them. Returns the total pair count."""
+        columns = [np.zeros(capacity, np.uint8 if key.endswith("same") else np.int32)
+                   for key in column_keys]
+        pair_off = np.zeros(capacity + 1, np.int32)
+        running = 0
+        for k, task in enumerate(tasks):
+            for c, value in enumerate(task[:len(column_keys)]):
+                columns[c][k] = value
+            pair_off[k] = running
+            my_count = task[3] if len(column_keys) == 8 else task[2]
+            tgt_count = task[6] if len(column_keys) == 8 else task[5]
+            running += int(my_count) * int(tgt_count)
+        pair_off[len(tasks):] = running
+        for key, column in zip(column_keys, columns):
+            self.self_state[key].copy_to_device(column, stream=stream)
+        self.self_state[pair_off_key].copy_to_device(pair_off, stream=stream)
+        return running
