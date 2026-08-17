@@ -24,6 +24,16 @@ from .program import build_program
 
 _MAX_COOP_BLOCKS = 544
 _THREADS = 128
+# Cooperative grid sizing for the self-collision n^2 broad phases (SELF_STEP detect / SELF_BEGIN
+# intersect). The per-particle/per-team phases only need ceil(num_particles/128) blocks, but the two
+# broad phases are flat grid-stride over total_ct / total_it candidate PAIRS (hundreds of thousands),
+# so a grid sized to num_particles (~7 blocks / ~900 threads) leaves most SMs idle and each thread
+# serially grinds hundreds of pairs. When self-collision is active the grid is grown to cover the pair
+# space at ~this many pairs/thread, capped at the kernel's real cooperative residency. Above the knee
+# the extra grid.sync cost outweighs the parallelism, so this stays in the measured flat optimum
+# (~35-68 blocks for the 24-group bench's 3.1e5 pairs) rather than filling the device. -noself frames
+# have zero pairs and keep the small base grid, so caliber A pays no barrier tax.
+_SELF_PAIRS_PER_THREAD = 64
 
 # Stable int mapping for WindZoneInput.mode strings (device-side zone arrays).
 _ZONE_MODE = {"GLOBAL_DIRECTION": 0, "BOX_DIRECTION": 1,
@@ -157,6 +167,12 @@ class GpuEngine:
         self.self_triangles = None
         self.self_state = {}
         self._self_empty_uploaded = True
+        # Largest per-frame self-collision candidate-pair count (max(total_ct, total_it)); 0 when
+        # self-collision is inactive. Set by _self_frame_prepare, read by _blocks to size the grid.
+        self._self_max_pairs = 0
+        # The kernel's real cooperative-residency block ceiling (register-limited, < _MAX_COOP_BLOCKS),
+        # queried lazily once the megakernel is compiled and cached for the engine's lifetime.
+        self._coop_max_blocks = None
         self.load(world)
 
     # ---- lifecycle ----------------------------------------------------------
@@ -395,6 +411,8 @@ class GpuEngine:
         # rebuilds. Reset here so the first frame after any (re)load always recomputes.
         self._self_task_shadow = None
         self._self_task_cache = None
+        # No self-collision prepared for this fresh layout yet -> base grid until the first self frame.
+        self._self_max_pairs = 0
 
     # ---- wind-zone per-frame upload -----------------------------------------
     def _zone_host(self, zones):
@@ -470,9 +488,33 @@ class GpuEngine:
         self.zone_blobs, self.zone_offs, self.zone_lens = device.build_blobs(
             ordered, kernels.ZONE_BLOB_GROUPS)[:3]
 
+    def _cooperative_max_blocks(self):
+        """The megakernel's real cooperative-launch residency ceiling @ _THREADS (register-limited,
+        typically well below _MAX_COOP_BLOCKS). Queried once the kernel is compiled and cached. Returns
+        None if the kernel is not compiled yet (first launch) -> the caller keeps the base grid so a
+        cooperative launch never exceeds residency and raises."""
+        if self._coop_max_blocks is None:
+            try:
+                sig = kernels.frame_kernel.signatures[0]
+                defn = kernels.frame_kernel.overloads[sig]
+                cap = int(defn.max_cooperative_grid_blocks(_THREADS))
+                self._coop_max_blocks = max(1, min(cap, _MAX_COOP_BLOCKS))
+            except Exception:
+                return None
+        return self._coop_max_blocks
+
     def _blocks(self):
-        needed = max(self.program.num_particles, self.program.num_teams, 1)
-        return min((needed + _THREADS - 1) // _THREADS, _MAX_COOP_BLOCKS)
+        # Base grid covers the per-particle / per-team phases (grid-stride, so any size is correct).
+        base = (max(self.program.num_particles, self.program.num_teams, 1) + _THREADS - 1) // _THREADS
+        # When self-collision is active, grow the grid so the flat n^2 broad phases (grid-stride over
+        # total_ct / total_it pairs) get real parallelism instead of ~900 threads serialising 3e5 pairs.
+        if self._self_max_pairs > 0:
+            cap = self._cooperative_max_blocks()
+            if cap is not None:
+                per = _SELF_PAIRS_PER_THREAD * _THREADS
+                pair_blocks = (self._self_max_pairs + per - 1) // per
+                base = min(max(base, pair_blocks), cap)
+        return base
 
     # ---- full-state sync (dev-harness isolated phase testing) ---------------
     def upload_all(self, world):
@@ -823,6 +865,7 @@ class GpuEngine:
         # total-pair gates then execute zero self-collision work / barriers (P6: self off == near-zero
         # overhead). A self->noself transition still resets once (empty but not-yet-empty).
         if not contact and not intersect and self._self_empty_uploaded:
+            self._self_max_pairs = 0
             return
         self._self_empty_uploaded = (not contact) and (not intersect)
         total_ct = self._fill_task_table(contact, self.program.self_max_contact_tasks,
@@ -833,6 +876,8 @@ class GpuEngine:
                                          ("it_edge_team", "it_edge_start", "it_edge_count",
                                           "it_tri_team", "it_tri_start", "it_tri_count", "it_same"),
                                          "it_pair_off", stream)
+        # Grid sizing hint for the n^2 broad phases: the larger of the two candidate-pair spaces.
+        self._self_max_pairs = int(max(total_ct, total_it))
         counts = np.zeros(8, np.int32)
         counts[kernels.SCL_ERROR] = 1 if (total_ct > _SELF_PAIR_GUARD or total_it > _SELF_PAIR_GUARD) else 0
         counts[kernels.SCL_USE_INTERSECT] = 1 if intersect else 0
