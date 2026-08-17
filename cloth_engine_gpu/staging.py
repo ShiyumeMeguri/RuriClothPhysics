@@ -103,29 +103,53 @@ def _bridge_kernels(aligned_dtype):
 
 class StructStaging:
     """Resident aligned structured staging array for one struct arena + its generated
-    bridge kernels. ``field_order`` is ``struct_dtype.names`` (the SoA argument order)."""
+    bridge kernels. ``field_order`` is the SoA argument order.
 
-    def __init__(self, struct_dtype, count):
-        self.dtype = struct_dtype
-        self.aligned_dtype = _aligned_like(struct_dtype)
+    ``fields=None`` stages the whole struct dtype (the full-table round-trip). A field
+    subset stages only those columns -- the narrow per-frame-input / consumable-flag /
+    config / output bridges that carry far fewer marshalled array arguments (the measured
+    cost of a bridge launch is per-argument, not per-byte: a 145-arg bridge costs the same
+    for 2 teams as for 24). A subset repacks source->stage per field, so the source may be a
+    structured ndarray (``world.team``) OR a ChunkArena's ``arrays`` dict (colliders /
+    particles) -- both support ``source[name]`` -> array."""
+
+    def __init__(self, struct_dtype, count, fields=None):
+        self.subset = fields is not None
+        self.field_order = list(fields) if self.subset else list(struct_dtype.names)
+        sub_dtype = np.dtype([(name, struct_dtype[name]) for name in self.field_order])
+        self.dtype = sub_dtype
+        self.aligned_dtype = _aligned_like(sub_dtype)
         self.count = max(int(count), 1)
-        self.field_order = list(struct_dtype.names)
         self.stage = cuda.device_array(self.count, self.aligned_dtype)
         self._host = np.zeros(self.count, self.aligned_dtype)
         self._explode, self._implode = _bridge_kernels(self.aligned_dtype)
 
-    def upload(self, host_struct, fieldset, blocks, threads):
-        """Repack the whole struct to the aligned layout, one H2D, then explode into the
-        resident SoA arrays. (Structured assignment repacks packed->aligned by field name.)"""
-        self._host[:] = host_struct[:self.count]
+    def _repack_in(self, source):
+        if self.subset:
+            for name in self.field_order:
+                self._host[name] = source[name][:self.count]
+        else:
+            self._host[:] = source[:self.count]
+
+    def _repack_out(self, target):
+        if self.subset:
+            for name in self.field_order:
+                target[name][:self.count] = self._host[name]
+        else:
+            target[:self.count] = self._host
+
+    def upload(self, source, fieldset, blocks, threads):
+        """Repack the (subset of) columns to the aligned layout, one H2D, then explode into
+        the resident SoA arrays. ``source`` is a struct ndarray or an arena arrays dict."""
+        self._repack_in(source)
         self.stage.copy_to_device(self._host)
         soa = [fieldset.device[name] for name in self.field_order]
         self._explode[blocks, threads](self.stage, *soa)
 
-    def download(self, host_struct, fieldset, blocks, threads):
+    def download(self, target, fieldset, blocks, threads):
         """Implode the resident SoA arrays into the stage, one D2H, then repack the aligned
-        layout back into the host struct (bool fields restored to numpy bool by assignment)."""
+        layout back into ``target`` (struct ndarray or arena arrays dict)."""
         soa = [fieldset.device[name] for name in self.field_order]
         self._implode[blocks, threads](self.stage, *soa)
         self.stage.copy_to_host(self._host)
-        host_struct[:self.count] = self._host
+        self._repack_out(target)
