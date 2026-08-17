@@ -2141,6 +2141,12 @@ def frame_kernel(phase_mask, sub_begin, sub_end,
     grid = cg.this_grid()
     tid = cuda.grid(1)
     stride = cuda.gridsize(1)
+    # Block-local coordinates for the single-block small-serial phases (S4 FK levels, S7 angle
+    # passes, F2 postline levels, T0 sync passes): only block 0 walks those loops, using
+    # __syncthreads() between iterations instead of a full grid.sync (two orders cheaper on this
+    # 7-block grid). tid == threadIdx.x for block 0, so it doubles as the block lane index there.
+    bid = cuda.blockIdx.x
+    bdim = cuda.blockDim.x
     num_teams = t_enabled.shape[0]
 
     num_particles = p_team.shape[0]
@@ -3496,44 +3502,50 @@ def frame_kernel(phase_mask, sub_begin, sub_end,
                         p_albuf_restore[v, 2] = bvz
                 i += stride
         grid.sync()
-        # 3 iterations, each walking passes in sorted (level,rank) order with a grid.sync wall.
-        for _ai in range(ANGLE_ITERATION):
-            angle_rot_ratio = float32(0.1) + (float32(0.5) - float32(0.1)) \
-                * (float32(_ai) / float32(2.0))
-            for _ap in range(num_angle_passes):
-                if phase_mask & PHASE_ANGLE:
-                    aps = angle_pass_offsets[_ap]
-                    ape = angle_pass_offsets[_ap + 1]
-                    e = aps + tid
-                    while e < ape:
-                        v = angle_pass_vertices[e]
-                        p = angle_pass_parents[e]
-                        vt = p_team[v]
-                        if team_frame_mask(t_enabled, t_valid, t_cws, vt) \
-                                and t_update_count[vt] > _k:
-                            ul = t_angle_use_limit[vt] != 0
-                            ur = t_angle_use_restoration[vt] != 0
-                            if ul or ur:
-                                c_inv = float32(1.0) / (float32(1.0) + p_friction[v] * FRICTION_MASS)
-                                p_inv = float32(1.0) / (float32(1.0) + p_friction[p] * FRICTION_MASS)
-                                p_mv = p_attr_move[p] != 0
-                                if ul:
-                                    do_angle_limit(v, p, vt, c_inv, p_inv, p_mv,
-                                                   p_next_positions, p_velocity_positions,
-                                                   p_albuf_rotation, p_albuf_local_pos,
-                                                   p_albuf_local_rot, p_albuf_length, p_depth,
-                                                   t_angle_limit_lut, t_angle_limit_stiffness)
-                                if ur:
-                                    do_angle_restoration(v, p, vt, c_inv, p_inv, p_mv,
-                                                         angle_rot_ratio, power3,
-                                                         p_next_positions, p_velocity_positions,
-                                                         p_albuf_restore, p_depth,
-                                                         t_angle_restoration_lut,
-                                                         t_angle_restoration_attenuation,
-                                                         t_angle_restoration_gravity_falloff,
-                                                         t_gravity_dot)
-                        e += stride
-                grid.sync()
+        # Single-block the 3xP (level,rank) passes: only block 0 walks every pass, using
+        # __syncthreads() between passes (two orders of magnitude cheaper than grid.sync on this
+        # small 7-block grid). Each pass fits one block-wave (max pass entries 92 < blockDim) and
+        # the per-entry writes are disjoint (v-set at level L, p-set at level L-1), so moving the
+        # work from a 7-block grid-stride to a block-0 stride is order-independent -> bit-exact.
+        if bid == 0:
+            for _ai in range(ANGLE_ITERATION):
+                angle_rot_ratio = float32(0.1) + (float32(0.5) - float32(0.1)) \
+                    * (float32(_ai) / float32(2.0))
+                for _ap in range(num_angle_passes):
+                    if phase_mask & PHASE_ANGLE:
+                        aps = angle_pass_offsets[_ap]
+                        ape = angle_pass_offsets[_ap + 1]
+                        e = aps + tid
+                        while e < ape:
+                            v = angle_pass_vertices[e]
+                            p = angle_pass_parents[e]
+                            vt = p_team[v]
+                            if team_frame_mask(t_enabled, t_valid, t_cws, vt) \
+                                    and t_update_count[vt] > _k:
+                                ul = t_angle_use_limit[vt] != 0
+                                ur = t_angle_use_restoration[vt] != 0
+                                if ul or ur:
+                                    c_inv = float32(1.0) / (float32(1.0) + p_friction[v] * FRICTION_MASS)
+                                    p_inv = float32(1.0) / (float32(1.0) + p_friction[p] * FRICTION_MASS)
+                                    p_mv = p_attr_move[p] != 0
+                                    if ul:
+                                        do_angle_limit(v, p, vt, c_inv, p_inv, p_mv,
+                                                       p_next_positions, p_velocity_positions,
+                                                       p_albuf_rotation, p_albuf_local_pos,
+                                                       p_albuf_local_rot, p_albuf_length, p_depth,
+                                                       t_angle_limit_lut, t_angle_limit_stiffness)
+                                    if ur:
+                                        do_angle_restoration(v, p, vt, c_inv, p_inv, p_mv,
+                                                             angle_rot_ratio, power3,
+                                                             p_next_positions, p_velocity_positions,
+                                                             p_albuf_restore, p_depth,
+                                                             t_angle_restoration_lut,
+                                                             t_angle_restoration_attenuation,
+                                                             t_angle_restoration_gravity_falloff,
+                                                             t_gravity_dot)
+                            e += bdim
+                    cuda.syncthreads()
+        grid.sync()
 
         # --- S8 bending.run: clear -> per-pair scatter (int32 fixed-point) -> apply ---
         if phase_mask & PHASE_BENDING:
