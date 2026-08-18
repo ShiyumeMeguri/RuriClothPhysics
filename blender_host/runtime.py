@@ -776,17 +776,20 @@ def run_frame(scene, frame_delta_time):
                                   out_positions, out_rotations, batch._frame_anim_world)
 
         # Scatter every written bone's row-major basis into the pose.bones matrix_basis array and
-        # foreach_set once. The row-major values are placed into the column-major storage slot WITHOUT
-        # a transpose: this exactly reproduces the legacy per-bone `pose_bone.matrix_basis = basis.tolist()`
-        # write, which flattens row-major but Blender stores column-major (a transpose-on-store the read
-        # path inverts) -- verified bit-identical over the real trajectory. Read transposes, write does not.
+        # foreach_set once. matrix_basis storage is COLUMN-major (read_pose_matrices transposes it back to
+        # row-major), so the row-major basis must be TRANSPOSED before it lands in the storage slot. Without
+        # the transpose the bone is displayed with matrix_basis = basis^T -- a 3x3 transpose that drops the
+        # translation, a pure DISPLAY divergence up to ~1.0 on strongly-posed bones (skirt/sleeve/bow),
+        # measured 2026-08-18. The simulation never reads this back (cloth bones gather the frozen
+        # _basis_store, not the live matrix_basis), so the lockstep gate stays byte-identical either way; the
+        # transpose only corrects what the viewport shows. Read transposes, write transposes.
         pose_bones = obj.pose.bones
         count = len(pose_bones)
         flat = np.empty(count * 16, dtype=np.float64)
         pose_bones.foreach_get("matrix_basis", flat)
         stored = flat.reshape(count, 4, 4)
         selected = np.flatnonzero(write_select & (batch.pose_index >= 0))
-        stored[batch.pose_index[selected]] = basis[selected]
+        stored[batch.pose_index[selected]] = basis[selected].transpose(0, 2, 1)
         pose_bones.foreach_set("matrix_basis", flat)
 
         for entry, _, config, _, _, start, stop, uid, digest in group:
