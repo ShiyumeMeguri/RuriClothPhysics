@@ -753,19 +753,50 @@ def run_frame(scene, frame_delta_time):
         frame_globals.zones = []
     pipeline.run_frame(_world, frame_globals)
 
-    for entry, obj, config, batch, entry_index, start, stop, uid, digest in collected:
-        out_positions, out_rotations = kernel_io.team_output(_world, entry.team)
-        anim_world = batch._frame_anim_world[start:stop]
-        basis = entry.kinematics.write_back(obj, out_positions.astype(np.float64), out_rotations,
-                                            entry.write_mask, entry.position_mask, anim_world,
-                                            batch._frame_matrix_world_inverse)
-        if digest is None:
-            continue
-        index, signature, input_digest = digest
-        cache = frame_cache.get(uid, index)
-        if cache.signature != signature:
-            cache.reset(signature, np.flatnonzero(entry.write_mask), entry.setup.bone_names)
-        cache.store(scene.frame_current, input_digest, basis[cache.indices])
+    index_in = 0
+    while index_in < len(collected):
+        batch = collected[index_in][3]
+        obj = collected[index_in][1]
+        group = []
+        while index_in < len(collected) and collected[index_in][3] is batch:
+            group.append(collected[index_in])
+            index_in += 1
+
+        out_positions = np.zeros((batch.count, 3), dtype=np.float64)
+        out_rotations = np.zeros((batch.count, 4), dtype=np.float64)
+        out_rotations[:, 3] = 1.0
+        write_select = np.zeros(batch.count, dtype=bool)
+        for entry, _, _, _, _, start, stop, _, _ in group:
+            team_positions, team_rotations = kernel_io.team_output(_world, entry.team)
+            out_positions[start:stop] = team_positions.astype(np.float64)
+            out_rotations[start:stop] = team_rotations
+            write_select[start:stop] = entry.write_mask
+
+        basis = batch.write_basis(batch._frame_matrix_world_inverse, batch._frame_all_matrix,
+                                  out_positions, out_rotations, batch._frame_anim_world)
+
+        # Scatter every written bone's row-major basis into the pose.bones matrix_basis array and
+        # foreach_set once. The row-major values are placed into the column-major storage slot WITHOUT
+        # a transpose: this exactly reproduces the legacy per-bone `pose_bone.matrix_basis = basis.tolist()`
+        # write, which flattens row-major but Blender stores column-major (a transpose-on-store the read
+        # path inverts) -- verified bit-identical over the real trajectory. Read transposes, write does not.
+        pose_bones = obj.pose.bones
+        count = len(pose_bones)
+        flat = np.empty(count * 16, dtype=np.float64)
+        pose_bones.foreach_get("matrix_basis", flat)
+        stored = flat.reshape(count, 4, 4)
+        selected = np.flatnonzero(write_select & (batch.pose_index >= 0))
+        stored[batch.pose_index[selected]] = basis[selected]
+        pose_bones.foreach_set("matrix_basis", flat)
+
+        for entry, _, config, _, _, start, stop, uid, digest in group:
+            if digest is None:
+                continue
+            index, signature, input_digest = digest
+            cache = frame_cache.get(uid, index)
+            if cache.signature != signature:
+                cache.reset(signature, np.flatnonzero(entry.write_mask), entry.setup.bone_names)
+            cache.store(scene.frame_current, input_digest, basis[start:stop][cache.indices])
 
 
 @persistent

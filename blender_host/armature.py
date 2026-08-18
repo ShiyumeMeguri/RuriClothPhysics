@@ -198,44 +198,6 @@ class KinematicsHost:
             if pose_bone is not None:
                 storage[name] = read_matrix(pose_bone.matrix_basis)
 
-    def write_back(self, obj, world_positions, world_rotations, write_mask, position_mask,
-                   anim_world, obj_matrix_world_inverse):
-        pose_bones = obj.pose.bones
-        n = len(self.bone_names)
-
-        scale = np.linalg.norm(anim_world[:, :3, :3], axis=1)
-        rotation = quat_to_matrix3_batch(world_rotations.astype(np.float64))
-        final_world = np.zeros((n, 4, 4), dtype=np.float64)
-        final_world[:, :3, :3] = rotation * scale[:, None, :]
-        final_world[:, :3, 3] = np.where(position_mask[:, None],
-                                         world_positions, anim_world[:, :3, 3])
-        final_world[:, 3, 3] = 1.0
-        final_world = np.where(write_mask[:, None, None], final_world, anim_world)
-
-        final_pose = np.einsum('ij,njk->nik', obj_matrix_world_inverse, final_world)
-
-        parent_pose = np.empty((n, 4, 4), dtype=np.float64)
-        internal = self.parent_index >= 0
-        if np.any(internal):
-            parent_pose[internal] = final_pose[self.parent_index[internal]]
-        for i in np.flatnonzero(~internal):
-            external = self.external_parent[i]
-            if external is not None:
-                parent_bone = pose_bones.get(external)
-                parent_pose[i] = read_matrix(parent_bone.matrix) if parent_bone is not None \
-                    else np.eye(4)
-            else:
-                parent_pose[i] = np.eye(4)
-
-        local = np.einsum('nij,njk->nik', np.linalg.inv(parent_pose), final_pose)
-        basis = np.einsum('nij,njk->nik', self.rest_relative_inverse, local)
-
-        for i in np.flatnonzero(write_mask):
-            pose_bone = pose_bones.get(self.bone_names[i])
-            if pose_bone is not None:
-                pose_bone.matrix_basis = basis[i].tolist()
-        return basis
-
 
 def read_pose_matrices(obj, attribute):
     pose_bones = obj.pose.bones
@@ -361,6 +323,32 @@ class BatchedKinematics:
             if level.size:
                 pose[level] = np.einsum('nij,njk->nik', pose[parents], local[level])
         return np.einsum('ij,njk->nik', matrix_world, pose)
+
+    def write_basis(self, matrix_world_inverse, all_matrix, world_positions, world_rotations, anim_world):
+        count = self.count
+        scale = np.linalg.norm(anim_world[:, :3, :3], axis=1)
+        rotation = quat_to_matrix3_batch(world_rotations.astype(np.float64))
+        final_world = np.zeros((count, 4, 4), dtype=np.float64)
+        final_world[:, :3, :3] = rotation * scale[:, None, :]
+        final_world[:, :3, 3] = np.where(self.position_mask[:, None], world_positions, anim_world[:, :3, 3])
+        final_world[:, 3, 3] = 1.0
+        final_world = np.where(self.write_mask[:, None, None], final_world, anim_world)
+        final_pose = np.einsum('ij,njk->nik', matrix_world_inverse, final_world)
+        parent_pose = np.empty((count, 4, 4), dtype=np.float64)
+        internal = ~self.root_mask
+        parent_pose[internal] = final_pose[self.parent_index[internal]]
+        if self.root_mask.any():
+            roots = np.flatnonzero(self.root_mask)
+            external = self.external_index[roots]
+            has_external = external >= 0
+            attached = roots[has_external]
+            if attached.size:
+                parent_pose[attached] = all_matrix[external[has_external]]
+            detached = roots[~has_external]
+            if detached.size:
+                parent_pose[detached] = np.eye(4)
+        local = np.einsum('nij,njk->nik', np.linalg.inv(parent_pose), final_pose)
+        return np.einsum('nij,njk->nik', self.rest_relative_inverse, local)
 
     def entry_transform_worlds(self, entry_index, matrix_world, all_matrix, anim_world):
         extras = self.transform_extra[entry_index]
