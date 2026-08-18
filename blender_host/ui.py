@@ -395,12 +395,35 @@ class RCP_PT_spring(_SpringPanel, bpy.types.Panel):
         self.layout.prop(config.spring, "use_spring", text="")
 
     def draw(self, context):
+        from . import chain
         layout = self.layout
         _setup_layout(layout)
-        spring = _active_config(context).spring
+        config = _active_config(context)
+        spring = config.spring
+        obj = context.object
+
+        # The spring block only ever touches the FIXED particles, and compile.py makes exactly the
+        # config's root bones fixed. Everything below a root is an ordinary cloth particle answering
+        # to 角度复原 / 角度制限 / 空气阻尼 instead. Without this said out loud the panel reads as if
+        # it governed the whole chain, and zeroing it looks like "the spring does nothing" when what
+        # you are watching move is the children.
+        roots = chain.root_names(obj, config)
+        _, ordered = chain.config_chain(obj, config)
+        others = [name for name in ordered if name not in roots]
+        box = layout.box()
+        box.label(text="弹簧只作用于根骨骼(%d 根)" % len(roots), icon='INFO')
+        box.label(text=", ".join(roots[:3]) + (" ..." if len(roots) > 3 else ""))
+        if others:
+            box.label(text="其余 %d 根子骨归 角度复原/角度制限/空气阻尼 管, 与本面板无关"
+                           % len(others), icon='DOT')
+
         layout.enabled = spring.use_spring
-        layout.prop(spring, "spring_power")
         layout.prop(spring, "limit_distance")
+        if spring.limit_distance <= 0.0:
+            layout.label(text="最大摆幅 = 0: 根骨被完全锁死, 摆动幅度请调这一项", icon='ERROR')
+        layout.prop(spring, "spring_power")
+        if spring.spring_power >= 0.2:
+            layout.label(text="回位力已到上限 0.2, 再要更硬请调小最大摆幅", icon='INFO')
         layout.prop(spring, "normal_limit_ratio")
         layout.prop(spring, "noise")
 
