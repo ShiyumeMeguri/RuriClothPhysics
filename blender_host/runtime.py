@@ -31,6 +31,12 @@ _world = kernel_world.World()
 _registry = {}
 _basis_store = {}
 _last_frame = None
+# Config revision: bumped whenever the curve node-tree (the FloatCurve control points behind the
+# depth-modulation curves) may have changed. Curve points live in a standalone fake-user node tree
+# edited through Blender's native template_curve_mapping widget, which fires no PropertyGroup update
+# callback -- so param_serial/collider_serial do NOT cover them. A depsgraph_update_post handler bumps
+# this on any NODETREE update, plus undo/redo. It is the one config input the serials cannot track.
+_config_revision = 0
 
 NORMAL_AXIS_VECTORS = {
     'RIGHT': (1.0, 0.0, 0.0),
@@ -79,6 +85,7 @@ class RuntimeEntry:
         self.position_mask = None
         self.culling_invisible = False
         self.input_names = ()
+        self.signature_rev = None
 
 
 def get_world():
@@ -354,6 +361,18 @@ def ensure_entry(obj, config_index, config):
         entry = RuntimeEntry()
         _registry[key] = entry
 
+    # Signature fast-path: recompute the topology/params tokens only when the config could have changed.
+    # The revision fully covers every token input -- param_serial (all scalar/topology edits, incl.
+    # gravity_direction), collider_serial (collider edits), _config_revision (curve control points), and
+    # obj.mode (armature edit-mode bone edits). rebuild_pending is checked explicitly (structural
+    # operators set it without a serial bump). During config-static playback this skips the per-frame
+    # RNA-collection walk and 9-curve hashing that dominated ensure_entry.
+    settings = obj.ruri_cloth_physics
+    signature_rev = (settings.param_serial, settings.collider_serial, _config_revision, obj.mode)
+    if (entry.setup is not None and not config.rebuild_pending
+            and entry.signature_rev == signature_rev):
+        return entry
+
     token = _topology_token(config)
     if entry.setup is None or entry.topology_token != token or config.rebuild_pending:
         if entry.team is not None:
@@ -406,6 +425,7 @@ def ensure_entry(obj, config_index, config):
         if entry.params_token != token:
             _world.update_params(entry.team, _build_params(config))
             entry.params_token = token
+    entry.signature_rev = signature_rev
     return entry
 
 
@@ -762,11 +782,36 @@ def _on_load_post(*args):
     bone_binding.invalidate()
 
 
+@persistent
+def _on_depsgraph_update_post(scene, depsgraph=None):
+    # Curve control points live in a standalone fake-user node tree edited through Blender's native
+    # template_curve_mapping widget, which fires no PropertyGroup update callback. Blender flags a
+    # NODETREE-type update when that tree is edited, so bump the config revision then. Pure pose-animation
+    # playback never flags NODETREE, so this does not fire on ordinary frames (verified headless).
+    global _config_revision
+    if depsgraph is not None and depsgraph.id_type_updated('NODETREE'):
+        _config_revision += 1
+
+
+@persistent
+def _on_undo_redo_post(*args):
+    # param_serial lives on the PropertyGroup so it is undo-tracked; _config_revision is a module global
+    # that is not, so force one curve re-validation after any undo/redo to catch a reverted curve edit.
+    global _config_revision
+    _config_revision += 1
+
+
 def register():
     if _on_frame_change_post not in bpy.app.handlers.frame_change_post:
         bpy.app.handlers.frame_change_post.append(_on_frame_change_post)
     if _on_load_post not in bpy.app.handlers.load_post:
         bpy.app.handlers.load_post.append(_on_load_post)
+    if _on_depsgraph_update_post not in bpy.app.handlers.depsgraph_update_post:
+        bpy.app.handlers.depsgraph_update_post.append(_on_depsgraph_update_post)
+    if _on_undo_redo_post not in bpy.app.handlers.undo_post:
+        bpy.app.handlers.undo_post.append(_on_undo_redo_post)
+    if _on_undo_redo_post not in bpy.app.handlers.redo_post:
+        bpy.app.handlers.redo_post.append(_on_undo_redo_post)
 
 
 def unregister():
@@ -774,4 +819,10 @@ def unregister():
         bpy.app.handlers.frame_change_post.remove(_on_frame_change_post)
     if _on_load_post in bpy.app.handlers.load_post:
         bpy.app.handlers.load_post.remove(_on_load_post)
+    if _on_depsgraph_update_post in bpy.app.handlers.depsgraph_update_post:
+        bpy.app.handlers.depsgraph_update_post.remove(_on_depsgraph_update_post)
+    if _on_undo_redo_post in bpy.app.handlers.undo_post:
+        bpy.app.handlers.undo_post.remove(_on_undo_redo_post)
+    if _on_undo_redo_post in bpy.app.handlers.redo_post:
+        bpy.app.handlers.redo_post.remove(_on_undo_redo_post)
     clear_registry()
