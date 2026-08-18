@@ -28,10 +28,9 @@ from ..cloth_kernel import world as kernel_world
 
 _world = kernel_world.World()
 _registry = {}
-_basis_store = {}
 _batch_registry = {}
 _last_frame = None
-_save_snapshot = None
+_last_display = None
 
 NORMAL_AXIS_VECTORS = {
     'RIGHT': (1.0, 0.0, 0.0),
@@ -91,10 +90,10 @@ def clear_registry():
         if entry.team is not None:
             _world.unregister_team(entry.team)
     _registry.clear()
-    _basis_store.clear()
     _batch_registry.clear()
-    global _last_frame
+    global _last_frame, _last_display
     _last_frame = None
+    _last_display = None
 
 
 def get_entry(obj, config_index):
@@ -144,25 +143,7 @@ def notify_config_enabled_changed(obj, config_index):
             _world.request_reset(entry.team, 'FULL')
     else:
         if entry is not None and entry.setup is not None and config.disable_mode == 'RESET':
-            _restore_pose(obj, entry.setup)
-
-
-def _restore_pose(obj, setup):
-    store = _basis_store.get(obj.session_uid, {})
-    animated = armature.collect_animated_bone_names(obj)
-    pose_bones = obj.pose.bones
-    for name in setup.bone_names:
-        if name in animated:
-            continue
-        captured = store.get(name)
-        pose_bone = pose_bones.get(name)
-        if captured is not None and pose_bone is not None:
-            # matrix_basis storage is COLUMN-major (same as the write_basis scatter, c795cdf): assigning a
-            # row-major nested list stores its transpose, so transpose `captured` first to restore it
-            # faithfully. Harmless in practice (the captured pre-cloth rest basis is near-identity, hence
-            # near-symmetric) but keeps this restore path correct for any non-identity rest basis and
-            # consistent with the per-frame write-back.
-            pose_bone.matrix_basis = captured.T.tolist()
+            armature.clear_pose_basis(obj, entry.setup.bone_names)
 
 
 def _topology_token(config):
@@ -406,9 +387,6 @@ def ensure_entry(obj, config_index, config):
         params = _build_params(config)
         entry.params_token = params_token
         entry.team = _world.register_team(setup, params, entry.binding)
-        store = _basis_store.setdefault(obj.session_uid, {})
-        animated = armature.collect_animated_bone_names(obj)
-        entry.kinematics.capture_missing_basis(obj, animated, store)
     elif entry.team is not None:
         if entry.collider_serial != obj.ruri_cloth_physics.collider_serial:
             binding = build_collider_binding(obj, config)
@@ -618,8 +596,6 @@ def run_frame(scene, frame_delta_time):
 
         matrix_world = armature.read_matrix(obj.matrix_world)
         matrix_world_inverse = np.linalg.inv(matrix_world)
-        animated = armature.collect_animated_bone_names(obj)
-        store = _basis_store.setdefault(obj.session_uid, {})
         component_position, component_rotation, component_scale = _component_pose(obj)
         name_map = {}
         name_maps[obj.session_uid] = name_map
@@ -638,7 +614,7 @@ def run_frame(scene, frame_delta_time):
         batch = _ensure_batch(obj, [entry for _, _, entry in active])
         all_basis = armature.read_pose_matrices(obj, "matrix_basis")
         all_matrix = armature.read_pose_matrices(obj, "matrix")
-        gathered = batch.gather(all_basis, animated, store)
+        gathered = batch.gather(all_basis)
         anim_world_all = batch.compute_world(matrix_world, all_matrix, gathered)
         batch._frame_all_matrix = all_matrix
         batch._frame_anim_world = anim_world_all
@@ -700,6 +676,19 @@ def run_frame(scene, frame_delta_time):
         frame_globals.zones = []
     pipeline.run_frame(_world, frame_globals)
 
+    global _last_display
+    _last_display = collected
+    _emit_display(collected)
+
+
+def _emit_display(collected):
+    """Project the solver's current state onto matrix_basis. Pure output, no solver state touched.
+
+    Separating this from the solve is what lets the save guard put the viewport back after clearing
+    the channel for the file: it re-projects the state the solver already holds instead of stepping
+    a zero-length frame, which was measured to move the pose by 1.1e-5 rather than being the no-op
+    it looked like.
+    """
     index_in = 0
     while index_in < len(collected):
         batch = collected[index_in][3]
@@ -727,9 +716,9 @@ def run_frame(scene, frame_delta_time):
         # row-major), so the row-major basis must be TRANSPOSED before it lands in the storage slot. Without
         # the transpose the bone is displayed with matrix_basis = basis^T -- a 3x3 transpose that drops the
         # translation, a pure DISPLAY divergence up to ~1.0 on strongly-posed bones (skirt/sleeve/bow),
-        # measured 2026-08-18. The simulation never reads this back (cloth bones gather the frozen
-        # _basis_store, not the live matrix_basis), so the lockstep gate stays byte-identical either way; the
-        # transpose only corrects what the viewport shows. Read transposes, write transposes.
+        # measured 2026-08-18. This write is pure output: frame_change_pre clears the channel before
+        # Blender re-evaluates animation into it, so nothing here is ever read back as input.
+        # Read transposes, write transposes.
         pose_bones = obj.pose.bones
         count = len(pose_bones)
         flat = np.empty(count * 16, dtype=np.float64)
@@ -779,62 +768,66 @@ def _on_load_post(*args):
     bone_binding.invalidate()
 
 
-def _simulated_armatures():
-    for obj in bpy.data.objects:
+def _solver_driven_bones(scene):
+    """Every bone the solver writes, per armature. This is the add-on's whole output surface."""
+    for obj in scene.objects if scene is not None else ():
         if obj.type != 'ARMATURE':
             continue
         settings = getattr(obj, "ruri_cloth_physics", None)
-        if settings is None or len(settings.configs) == 0:
+        if settings is None or not settings.live or len(settings.configs) == 0:
             continue
-        store = _basis_store.get(obj.session_uid)
-        if store:
-            yield obj, store
+        names = []
+        for index in range(len(settings.configs)):
+            entry = _registry.get((obj.session_uid, index))
+            if entry is not None and entry.setup is not None:
+                names.extend(entry.setup.bone_names)
+        if names:
+            yield obj, names
+
+
+@persistent
+def _on_frame_change_pre(scene, depsgraph=None):
+    # THE input contract. matrix_basis is where the solver writes its result, so it cannot also be
+    # where the solver reads its kinematic input -- that is a read-modify-write on a channel with no
+    # independent source, and it is what silently ate this rig: 233 solver-driven bones had drifted
+    # off their authored pose (worst 118 deg) while all 264 bones the solver never touches stayed
+    # exact, and every open/frame/save cycle baked another layer on top.
+    #
+    # Clearing the channel here, BEFORE Blender evaluates animation for the new frame, makes the
+    # input independent again: Blender refills exactly the channels the animation owns (per channel
+    # -- a bone keyed only on location comes back with its keyed location and a default rotation),
+    # and everything else is the channel default. No shadow copy, no capture heuristic, no
+    # animated/frozen bookkeeping, and no way for yesterday's output to become today's input.
+    for obj, names in _solver_driven_bones(scene):
+        armature.clear_pose_basis(obj, names)
 
 
 @persistent
 def _on_save_pre(*args):
-    # Blender writes whatever matrix_basis currently holds, so saving while the solver is live
-    # stores the SIMULATION RESULT as the authored pose -- and it compounds, because the next
-    # session captures that as its rest and bakes another frame on top. Measured on JsspSi: six
-    # open/frame/save cycles grew one chain's left-right mirror residual 0.0029 -> 0.0228, and the
-    # file had reached a state where all 233 solver-driven bones had left their authored identity
-    # (worst 118 deg, the side hair 9 deg) while all 264 bones the solver never touches were still
-    # exact. That reads as "the left side is broken" and no amount of collider or parameter work can
-    # fix it, because the damage is in the saved pose, not in the simulation.
-    # Restore the authored basis for the duration of the write, then put the live pose back.
-    global _save_snapshot
-    _save_snapshot = {}
-    for obj, store in _simulated_armatures():
-        animated = armature.collect_animated_bone_names(obj)
-        pose_bones = obj.pose.bones
-        snapshot = {}
-        for name, captured in store.items():
-            pose_bone = pose_bones.get(name)
-            if pose_bone is None or name in animated:
-                continue
-            snapshot[name] = armature.read_matrix(pose_bone.matrix_basis)
-            pose_bone.matrix_basis = captured.T.tolist()
-        if snapshot:
-            _save_snapshot[obj.name] = snapshot
+    # Same clear, for the same reason: the file must store the authored pose, not a frame of
+    # simulation. This is now cosmetic rather than load-bearing -- with the input re-derived every
+    # frame a stale value could no longer corrupt anything -- but a .blend whose stored pose means
+    # "what the artist posed" is worth keeping true.
+    _on_frame_change_pre(bpy.context.scene)
 
 
 @persistent
 def _on_save_post(*args):
-    global _save_snapshot
-    for object_name, snapshot in (_save_snapshot or {}).items():
-        obj = bpy.data.objects.get(object_name)
-        if obj is None:
-            continue
-        pose_bones = obj.pose.bones
-        for name, matrix in snapshot.items():
-            pose_bone = pose_bones.get(name)
-            if pose_bone is not None:
-                pose_bone.matrix_basis = matrix.T.tolist()
-        obj.update_tag(refresh={'DATA'})
-    _save_snapshot = None
+    # Put the simulated pose back on screen by re-projecting the state the solver already holds.
+    # Not a zero-delta frame: that re-derives the inputs and was measured to shift the pose by
+    # 1.1e-5 instead of being the no-op it looks like. Re-projection is exact and touches nothing.
+    if _last_display is None:
+        return
+    try:
+        _emit_display(_last_display)
+    except Exception:
+        import traceback
+        traceback.print_exc()
 
 
 def register():
+    if _on_frame_change_pre not in bpy.app.handlers.frame_change_pre:
+        bpy.app.handlers.frame_change_pre.append(_on_frame_change_pre)
     if _on_frame_change_post not in bpy.app.handlers.frame_change_post:
         bpy.app.handlers.frame_change_post.append(_on_frame_change_post)
     if _on_load_post not in bpy.app.handlers.load_post:
@@ -846,6 +839,8 @@ def register():
 
 
 def unregister():
+    if _on_frame_change_pre in bpy.app.handlers.frame_change_pre:
+        bpy.app.handlers.frame_change_pre.remove(_on_frame_change_pre)
     if _on_frame_change_post in bpy.app.handlers.frame_change_post:
         bpy.app.handlers.frame_change_post.remove(_on_frame_change_post)
     if _on_load_post in bpy.app.handlers.load_post:

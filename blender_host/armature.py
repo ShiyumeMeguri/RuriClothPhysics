@@ -1,33 +1,7 @@
 import numpy as np
 
 from . import chain
-from . import compat
 from ..cloth_kernel import compile as kc
-
-_BONE_PATH_TOKEN = 'pose.bones["'
-
-
-def collect_animated_bone_names(obj):
-    names = set()
-
-    def _scan(fcurves):
-        for fcurve in fcurves:
-            if fcurve.mute:
-                continue
-            data_path = fcurve.data_path
-            start = data_path.find(_BONE_PATH_TOKEN)
-            if start < 0:
-                continue
-            start += len(_BONE_PATH_TOKEN)
-            end = data_path.find('"]', start)
-            if end < 0:
-                continue
-            names.add(data_path[start:end])
-
-    _scan(compat.iter_object_fcurves(obj))
-    _scan(compat.iter_nla_fcurves(obj))
-    return names
-
 
 def read_matrix(mathutils_matrix):
     return np.array(mathutils_matrix, dtype=np.float64)
@@ -167,14 +141,24 @@ class KinematicsHost:
         self.external_parent = setup.kin_external_parent
         self.levels = setup.kin_levels
 
-    def capture_missing_basis(self, obj, animated_names, storage):
-        pose_bones = obj.pose.bones
-        for name in self.bone_names:
-            if name in animated_names or name in storage:
-                continue
-            pose_bone = pose_bones.get(name)
-            if pose_bone is not None:
-                storage[name] = read_matrix(pose_bone.matrix_basis)
+
+def clear_pose_basis(obj, names):
+    """Reset the solver's output channel on the given bones to the channel default.
+
+    This is the whole of the input contract: matrix_basis is solver-OUTPUT, so it is wiped before
+    Blender evaluates animation for the frame, and whatever animation owns is then written back on
+    top of it by Blender itself -- NLA, drivers and layered actions included, per channel. Measured
+    on a bone keyed only on location: the keyed location comes back, the rotation stays default.
+    """
+    # Per-bone assignment, deliberately: the bulk foreach_get/foreach_set alternative was measured
+    # and is slightly SLOWER here (33.4 ms against 32.9 ms best-of), because it moves all 497 bones
+    # to touch the ~236 that matter and rebuilds a name lookup every frame.
+    pose_bones = obj.pose.bones
+    identity = np.eye(4).tolist()
+    for name in names:
+        pose_bone = pose_bones.get(name)
+        if pose_bone is not None:
+            pose_bone.matrix_basis = identity
 
 
 def read_pose_matrices(obj, attribute):
@@ -252,37 +236,19 @@ class BatchedKinematics:
             parents = self.parent_index[level]
             internal = parents >= 0
             self.level_groups.append((level[internal], parents[internal]))
-        self.frozen_basis = None
-        self.captured_mask = None
+    def gather(self, all_basis):
+        """The kinematic pose to simulate from -- read straight out of matrix_basis.
 
-    def _build_frozen(self, storage):
-        self.frozen_basis = np.zeros((self.count, 4, 4), dtype=np.float64)
-        self.captured_mask = np.zeros(self.count, dtype=bool)
-        for index, name in enumerate(self.bone_names):
-            captured = storage.get(name)
-            if captured is not None:
-                self.frozen_basis[index] = captured
-                self.captured_mask[index] = True
-
-    def gather(self, all_basis, animated_names, storage):
-        live = all_basis[self.pose_safe]
+        No shadow copy and no animated/frozen split: runtime clears this channel in
+        frame_change_pre, so by the time anyone reads it Blender's animation evaluation has refilled
+        exactly the channels it owns and everything else is the channel default. The old code had to
+        cache a "pre-cloth" basis here precisely because the solver's own write-back was still
+        sitting in the channel it wanted to read.
+        """
+        basis = all_basis[self.pose_safe]
         if self.pose_missing.any():
-            live[self.pose_missing] = np.eye(4)
-        animated = np.fromiter((name in animated_names for name in self.bone_names),
-                               dtype=bool, count=self.count)
-        if self.frozen_basis is None:
-            self._build_frozen(storage)
-        pending = (~animated) & (~self.captured_mask)
-        if pending.any():
-            for index in np.flatnonzero(pending):
-                name = self.bone_names[index]
-                captured = storage.get(name)
-                if captured is None:
-                    captured = live[index].copy()
-                    storage[name] = captured
-                self.frozen_basis[index] = captured
-                self.captured_mask[index] = True
-        return np.where(animated[:, None, None], live, self.frozen_basis)
+            basis[self.pose_missing] = np.eye(4)
+        return basis
 
     def compute_world(self, matrix_world, all_matrix, basis):
         local = np.einsum('nij,njk->nik', self.rest_relative, basis)
