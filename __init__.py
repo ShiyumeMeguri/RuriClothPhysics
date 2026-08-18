@@ -19,8 +19,11 @@ from .blender_host import (
     presets,
     ui,
     runtime,
-    overlay,
-    collider_gizmo,
+    layer_colliders,
+    layer_bones,
+    layer_particles,
+    viewport_draw,
+    viewport_handles,
 )
 
 _MODULES = (
@@ -30,8 +33,11 @@ _MODULES = (
     presets,
     ui,
     runtime,
-    overlay,
-    collider_gizmo,
+    layer_colliders,
+    layer_bones,
+    layer_particles,
+    viewport_draw,
+    viewport_handles,
 )
 
 

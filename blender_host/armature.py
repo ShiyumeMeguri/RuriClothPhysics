@@ -1,5 +1,6 @@
 import numpy as np
 
+from . import chain
 from . import compat
 from ..cloth_kernel import compile as kc
 
@@ -87,33 +88,9 @@ def build_snapshot(obj, config):
     snapshot.connection_mode = config.connection_mode
 
     bones = obj.data.bones
-    root_names = []
-    seen = set()
-    for item in config.root_bones:
-        name = item.bone
-        if name and name in bones and name not in seen:
-            seen.add(name)
-            root_names.append(name)
+    root_names, ordered = chain.config_chain(obj, config)
     snapshot.root_names = root_names
-    if not root_names:
-        return snapshot
-
-    visited = set()
-    ordered = []
-
-    def _visit(bone):
-        if bone.name in visited:
-            return
-        visited.add(bone.name)
-        ordered.append(bone.name)
-        for child in bone.children:
-            _visit(child)
-
-    for name in root_names:
-        bone = bones.get(name)
-        if bone is not None:
-            _visit(bone)
-    if not ordered:
+    if not root_names or not ordered:
         return snapshot
 
     snapshot.bone_names = ordered

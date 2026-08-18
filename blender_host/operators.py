@@ -1,6 +1,7 @@
 import bpy
-from bpy.props import EnumProperty, StringProperty
+from bpy.props import BoolProperty, EnumProperty, StringProperty
 
+from . import chain
 from . import runtime
 
 
@@ -25,8 +26,8 @@ def _selected_bone_names(context):
     if context.mode == 'EDIT_ARMATURE':
         return [bone.name for bone in context.selected_bones or ()]
     obj = context.object
-    if obj is not None and obj.type == 'ARMATURE' and obj.pose is not None:
-        return [pose_bone.name for pose_bone in obj.pose.bones if pose_bone.select]
+    if obj is not None and obj.type == 'ARMATURE':
+        return chain.selected_names(obj)
     return []
 
 
@@ -466,6 +467,185 @@ class RCP_OT_reset(bpy.types.Operator):
         return {'FINISHED'}
 
 
+class RCP_OT_root_add_selected(bpy.types.Operator):
+    bl_idname = "ruri_cloth_physics.root_add_selected"
+    bl_label = "选中骨骼设为根骨骼"
+    bl_description = "把视口里选中的骨骼加入当前配置的根骨骼列表(自动去重)"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        return _active_config(context) is not None and len(_selected_bone_names(context)) > 0
+
+    def execute(self, context):
+        config = _active_config(context)
+        obj = context.object
+        existing = {item.bone for item in config.root_bones}
+        added = []
+        for name in _selected_bone_names(context):
+            if name in existing:
+                continue
+            # A bone already driven as somebody's child would become a second, competing root of
+            # the same chain, so say so instead of quietly building an ambiguous topology.
+            owner_index, owner_root = chain.owning_root(obj, name)
+            if owner_index is not None and owner_root != name:
+                self.report({'WARNING'}, "%s 已属于 %s 的链, 跳过"
+                            % (name, obj.ruri_cloth_physics.configs[owner_index].name))
+                continue
+            config.root_bones.add().bone = name
+            existing.add(name)
+            added.append(name)
+        if not added:
+            self.report({'INFO'}, "没有新增根骨骼")
+            return {'CANCELLED'}
+        config.active_root_bone_index = len(config.root_bones) - 1
+        _mark_rebuild(config)
+        self.report({'INFO'}, "已添加 %d 根: %s" % (len(added), ", ".join(added[:4])))
+        return {'FINISHED'}
+
+
+class RCP_OT_root_remove_selected(bpy.types.Operator):
+    bl_idname = "ruri_cloth_physics.root_remove_selected"
+    bl_label = "移除选中骨骼的链"
+    bl_description = ("从根骨骼列表移除选中的骨骼; 选中的若是链中的子骨骼, "
+                      "则向上找到第一个动态根骨骼并移除它")
+    bl_options = {'REGISTER', 'UNDO'}
+
+    all_configs: BoolProperty(
+        name="搜索全部配置", default=True,
+        description="关闭时只在当前配置里找; 打开时选中哪条链就删哪条, 不必先切到它的配置")
+
+    @classmethod
+    def poll(cls, context):
+        return _active_settings(context) is not None and len(_selected_bone_names(context)) > 0
+
+    def execute(self, context):
+        obj = context.object
+        settings = obj.ruri_cloth_physics
+        active = _active_config(context)
+        targets = {}
+        for name in _selected_bone_names(context):
+            config_index, root_name = chain.owning_root(obj, name)
+            if root_name is None:
+                continue
+            if not self.all_configs and settings.configs[config_index] is not active:
+                continue
+            targets.setdefault(config_index, set()).add(root_name)
+        if not targets:
+            self.report({'WARNING'}, "选中的骨骼不属于任何布料链")
+            return {'CANCELLED'}
+
+        removed = []
+        for config_index, roots in targets.items():
+            config = settings.configs[config_index]
+            for index in range(len(config.root_bones) - 1, -1, -1):
+                if config.root_bones[index].bone in roots:
+                    removed.append(config.root_bones[index].bone)
+                    config.root_bones.remove(index)
+            config.active_root_bone_index = max(0, min(config.active_root_bone_index,
+                                                       len(config.root_bones) - 1))
+            _mark_rebuild(config)
+        self.report({'INFO'}, "已移除 %d 条链: %s" % (len(removed), ", ".join(removed[:4])))
+        return {'FINISHED'}
+
+
+class RCP_OT_chain_select(bpy.types.Operator):
+    bl_idname = "ruri_cloth_physics.chain_select"
+    bl_label = "选中本配置的全部骨骼"
+    bl_description = "在视口里选中当前配置驱动的所有骨骼, 根骨骼设为激活骨骼"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    roots_only: BoolProperty(name="只选根骨骼", default=False)
+
+    @classmethod
+    def poll(cls, context):
+        return _active_config(context) is not None
+
+    def execute(self, context):
+        obj = context.object
+        config = _active_config(context)
+        roots, ordered = chain.config_chain(obj, config)
+        wanted = roots if self.roots_only else ordered
+        if not wanted:
+            self.report({'WARNING'}, "本配置没有可用的根骨骼")
+            return {'CANCELLED'}
+        chain.select(obj, wanted, active=roots[0] if roots else None)
+        self.report({'INFO'}, "已选中 %d 根骨骼" % len(wanted))
+        return {'FINISHED'}
+
+
+class RCP_OT_config_from_selected(bpy.types.Operator):
+    bl_idname = "ruri_cloth_physics.config_from_selected"
+    bl_label = "选中骨骼新建配置"
+    bl_description = "用当前选中的骨骼直接新建一个配置并设为其根骨骼"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        return _active_settings(context) is not None and len(_selected_bone_names(context)) > 0
+
+    def execute(self, context):
+        settings = _active_settings(context)
+        names = _selected_bone_names(context)
+        config = settings.configs.add()
+        config.name = _unique_name(settings.configs, names[0])
+        for name in names:
+            config.root_bones.add().bone = name
+        settings.active_config_index = len(settings.configs) - 1
+        config.active_root_bone_index = len(config.root_bones) - 1
+        _mark_rebuild(config)
+        settings.show_bones = True
+        self.report({'INFO'}, "已新建配置 %s (%d 根)" % (config.name, len(names)))
+        return {'FINISHED'}
+
+
+class RCP_MT_bones(bpy.types.Menu):
+    """Right-click entry point. Right-click any row here to put it on the Q menu."""
+
+    bl_idname = "RCP_MT_bones"
+    bl_label = "Ruri 布料物理"
+
+    def draw(self, context):
+        layout = self.layout
+        settings = _active_settings(context)
+        if settings is None:
+            layout.label(text="当前对象不是骨架", icon='ERROR')
+            return
+        layout.prop(settings, "show_bones", toggle=True,
+                    icon='HIDE_OFF' if settings.show_bones else 'HIDE_ON')
+        layout.prop(settings, "show_colliders", toggle=True,
+                    icon='MESH_CAPSULE')
+        layout.separator()
+        layout.operator("ruri_cloth_physics.root_add_selected", icon='ADD')
+        layout.operator("ruri_cloth_physics.root_remove_selected", icon='REMOVE')
+        layout.operator("ruri_cloth_physics.config_from_selected", icon='DUPLICATE')
+        layout.separator()
+        layout.operator("ruri_cloth_physics.chain_select", icon='RESTRICT_SELECT_OFF')
+        operator = layout.operator("ruri_cloth_physics.chain_select", icon='PINNED',
+                                   text="只选中根骨骼")
+        operator.roots_only = True
+        layout.separator()
+        operator = layout.operator("ruri_cloth_physics.bones_from_selected", icon='PINNED',
+                                   text="选中骨骼设为固定")
+        operator.list_id = 'ATTRIBUTE_OVERRIDES'
+        operator.attribute = 'FIXED'
+        layout.operator("ruri_cloth_physics.colliders_from_selected", icon='MESH_CAPSULE')
+        layout.separator()
+        layout.operator("ruri_cloth_physics.reset", icon='FILE_REFRESH')
+
+
+def _draw_menu(self, context):
+    obj = context.object
+    if obj is not None and obj.type == 'ARMATURE' \
+            and getattr(obj, "ruri_cloth_physics", None) is not None:
+        self.layout.separator()
+        self.layout.menu(RCP_MT_bones.bl_idname, icon='MOD_CLOTH')
+
+
+_MENUS = ("VIEW3D_MT_pose_context_menu", "VIEW3D_MT_armature_context_menu",
+          "VIEW3D_MT_object_context_menu")
+
+
 _CLASSES = (
     RCP_OT_config_add,
     RCP_OT_config_remove,
@@ -479,6 +659,11 @@ _CLASSES = (
     RCP_OT_list_remove,
     RCP_OT_list_move,
     RCP_OT_bones_from_selected,
+    RCP_OT_root_add_selected,
+    RCP_OT_root_remove_selected,
+    RCP_OT_chain_select,
+    RCP_OT_config_from_selected,
+    RCP_MT_bones,
     RCP_OT_wind_zone_add,
     RCP_OT_wind_zone_convert,
     RCP_OT_wind_zone_remove,
@@ -489,8 +674,16 @@ _CLASSES = (
 def register():
     for cls in _CLASSES:
         bpy.utils.register_class(cls)
+    for name in _MENUS:
+        menu = getattr(bpy.types, name, None)
+        if menu is not None:
+            menu.append(_draw_menu)
 
 
 def unregister():
+    for name in _MENUS:
+        menu = getattr(bpy.types, name, None)
+        if menu is not None:
+            menu.remove(_draw_menu)
     for cls in reversed(_CLASSES):
         bpy.utils.unregister_class(cls)

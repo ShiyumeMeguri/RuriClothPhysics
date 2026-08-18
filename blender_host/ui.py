@@ -208,6 +208,20 @@ class RCP_PT_config_main(_ConfigPanel, bpy.types.Panel):
 
         layout.prop(config, "cloth_type")
 
+        settings = context.object.ruri_cloth_physics
+        row = layout.row(align=True)
+        row.scale_y = 1.3
+        row.prop(settings, "show_bones", toggle=True,
+                 icon='HIDE_OFF' if settings.show_bones else 'HIDE_ON')
+        sub = row.row(align=True)
+        sub.enabled = settings.show_bones
+        sub.prop(settings, "bone_display_scope", text="")
+        sub.prop(settings, "bone_display_depth", text="", icon='XRAY')
+        if settings.show_bones:
+            legend = layout.row(align=True)
+            legend.label(text="■ 根骨骼", icon='LAYER_ACTIVE')
+            legend.label(text="■ 被带动的子骨骼", icon='LAYER_USED')
+
         layout.label(text="根骨骼")
         row = layout.row()
         row.template_list("RCP_UL_bone_references", "pb_roots", config, "root_bones", config,
@@ -215,9 +229,19 @@ class RCP_PT_config_main(_ConfigPanel, bpy.types.Panel):
         side = row.column(align=True)
         _draw_side_buttons(side, "ruri_cloth_physics.list_add", "ruri_cloth_physics.list_remove",
                            "ruri_cloth_physics.list_move", 'ROOT_BONES')
-        op = layout.operator("ruri_cloth_physics.bones_from_selected", icon='BONE_DATA',
-                             text="从选中骨骼添加根骨")
-        op.list_id = 'ROOT_BONES'
+        side.separator()
+        side.prop(settings, "sync_list_selection", text="", icon='RESTRICT_SELECT_OFF')
+
+        row = layout.row(align=True)
+        row.operator("ruri_cloth_physics.root_add_selected", icon='ADD', text="添加选中")
+        row.operator("ruri_cloth_physics.root_remove_selected", icon='REMOVE', text="移除选中")
+        row = layout.row(align=True)
+        row.operator("ruri_cloth_physics.chain_select", icon='RESTRICT_SELECT_OFF',
+                     text="选中本链")
+        operator = row.operator("ruri_cloth_physics.chain_select", icon='PINNED', text="只选根骨")
+        operator.roots_only = True
+        layout.operator("ruri_cloth_physics.config_from_selected", icon='DUPLICATE',
+                        text="选中骨骼新建配置")
 
         if is_spring:
             row = layout.row()

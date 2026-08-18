@@ -139,6 +139,33 @@ def _bone_property(name, update, target=None, uid_attribute="bone_uid"):
     return StringProperty(name=name, get=getter, set=setter)
 
 
+def _focus_bone(obj, name):
+    """Make `name` the selected + active bone, so the 3D view follows the list row."""
+    if obj is None or obj.type != 'ARMATURE' or not name:
+        return
+    from . import chain
+    if obj.data.bones.get(name) is None:
+        return
+    chain.select(obj, [name], active=name)
+
+
+def _root_bone_index_update(self, context):
+    """Selecting a root row drives the viewport selection.
+
+    The list and the 3D view are two views of one selection, so picking a row here has to move the
+    armature's own selection -- otherwise every operator that reads selected bones (add, remove,
+    make fixed) silently acts on whatever was highlighted before the user touched the list.
+    """
+    obj = _owner_object(self)
+    if obj is None or obj.type != 'ARMATURE':
+        return
+    settings = obj.ruri_cloth_physics
+    if not settings.sync_list_selection:
+        return
+    if 0 <= self.active_root_bone_index < len(self.root_bones):
+        _focus_bone(obj, self.root_bones[self.active_root_bone_index].bone)
+
+
 class RCPBoneReference(bpy.types.PropertyGroup):
     bone_uid: StringProperty(default="", options={'HIDDEN'})
     bone: _bone_property("骨骼", _topology_update)
@@ -406,7 +433,7 @@ class RCPClothConfig(bpy.types.PropertyGroup):
                              update=_topology_update)
 
     root_bones: CollectionProperty(type=RCPBoneReference)
-    active_root_bone_index: IntProperty(default=0)
+    active_root_bone_index: IntProperty(default=0, update=_root_bone_index_update)
     attribute_overrides: CollectionProperty(type=RCPAttributeOverride)
     active_attribute_override_index: IntProperty(default=0)
 
@@ -503,6 +530,21 @@ class RCPObjectSettings(bpy.types.PropertyGroup):
     show_collider_gizmo: BoolProperty(
         name="拖拽控制器", default=True,
         description="编辑碰撞体时, 为当前碰撞体显示可拖拽的半径/长度/位置控制器")
+    sync_list_selection: BoolProperty(
+        name="列表联动视口选中", default=True,
+        description="在根骨骼列表里选中一行时, 同步选中并激活视口里的那根骨骼")
+    show_bones: BoolProperty(
+        name="显示骨骼", default=False,
+        description="在视口里画出配置驱动的骨骼: 根骨骼与被带动的子骨骼两种颜色; "
+                    "与模拟是否开启无关, 关掉模拟也能看")
+    bone_display_scope: EnumProperty(
+        name="显示范围",
+        items=(('ACTIVE', "当前配置", "只画当前配置的链"),
+               ('ALL', "全部配置", "画出全部配置, 非当前配置压暗")),
+        default='ACTIVE')
+    bone_display_depth: BoolProperty(
+        name="骨骼深度测试", default=False,
+        description="关闭时骨骼画在模型前面, 不会被身体挡住")
     configs: CollectionProperty(type=RCPClothConfig)
     active_config_index: IntProperty(default=0)
     colliders: CollectionProperty(type=RCPColliderItem)
