@@ -16,8 +16,13 @@ COLOR_RADIUS = (1.0, 1.0, 1.0)
 COLOR_END_RADIUS = (0.65, 0.65, 0.68)
 COLOR_LENGTH = (0.25, 0.95, 0.45)
 COLOR_CENTER = (1.0, 0.35, 0.85)
+COLOR_PICK = (0.35, 0.75, 1.0)
 
 MINIMUM_RADIUS = 0.001
+# Calibrated against a real viewport: scale_basis feeds the glyph, not the shaft, and the glyph
+# comes out roughly a twentieth of the value handed in.
+GLYPH_FACTOR = 12.0
+MINIMUM_GLYPH = 0.18
 
 
 def _armatures(context):
@@ -95,17 +100,56 @@ def _axis_frame(matrix, center, column):
     return result
 
 
+def _glyph_scale(settings, reference):
+    """Grab-glyph size for a handle.
+
+    scale_basis sizes the gizmo GLYPH, while the arrow's shaft length comes from its target value --
+    so feeding scale_basis the raw radius drew a grab box about a twentieth of the collider, which
+    is the "tiny tick at the sphere edge" this replaced. The reference is scaled up and floored so a
+    17 mm toe collider is still grabbable, and gizmo_size is the user's escape hatch.
+    """
+    return max(reference * GLYPH_FACTOR, MINIMUM_GLYPH) * settings.gizmo_size
+
+
+def picks(context, obj):
+    """One click target per non-active collider, so every collider can be reached in the viewport.
+
+    Without these only the active collider carried any gizmo, which reads as "some colliders have no
+    handles at all" -- the other twenty-three were only reachable through the properties list.
+    """
+    settings = obj.ruri_cloth_physics
+    found = []
+    for index, item in enumerate(settings.colliders):
+        if index == settings.active_collider_index or not item.enabled:
+            continue
+        matrix = collider_geom.bone_matrix(obj, item.bone)
+        kind, first, second, start_radius, end_radius = collider_geom.solve(item, matrix)
+        frame = mathutils.Matrix.Translation(mathutils.Vector(first))
+        found.append(viewport.Handle(
+            "collider.pick.%d" % index, viewport.PICK, frame,
+            scale=_glyph_scale(settings, start_radius) * 0.6, color=COLOR_PICK,
+            operator="ruri_cloth_physics.collider_activate", properties={"index": index}))
+    return found
+
+
 def handles(context):
     obj, item = _active(context)
     if item is None:
-        return ()
+        obj = context.object
+        if obj is None or obj.type != 'ARMATURE':
+            return ()
+        settings = getattr(obj, "ruri_cloth_physics", None)
+        if settings is None or not settings.show_colliders or not settings.show_collider_gizmo:
+            return ()
+        return picks(context, obj)
+    settings = obj.ruri_cloth_physics
 
     matrix = collider_geom.bone_matrix(obj, item.bone)
     matrix = mathutils.Matrix([list(row) for row in np.asarray(matrix)])
     center = tuple(item.center)
     is_capsule = item.shape == 'CAPSULE'
     radius = item.start_radius if is_capsule else item.radius
-    found = []
+    found = list(picks(context, obj))
 
     def write_radius(value):
         if is_capsule:
@@ -119,7 +163,7 @@ def handles(context):
         found.append(viewport.Handle(
             "collider.radius", viewport.ARROW, _axis_frame(matrix, center, 0),
             read=lambda: item.start_radius if is_capsule else item.radius,
-            write=write_radius, scale=max(radius, MINIMUM_RADIUS), color=COLOR_RADIUS,
+            write=write_radius, scale=_glyph_scale(settings, radius), color=COLOR_RADIUS,
             minimum=MINIMUM_RADIUS))
 
     if is_capsule:
@@ -127,14 +171,14 @@ def handles(context):
             "collider.length", viewport.ARROW, _axis_frame(matrix, center, 1),
             read=lambda: item.length * 0.5,
             write=lambda value: setattr(item, "length", max(float(value) * 2.0, MINIMUM_RADIUS)),
-            scale=max(item.length * 0.5, MINIMUM_RADIUS), color=COLOR_LENGTH,
+            scale=_glyph_scale(settings, item.length * 0.5), color=COLOR_LENGTH,
             minimum=MINIMUM_RADIUS))
         if item.radius_separation:
             found.append(viewport.Handle(
                 "collider.end_radius", viewport.ARROW, _axis_frame(matrix, center, 2),
                 read=lambda: item.end_radius,
                 write=lambda value: setattr(item, "end_radius", value),
-                scale=max(item.end_radius, MINIMUM_RADIUS), color=COLOR_END_RADIUS,
+                scale=_glyph_scale(settings, item.end_radius), color=COLOR_END_RADIUS,
                 minimum=MINIMUM_RADIUS))
 
     # move_3d draws at matrix_basis + rotation @ offset and the offset IS item.center, so this
@@ -146,7 +190,7 @@ def handles(context):
         read=lambda: tuple(item.center),
         write=lambda value: setattr(item, "center",
                                     (float(value[0]), float(value[1]), float(value[2]))),
-        scale=max(radius, MINIMUM_RADIUS) * 1.2, color=COLOR_CENTER))
+        scale=_glyph_scale(settings, radius) * 1.2, color=COLOR_CENTER))
     return found
 
 

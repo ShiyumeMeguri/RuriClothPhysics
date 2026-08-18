@@ -18,6 +18,7 @@ GIZMO_TYPES = {
     viewport.ARROW: "GIZMO_GT_arrow_3d",
     viewport.MOVE: "GIZMO_GT_move_3d",
     viewport.DIAL: "GIZMO_GT_dial_3d",
+    viewport.PICK: "GIZMO_GT_move_3d",
 }
 
 COLOR_HIGHLIGHT = (1.0, 0.95, 0.55)
@@ -68,15 +69,20 @@ class RCP_GGT_handles(bpy.types.GizmoGroup):
             gizmo = self.gizmos.new(GIZMO_TYPES[handle.kind])
             if handle.kind == viewport.ARROW:
                 gizmo.draw_style = 'BOX'
-            elif handle.kind == viewport.MOVE:
+            elif handle.kind in {viewport.MOVE, viewport.PICK}:
                 gizmo.draw_options = {'ALIGN_VIEW'}
             gizmo.use_draw_modal = True
             gizmo.line_width = 3.0
             gizmo.alpha = 0.9
             gizmo.color_highlight = COLOR_HIGHLIGHT
             gizmo.alpha_highlight = 1.0
-            gizmo.target_set_handler("offset", get=_reader(handle.identifier),
-                                     set=_writer(handle.identifier))
+            if handle.operator is not None:
+                properties = gizmo.target_set_operator(handle.operator)
+                for key, value in handle.properties.items():
+                    setattr(properties, key, value)
+            else:
+                gizmo.target_set_handler("offset", get=_reader(handle.identifier),
+                                         set=_writer(handle.identifier))
             self._built[handle.identifier] = gizmo
 
     def refresh(self, context):

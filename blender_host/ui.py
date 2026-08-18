@@ -591,6 +591,7 @@ class RCP_PT_colliders(_ConfigPanel, bpy.types.Panel):
         sub = row.row(align=True)
         sub.enabled = settings.show_colliders
         sub.prop(settings, "show_collider_gizmo", toggle=True, icon='GIZMO')
+        sub.prop(settings, "gizmo_size", text="")
 
         row = layout.row()
         row.template_list("RCP_UL_colliders", "", settings, "colliders", settings,

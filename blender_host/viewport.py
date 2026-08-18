@@ -15,6 +15,7 @@ import numpy as np
 ARROW = 'ARROW'
 MOVE = 'MOVE'
 DIAL = 'DIAL'
+PICK = 'PICK'
 
 _layers = []
 
@@ -70,16 +71,18 @@ class Canvas:
 
 
 class Handle:
-    """One draggable control, expressed as data.
+    """One viewport control, expressed as data.
 
-    `matrix` is a 4x4 whose +Z is the drag axis for ARROW; `read`/`write` are plain callables over
-    the underlying property, so the kernel never learns what is being edited.
+    `matrix` is a 4x4 whose +Z is the drag axis for ARROW. A value handle carries `read`/`write`
+    callables over the underlying property; a PICK carries an operator to run instead, so the kernel
+    never learns what is being edited or selected.
     """
 
-    __slots__ = ("identifier", "kind", "matrix", "scale", "color", "read", "write", "minimum")
+    __slots__ = ("identifier", "kind", "matrix", "scale", "color", "read", "write", "minimum",
+                 "operator", "properties")
 
-    def __init__(self, identifier, kind, matrix, read, write, scale=0.05,
-                 color=(1.0, 1.0, 1.0), minimum=None):
+    def __init__(self, identifier, kind, matrix, read=None, write=None, scale=0.05,
+                 color=(1.0, 1.0, 1.0), minimum=None, operator=None, properties=None):
         self.identifier = identifier
         self.kind = kind
         self.matrix = matrix
@@ -88,6 +91,8 @@ class Handle:
         self.read = read
         self.write = write
         self.minimum = minimum
+        self.operator = operator
+        self.properties = properties or {}
 
 
 class Layer:

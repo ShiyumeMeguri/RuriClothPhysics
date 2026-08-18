@@ -533,6 +533,9 @@ class RCPObjectSettings(bpy.types.PropertyGroup):
     sync_list_selection: BoolProperty(
         name="列表联动视口选中", default=True,
         description="在根骨骼列表里选中一行时, 同步选中并激活视口里的那根骨骼")
+    gizmo_size: FloatProperty(
+        name="控制器大小", default=1.0, min=0.1, max=6.0,
+        description="碰撞体拖拽控制器的抓取块大小倍率, 觉得太小抓不住就调大")
     show_bones: BoolProperty(
         name="显示骨骼", default=False,
         description="在视口里画出配置驱动的骨骼: 根骨骼与被带动的子骨骼两种颜色; "

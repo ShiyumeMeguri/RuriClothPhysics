@@ -1,5 +1,5 @@
 import bpy
-from bpy.props import BoolProperty, EnumProperty, StringProperty
+from bpy.props import BoolProperty, EnumProperty, IntProperty, StringProperty
 
 from . import chain
 from . import runtime
@@ -467,6 +467,27 @@ class RCP_OT_reset(bpy.types.Operator):
         return {'FINISHED'}
 
 
+class RCP_OT_collider_activate(bpy.types.Operator):
+    bl_idname = "ruri_cloth_physics.collider_activate"
+    bl_label = "选中该碰撞体"
+    bl_description = "把视口里点到的碰撞体设为当前碰撞体"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    index: IntProperty(default=0)
+
+    @classmethod
+    def poll(cls, context):
+        return _active_settings(context) is not None
+
+    def execute(self, context):
+        settings = _active_settings(context)
+        if not 0 <= self.index < len(settings.colliders):
+            return {'CANCELLED'}
+        settings.active_collider_index = self.index
+        self.report({'INFO'}, "当前碰撞体: %s" % settings.colliders[self.index].name)
+        return {'FINISHED'}
+
+
 class RCP_OT_root_add_selected(bpy.types.Operator):
     bl_idname = "ruri_cloth_physics.root_add_selected"
     bl_label = "选中骨骼设为根骨骼"
@@ -659,6 +680,7 @@ _CLASSES = (
     RCP_OT_list_remove,
     RCP_OT_list_move,
     RCP_OT_bones_from_selected,
+    RCP_OT_collider_activate,
     RCP_OT_root_add_selected,
     RCP_OT_root_remove_selected,
     RCP_OT_chain_select,
