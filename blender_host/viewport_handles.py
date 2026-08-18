@@ -1,16 +1,25 @@
 """The only gizmo code in the add-on: turn Handle records into draggable Blender gizmos.
 
-Rebuilt from the registry every refresh, so any layer can offer handles without touching this file.
+Gizmos are created ONCE in setup() as fixed pools and only rebound in refresh(). Creating them in
+refresh() -- clear() then new() when the handle set changes -- looks like it works because the first
+build happens to land in setup(): the group draws correctly until you switch to another collider,
+and from then on the freshly created gizmos never appear again. Measured in a real viewport: after
+switching the active collider the wireframe recoloured but every radius / length / centre handle was
+gone, which is exactly the "no controller even when highlighted" report.
 
-Why the old collider gizmos were invisible: the group declared bl_options {'3D','PERSISTENT',
-'SCALE'} while feeding scale_basis world-space sizes clamped to 0.008..0.06. With 'SCALE' the gizmo
-is drawn at a fixed screen size and scale_basis is a MULTIPLIER of it, so every handle rendered at
-under a hundredth of its intended size -- present, pickable in principle, and invisible in practice.
-Handles here are world-scaled on purpose (they should grow with the collider they edit), so 'SCALE'
-is gone and scale_basis stays in world units.
+Two consequences of the pool: a slot serves a different Handle each refresh, so the value callbacks
+resolve through the slot rather than closing over a Handle; and the click operator is bound once to
+a generic dispatcher, which reads the operator to run from whatever Handle currently owns the slot.
+That keeps this file free of any knowledge about colliders or bones.
+
+Why the old collider gizmos were invisible before any of this: the group declared bl_options with
+'SCALE' while feeding scale_basis world-space sizes clamped to 0.008..0.06. With 'SCALE' the gizmo
+draws at a fixed screen size and scale_basis is a MULTIPLIER of it, so every handle rendered at
+under a hundredth of its intended size.
 """
 
 import bpy
+from bpy.props import StringProperty
 
 from . import viewport
 
@@ -21,22 +30,63 @@ GIZMO_TYPES = {
     viewport.PICK: "GIZMO_GT_move_3d",
 }
 
+# Pool depth per kind. Value handles are few and bounded by the richest shape (radius + length +
+# end radius + centre); picks scale with the collider count, so the pool is generous and any excess
+# is reported rather than silently dropped.
+POOL_SIZES = {
+    viewport.ARROW: 4,
+    viewport.MOVE: 2,
+    viewport.DIAL: 2,
+    viewport.PICK: 96,
+}
+
 COLOR_HIGHLIGHT = (1.0, 0.95, 0.55)
 
-_current = {}
+
+def _slot_key(kind, index):
+    return "%s:%d" % (kind, index)
 
 
-def _reader(identifier):
+class RCP_OT_viewport_handle(bpy.types.Operator):
+    """Dispatcher for click-style handles.
+
+    A pool slot is bound to this once and forever; the Handle occupying the slot right now decides
+    which operator actually runs, so the kernel never names a domain operator.
+    """
+
+    bl_idname = "ruri_cloth_physics.viewport_handle"
+    bl_label = "视口手柄"
+    bl_options = {'REGISTER', 'UNDO', 'INTERNAL'}
+
+    slot: StringProperty(default="")
+
+    def execute(self, context):
+        handle = _live_slots.get(self.slot)
+        if handle is None or handle.operator is None:
+            return {'CANCELLED'}
+        module, _, name = handle.operator.partition(".")
+        target = getattr(getattr(bpy.ops, module, None), name, None)
+        if target is None:
+            return {'CANCELLED'}
+        return target(**handle.properties)
+
+
+_live_slots = {}
+
+
+def _reader(slot):
     def read():
-        handle = _current.get(identifier)
-        return handle.read() if handle is not None else 0.0
+        handle = _live_slots.get(slot)
+        if handle is None or handle.read is None:
+            return 0.0
+        return handle.read()
     return read
 
 
-def _writer(identifier):
+def _writer(slot):
     def write(value):
-        handle = _current.get(identifier)
-        if handle is None:
+        handle = _live_slots.get(slot)
+        if handle is None or handle.write is None:
             return
         if handle.minimum is not None:
             try:
@@ -59,51 +109,71 @@ class RCP_GGT_handles(bpy.types.GizmoGroup):
         return bool(viewport.collect_handles(context))
 
     def setup(self, context):
-        self._signature = None
-        self._built = {}
-
-    def _build(self, handles):
-        self.gizmos.clear()
-        self._built = {}
-        for handle in handles:
-            gizmo = self.gizmos.new(GIZMO_TYPES[handle.kind])
-            if handle.kind == viewport.ARROW:
-                gizmo.draw_style = 'BOX'
-            elif handle.kind in {viewport.MOVE, viewport.PICK}:
-                gizmo.draw_options = {'ALIGN_VIEW'}
-            gizmo.use_draw_modal = True
-            gizmo.line_width = 3.0
-            gizmo.alpha = 0.9
-            gizmo.color_highlight = COLOR_HIGHLIGHT
-            gizmo.alpha_highlight = 1.0
-            if handle.operator is not None:
-                properties = gizmo.target_set_operator(handle.operator)
-                for key, value in handle.properties.items():
-                    setattr(properties, key, value)
-            else:
-                gizmo.target_set_handler("offset", get=_reader(handle.identifier),
-                                         set=_writer(handle.identifier))
-            self._built[handle.identifier] = gizmo
+        self._pool = {}
+        for kind, count in POOL_SIZES.items():
+            gizmos = []
+            for index in range(count):
+                slot = _slot_key(kind, index)
+                gizmo = self.gizmos.new(GIZMO_TYPES[kind])
+                if kind == viewport.ARROW:
+                    gizmo.draw_style = 'BOX'
+                elif kind in {viewport.MOVE, viewport.PICK}:
+                    gizmo.draw_options = {'ALIGN_VIEW'}
+                gizmo.use_draw_modal = True
+                gizmo.line_width = 3.0
+                gizmo.alpha = 0.9
+                gizmo.color_highlight = COLOR_HIGHLIGHT
+                gizmo.alpha_highlight = 1.0
+                gizmo.hide = True
+                if kind == viewport.PICK:
+                    properties = gizmo.target_set_operator(RCP_OT_viewport_handle.bl_idname)
+                    properties.slot = slot
+                else:
+                    gizmo.target_set_handler("offset", get=_reader(slot), set=_writer(slot))
+                gizmos.append(gizmo)
+            self._pool[kind] = gizmos
 
     def refresh(self, context):
+        self._sync(context)
+
+    def draw_prepare(self, context):
+        # Both hooks run the same sync because refresh() alone is not enough: Blender calls it on
+        # its own schedule, and switching the active collider is a plain PropertyGroup int write
+        # that tags nothing. Measured in a real viewport -- pick another collider and the wireframe
+        # recolours immediately (the draw handler runs every redraw) while the handles stay bound to
+        # the previous collider, which reads as "no controller even when highlighted".
+        # draw_prepare runs every draw, so the handles cannot go stale.
+        self._sync(context)
+
+    def _sync(self, context):
         handles = viewport.collect_handles(context)
-        _current.clear()
+        _live_slots.clear()
+        used = dict.fromkeys(POOL_SIZES, 0)
+        overflow = 0
         for handle in handles:
-            _current[handle.identifier] = handle
-        signature = tuple(handle.identifier for handle in handles)
-        if signature != getattr(self, "_signature", None):
-            self._build(handles)
-            self._signature = signature
-        for handle in handles:
-            gizmo = self._built.get(handle.identifier)
-            if gizmo is None:
+            gizmos = self._pool.get(handle.kind)
+            if gizmos is None:
                 continue
+            index = used[handle.kind]
+            if index >= len(gizmos):
+                overflow += 1
+                continue
+            slot = _slot_key(handle.kind, index)
+            _live_slots[slot] = handle
+            gizmo = gizmos[index]
+            gizmo.hide = False
             gizmo.matrix_basis = handle.matrix
             gizmo.scale_basis = handle.scale
             gizmo.color = handle.color
+            used[handle.kind] = index + 1
+        for kind, gizmos in self._pool.items():
+            for gizmo in gizmos[used[kind]:]:
+                gizmo.hide = True
+        if overflow:
+            print("RuriClothPhysics: %d viewport handles exceeded the gizmo pool" % overflow)
 
 
-_CLASSES = (RCP_GGT_handles,)
+_CLASSES = (RCP_OT_viewport_handle, RCP_GGT_handles)
 
 
 def register():
@@ -114,4 +184,4 @@ def register():
 def unregister():
     for cls in reversed(_CLASSES):
         bpy.utils.unregister_class(cls)
-    _current.clear()
+    _live_slots.clear()
