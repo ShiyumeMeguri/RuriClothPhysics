@@ -31,12 +31,6 @@ _registry = {}
 _basis_store = {}
 _batch_registry = {}
 _last_frame = None
-# Config revision: bumped whenever the curve node-tree (the FloatCurve control points behind the
-# depth-modulation curves) may have changed. Curve points live in a standalone fake-user node tree
-# edited through Blender's native template_curve_mapping widget, which fires no PropertyGroup update
-# callback -- so param_serial/collider_serial do NOT cover them. A depsgraph_update_post handler bumps
-# this on any NODETREE update, plus undo/redo. It is the one config input the serials cannot track.
-_config_revision = 0
 
 NORMAL_AXIS_VECTORS = {
     'RIGHT': (1.0, 0.0, 0.0),
@@ -364,31 +358,33 @@ def ensure_entry(obj, config_index, config):
         entry = RuntimeEntry()
         _registry[key] = entry
 
-    # Signature fast-path: recompute the topology/params tokens only when the config could have changed.
-    # The revision fully covers every token input -- param_serial (all scalar/topology edits, incl.
-    # gravity_direction), collider_serial (collider edits), _config_revision (curve control points), and
-    # obj.mode (armature edit-mode bone edits). rebuild_pending is checked explicitly (structural
-    # operators set it without a serial bump). During config-static playback this skips the per-frame
-    # RNA-collection walk and 9-curve hashing that dominated ensure_entry.
+    # Signature fast path: skip the rebuild and the collider/params reconciliation while every config
+    # input is byte-identical to last frame. The signature is DERIVED from the tokens themselves, never
+    # from a hand-maintained revision counter standing in for them. The depth-modulation curves live in a
+    # standalone fake-user node tree that the depsgraph never evaluates -- it is not among depsgraph.ids
+    # and editing a control point raises zero depsgraph updates -- so no handler can observe that edit and
+    # any counter gated on one freezes the curve out permanently (measured on this rig: the oracle applies
+    # the edit on the next frame, a revision-gated signature never applies it at all).
     settings = obj.ruri_cloth_physics
-    signature_rev = (settings.param_serial, settings.collider_serial, _config_revision, obj.mode)
+    topology_token = _topology_token(config)
+    params_token = _params_token(obj, config)
+    signature_rev = (topology_token, params_token, settings.collider_serial, obj.mode)
     if (entry.setup is not None and not config.rebuild_pending
             and entry.signature_rev == signature_rev):
         return entry
 
-    token = _topology_token(config)
-    if entry.setup is None or entry.topology_token != token or config.rebuild_pending:
+    if entry.setup is None or entry.topology_token != topology_token or config.rebuild_pending:
         if entry.team is not None:
             _world.unregister_team(entry.team)
             entry.team = None
-        cache_key = (obj.session_uid, config_index, token)
+        cache_key = (obj.session_uid, config_index, topology_token)
         if config.rebuild_pending:
             kernel_compile._cache.pop(cache_key, None)
         snapshot = armature.build_snapshot(obj, config)
         snapshot.token = cache_key
         snapshot.wind_seed = 1 + (zlib.crc32(obj.name.encode("utf-8")) + config_index) % 997
         setup = kernel_compile.build_setup(snapshot)
-        entry.topology_token = token
+        entry.topology_token = topology_token
         config.rebuild_pending = False
         if not setup.valid:
             entry.setup = None
@@ -406,7 +402,7 @@ def ensure_entry(obj, config_index, config):
         entry.write_mask = ~invalid
         entry.position_mask = (move | setup.is_spring) & ~invalid
         params = _build_params(config)
-        entry.params_token = _params_token(obj, config)
+        entry.params_token = params_token
         entry.team = _world.register_team(setup, params, entry.binding)
         store = _basis_store.setdefault(obj.session_uid, {})
         animated = armature.collect_animated_bone_names(obj)
@@ -421,10 +417,9 @@ def ensure_entry(obj, config_index, config):
             entry.collider_serial = obj.ruri_cloth_physics.collider_serial
 
     if entry.team is not None:
-        token = _params_token(obj, config)
-        if entry.params_token != token:
+        if entry.params_token != params_token:
             _world.update_params(entry.team, _build_params(config))
-            entry.params_token = token
+            entry.params_token = params_token
     entry.signature_rev = signature_rev
     return entry
 
@@ -765,36 +760,11 @@ def _on_load_post(*args):
     bone_binding.invalidate()
 
 
-@persistent
-def _on_depsgraph_update_post(scene, depsgraph=None):
-    # Curve control points live in a standalone fake-user node tree edited through Blender's native
-    # template_curve_mapping widget, which fires no PropertyGroup update callback. Blender flags a
-    # NODETREE-type update when that tree is edited, so bump the config revision then. Pure pose-animation
-    # playback never flags NODETREE, so this does not fire on ordinary frames (verified headless).
-    global _config_revision
-    if depsgraph is not None and depsgraph.id_type_updated('NODETREE'):
-        _config_revision += 1
-
-
-@persistent
-def _on_undo_redo_post(*args):
-    # param_serial lives on the PropertyGroup so it is undo-tracked; _config_revision is a module global
-    # that is not, so force one curve re-validation after any undo/redo to catch a reverted curve edit.
-    global _config_revision
-    _config_revision += 1
-
-
 def register():
     if _on_frame_change_post not in bpy.app.handlers.frame_change_post:
         bpy.app.handlers.frame_change_post.append(_on_frame_change_post)
     if _on_load_post not in bpy.app.handlers.load_post:
         bpy.app.handlers.load_post.append(_on_load_post)
-    if _on_depsgraph_update_post not in bpy.app.handlers.depsgraph_update_post:
-        bpy.app.handlers.depsgraph_update_post.append(_on_depsgraph_update_post)
-    if _on_undo_redo_post not in bpy.app.handlers.undo_post:
-        bpy.app.handlers.undo_post.append(_on_undo_redo_post)
-    if _on_undo_redo_post not in bpy.app.handlers.redo_post:
-        bpy.app.handlers.redo_post.append(_on_undo_redo_post)
 
 
 def unregister():
@@ -802,10 +772,4 @@ def unregister():
         bpy.app.handlers.frame_change_post.remove(_on_frame_change_post)
     if _on_load_post in bpy.app.handlers.load_post:
         bpy.app.handlers.load_post.remove(_on_load_post)
-    if _on_depsgraph_update_post in bpy.app.handlers.depsgraph_update_post:
-        bpy.app.handlers.depsgraph_update_post.remove(_on_depsgraph_update_post)
-    if _on_undo_redo_post in bpy.app.handlers.undo_post:
-        bpy.app.handlers.undo_post.remove(_on_undo_redo_post)
-    if _on_undo_redo_post in bpy.app.handlers.redo_post:
-        bpy.app.handlers.redo_post.remove(_on_undo_redo_post)
     clear_registry()
