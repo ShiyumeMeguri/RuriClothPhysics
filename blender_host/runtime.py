@@ -724,6 +724,15 @@ def run_frame(scene, frame_delta_time):
         selected = np.flatnonzero(write_select & (batch.pose_index >= 0))
         stored[batch.pose_index[selected]] = basis[selected].transpose(0, 2, 1)
         pose_bones.foreach_set("matrix_basis", flat)
+        # foreach_set is a raw-array write: unlike the per-bone `pose_bone.matrix_basis = ...` assignment it
+        # replaces, it never runs the property's RNA update callback, so nothing tags the depsgraph. The
+        # solver then keeps stepping every frame while Blender re-evaluates the armature only when something
+        # ELSE dirties it -- during an interactive drag the object transform does that, so the cloth appears
+        # to work; the instant the drag stops the evaluated pose (and every mesh skinned to it) freezes on the
+        # last evaluated frame, which is exactly the settle-to-rest the oracle shows. The batched write owns
+        # the invalidation it suppressed: refresh={'DATA'} is ID_RECALC_GEOMETRY, the same flag rna_Pose_update
+        # raises for a matrix_basis assignment.
+        obj.update_tag(refresh={'DATA'})
 
 
 @persistent
