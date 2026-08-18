@@ -31,6 +31,7 @@ _registry = {}
 _basis_store = {}
 _batch_registry = {}
 _last_frame = None
+_save_snapshot = None
 
 NORMAL_AXIS_VECTORS = {
     'RIGHT': (1.0, 0.0, 0.0),
@@ -778,11 +779,70 @@ def _on_load_post(*args):
     bone_binding.invalidate()
 
 
+def _simulated_armatures():
+    for obj in bpy.data.objects:
+        if obj.type != 'ARMATURE':
+            continue
+        settings = getattr(obj, "ruri_cloth_physics", None)
+        if settings is None or len(settings.configs) == 0:
+            continue
+        store = _basis_store.get(obj.session_uid)
+        if store:
+            yield obj, store
+
+
+@persistent
+def _on_save_pre(*args):
+    # Blender writes whatever matrix_basis currently holds, so saving while the solver is live
+    # stores the SIMULATION RESULT as the authored pose -- and it compounds, because the next
+    # session captures that as its rest and bakes another frame on top. Measured on JsspSi: six
+    # open/frame/save cycles grew one chain's left-right mirror residual 0.0029 -> 0.0228, and the
+    # file had reached a state where all 233 solver-driven bones had left their authored identity
+    # (worst 118 deg, the side hair 9 deg) while all 264 bones the solver never touches were still
+    # exact. That reads as "the left side is broken" and no amount of collider or parameter work can
+    # fix it, because the damage is in the saved pose, not in the simulation.
+    # Restore the authored basis for the duration of the write, then put the live pose back.
+    global _save_snapshot
+    _save_snapshot = {}
+    for obj, store in _simulated_armatures():
+        animated = armature.collect_animated_bone_names(obj)
+        pose_bones = obj.pose.bones
+        snapshot = {}
+        for name, captured in store.items():
+            pose_bone = pose_bones.get(name)
+            if pose_bone is None or name in animated:
+                continue
+            snapshot[name] = armature.read_matrix(pose_bone.matrix_basis)
+            pose_bone.matrix_basis = captured.T.tolist()
+        if snapshot:
+            _save_snapshot[obj.name] = snapshot
+
+
+@persistent
+def _on_save_post(*args):
+    global _save_snapshot
+    for object_name, snapshot in (_save_snapshot or {}).items():
+        obj = bpy.data.objects.get(object_name)
+        if obj is None:
+            continue
+        pose_bones = obj.pose.bones
+        for name, matrix in snapshot.items():
+            pose_bone = pose_bones.get(name)
+            if pose_bone is not None:
+                pose_bone.matrix_basis = matrix.T.tolist()
+        obj.update_tag(refresh={'DATA'})
+    _save_snapshot = None
+
+
 def register():
     if _on_frame_change_post not in bpy.app.handlers.frame_change_post:
         bpy.app.handlers.frame_change_post.append(_on_frame_change_post)
     if _on_load_post not in bpy.app.handlers.load_post:
         bpy.app.handlers.load_post.append(_on_load_post)
+    if _on_save_pre not in bpy.app.handlers.save_pre:
+        bpy.app.handlers.save_pre.append(_on_save_pre)
+    if _on_save_post not in bpy.app.handlers.save_post:
+        bpy.app.handlers.save_post.append(_on_save_post)
 
 
 def unregister():
@@ -790,4 +850,8 @@ def unregister():
         bpy.app.handlers.frame_change_post.remove(_on_frame_change_post)
     if _on_load_post in bpy.app.handlers.load_post:
         bpy.app.handlers.load_post.remove(_on_load_post)
+    if _on_save_pre in bpy.app.handlers.save_pre:
+        bpy.app.handlers.save_pre.remove(_on_save_pre)
+    if _on_save_post in bpy.app.handlers.save_post:
+        bpy.app.handlers.save_post.remove(_on_save_post)
     clear_registry()
