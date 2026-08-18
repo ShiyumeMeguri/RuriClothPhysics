@@ -8,6 +8,10 @@ bl_info = {
     "category": "Physics",
 }
 
+from . import dependencies
+
+dependencies.ensure_installed()
+
 from .blender_host import (
     properties,
     operators,
