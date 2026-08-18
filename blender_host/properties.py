@@ -258,6 +258,9 @@ def _root_bone_index_update(self, context):
     settings = obj.ruri_cloth_physics
     if not settings.sync_list_selection:
         return
+    from . import selection_sync
+    if selection_sync.is_suppressed():
+        return
     if 0 <= self.active_root_bone_index < len(self.root_bones):
         _focus_bone(obj, self.root_bones[self.active_root_bone_index].bone)
 
