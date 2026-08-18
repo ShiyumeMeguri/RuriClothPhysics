@@ -30,14 +30,17 @@ GIZMO_TYPES = {
     viewport.PICK: "GIZMO_GT_move_3d",
 }
 
-# Pool depth per kind. Value handles are few and bounded by the richest shape (radius + length +
-# end radius + centre); picks scale with the collider count, so the pool is generous and any excess
-# is reported rather than silently dropped.
+# Pool depth per kind. Gizmos can only be created in setup(), so a pool that is merely "big enough
+# today" silently truncates the moment a layer offers one more handle: at ARROW=4 a capsule wanted
+# seven (radius, length, end radius, three world-axis centre arrows, bone collision radius) and the
+# last three simply never appeared -- the data layer was correct and the viewport showed nothing,
+# which is indistinguishable from "the feature was never implemented". Sized far above any plausible
+# layer set, and test_viewport asserts the live rig still fits.
 POOL_SIZES = {
-    viewport.ARROW: 4,
-    viewport.MOVE: 2,
-    viewport.DIAL: 2,
-    viewport.PICK: 96,
+    viewport.ARROW: 16,
+    viewport.MOVE: 4,
+    viewport.DIAL: 4,
+    viewport.PICK: 128,
 }
 
 COLOR_HIGHLIGHT = (1.0, 0.95, 0.55)
