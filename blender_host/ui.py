@@ -614,7 +614,10 @@ class RCP_PT_colliders(_ConfigPanel, bpy.types.Panel):
         layout.prop_search(item, "bone", obj.data, "bones")
         if not item.bone:
             layout.label(text="未绑定骨骼, 将跟随骨架原点", icon='ERROR')
-        layout.prop(item, "center")
+        layout.prop(item, "center_world")
+        row = layout.row()
+        row.prop(item, "center", text="中心偏移(骨骼局部)")
+        row.enabled = False
         if item.shape == 'SPHERE':
             layout.prop(item, "radius")
         elif item.shape == 'CAPSULE':

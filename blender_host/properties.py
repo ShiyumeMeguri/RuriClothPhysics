@@ -1,6 +1,7 @@
 import re
 
 import bpy
+import mathutils
 from bpy.props import (
     BoolProperty,
     CollectionProperty,
@@ -199,6 +200,42 @@ class RCPAttributeOverride(bpy.types.PropertyGroup):
     exclude_motion: BoolProperty(name="排除移动限制", default=False, update=_topology_update)
 
 
+def _collider_rotation(item):
+    """Rotation taking the collider's bone-local space to world, or None if it cannot be resolved."""
+    obj = item.id_data
+    if obj is None or getattr(obj, "type", None) != 'ARMATURE':
+        return None
+    if item.bone and obj.pose is not None:
+        pose_bone = obj.pose.bones.get(item.bone)
+        if pose_bone is not None:
+            return (obj.matrix_world @ pose_bone.matrix).to_3x3()
+    return obj.matrix_world.to_3x3()
+
+
+def _center_world_get(self):
+    """The same offset, expressed on WORLD axes.
+
+    `center` is bone-local because that is what the solver consumes, but a bone's Y is the bone
+    direction, so on this rig the head bone maps local X to world -X and local Z to world +Y --
+    typing into a field labelled Z moved the collider forwards, and left/right came out mirrored.
+    This projection is a pure view of `center`; the stored value stays the single truth.
+    """
+    rotation = _collider_rotation(self)
+    if rotation is None:
+        return tuple(self.center)
+    return tuple(rotation @ mathutils.Vector(self.center))
+
+
+def _center_world_set(self, value):
+    rotation = _collider_rotation(self)
+    if rotation is None:
+        self.center = value
+        return
+    inverse = rotation.copy()
+    inverse.invert_safe()
+    self.center = tuple(inverse @ mathutils.Vector(value))
+
+
 COLLIDER_SHAPE_ITEMS = (
     ('SPHERE', "球", "球形碰撞体", 'MESH_UVSPHERE', 0),
     ('CAPSULE', "胶囊", "胶囊碰撞体", 'MESH_CAPSULE', 1),
@@ -220,6 +257,10 @@ class RCPColliderItem(bpy.types.PropertyGroup):
     bone: _bone_property("骨骼", _collider_update)
     center: FloatVectorProperty(name="中心偏移", size=3, default=(0.0, 0.0, 0.0),
                                 subtype='TRANSLATION', update=_collider_update)
+    center_world: FloatVectorProperty(
+        name="中心偏移(世界轴)", size=3, subtype='TRANSLATION',
+        description="与上面同一个偏移, 但按世界 XYZ 表示: 上下就是上下, 左右就是左右",
+        get=_center_world_get, set=_center_world_set)
     radius: FloatProperty(name="半径", default=0.05, min=0.001, soft_max=0.5,
                           update=_collider_update)
     start_radius: FloatProperty(name="始端半径", default=0.05, min=0.001, soft_max=0.5,
