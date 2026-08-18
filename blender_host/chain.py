@@ -67,9 +67,15 @@ def root_names(obj, config):
     return names
 
 
-def descend(obj, roots):
-    """Depth-first bone names under `roots`, roots included, each visited once."""
+def descend(obj, roots, stop=None):
+    """Depth-first bone names under `roots`, roots included, pruned at `stop`.
+
+    `stop` prunes the whole subtree, not just the named bone: a bone that does not belong to this
+    chain cannot have children that do, and a particle whose parent was removed has nothing to hang
+    from.
+    """
     bones = obj.data.bones
+    stop = stop or frozenset()
     visited = set()
     ordered = []
 
@@ -79,6 +85,8 @@ def descend(obj, roots):
         visited.add(bone.name)
         ordered.append(bone.name)
         for child in bone.children:
+            if child.name in stop:
+                continue
             visit(child)
 
     for name in roots:
@@ -88,9 +96,53 @@ def descend(obj, roots):
     return ordered
 
 
+def excluded_names(obj, config):
+    """Bones this config explicitly disowns -- attribute override set to IGNORE."""
+    return {override.bone for override in config.attribute_overrides
+            if override.attribute == 'IGNORE' and override.bone}
+
+
+def boundary_names(obj, config):
+    """Where this config's descent has to stop.
+
+    Two sources, both already declared elsewhere in the data:
+
+    * Another config's ROOT. A bone hierarchy is not carved up by body part -- on this rig
+      ClothA_01_Jnt_L (dress fabric) hangs off Breast_01_Jnt_L, so the breast spring swallowed four
+      cloth bones and simulated skirt fabric as breast tissue. Whoever declares a bone as their root
+      owns it, and the chain above stops there. Without this a bone claimed twice also gets two
+      particles and two write-backs in the same frame, and the last writer silently wins.
+    * An IGNORE attribute override, for fabric that should simply not be simulated at all rather
+      than moved to a config of its own.
+    """
+    settings = getattr(obj, "ruri_cloth_physics", None)
+    if settings is None:
+        return excluded_names(obj, config)
+    mine = set(root_names(obj, config))
+    boundary = set()
+    for other in settings.configs:
+        if other == config:
+            continue
+        boundary.update(name for name in root_names(obj, other) if name not in mine)
+    boundary.update(excluded_names(obj, config))
+    return boundary
+
+
 def config_chain(obj, config):
     roots = root_names(obj, config)
-    return roots, descend(obj, roots)
+    return roots, descend(obj, roots, stop=boundary_names(obj, config))
+
+
+def claimed_twice(obj):
+    """Bones declared as a root by more than one config -- each would get its own particle."""
+    settings = getattr(obj, "ruri_cloth_physics", None)
+    if settings is None:
+        return []
+    owners = {}
+    for config in settings.configs:
+        for name in root_names(obj, config):
+            owners.setdefault(name, []).append(config.name)
+    return [(name, names) for name, names in owners.items() if len(names) > 1]
 
 
 def role_map(obj, config_indices=None):

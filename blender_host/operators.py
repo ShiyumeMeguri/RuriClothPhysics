@@ -595,6 +595,73 @@ class RCP_OT_chain_select(bpy.types.Operator):
         return {'FINISHED'}
 
 
+class RCP_OT_bone_exclude_selected(bpy.types.Operator):
+    bl_idname = "ruri_cloth_physics.bone_exclude_selected"
+    bl_label = "排除选中骨骼"
+    bl_description = ("把选中的骨骼(连同其子级)踢出当前配置的模拟; "
+                      "用于挂在身体骨下面却不属于该部位的东西, 比如挂在胸骨上的布料骨")
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        return _active_config(context) is not None and len(_selected_bone_names(context)) > 0
+
+    def execute(self, context):
+        obj = context.object
+        config = _active_config(context)
+        _, ordered = chain.config_chain(obj, config)
+        inside = set(ordered)
+        roots = set(chain.root_names(obj, config))
+        existing = {override.bone: override for override in config.attribute_overrides}
+        excluded = []
+        for name in _selected_bone_names(context):
+            if name in roots:
+                self.report({'WARNING'}, "%s 是本配置的根骨骼, 请改用移除选中" % name)
+                continue
+            if name not in inside:
+                continue
+            override = existing.get(name)
+            if override is None:
+                override = config.attribute_overrides.add()
+                override.bone = name
+            override.attribute = 'IGNORE'
+            excluded.append(name)
+        if not excluded:
+            self.report({'WARNING'}, "选中的骨骼不在本配置的链里")
+            return {'CANCELLED'}
+        _mark_rebuild(config)
+        remaining = len(chain.config_chain(obj, config)[1])
+        self.report({'INFO'}, "已排除 %d 根, 链剩 %d 根骨骼" % (len(excluded), remaining))
+        return {'FINISHED'}
+
+
+class RCP_OT_bone_include_selected(bpy.types.Operator):
+    bl_idname = "ruri_cloth_physics.bone_include_selected"
+    bl_label = "取消排除"
+    bl_description = "把选中骨骼上的排除标记去掉, 让它重新参与当前配置的模拟"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        return _active_config(context) is not None and len(_selected_bone_names(context)) > 0
+
+    def execute(self, context):
+        config = _active_config(context)
+        wanted = set(_selected_bone_names(context))
+        restored = []
+        for index in range(len(config.attribute_overrides) - 1, -1, -1):
+            override = config.attribute_overrides[index]
+            if override.attribute == 'IGNORE' and override.bone in wanted:
+                restored.append(override.bone)
+                config.attribute_overrides.remove(index)
+        if not restored:
+            self.report({'WARNING'}, "选中骨骼上没有排除标记")
+            return {'CANCELLED'}
+        _mark_rebuild(config)
+        self.report({'INFO'}, "已恢复 %d 根骨骼" % len(restored))
+        return {'FINISHED'}
+
+
 class RCP_OT_config_from_selected(bpy.types.Operator):
     bl_idname = "ruri_cloth_physics.config_from_selected"
     bl_label = "选中骨骼新建配置"
@@ -716,6 +783,8 @@ class RCP_MT_bones(bpy.types.Menu):
         layout.separator()
         layout.operator("ruri_cloth_physics.root_add_selected", icon='ADD')
         layout.operator("ruri_cloth_physics.root_remove_selected", icon='REMOVE')
+        layout.operator("ruri_cloth_physics.bone_exclude_selected", icon='X')
+        layout.operator("ruri_cloth_physics.bone_include_selected", icon='CHECKMARK')
         layout.operator("ruri_cloth_physics.config_from_selected", icon='DUPLICATE')
         layout.separator()
         layout.operator("ruri_cloth_physics.promote_degenerate", icon='ERROR')
@@ -763,6 +832,8 @@ _CLASSES = (
     RCP_OT_root_add_selected,
     RCP_OT_root_remove_selected,
     RCP_OT_chain_select,
+    RCP_OT_bone_exclude_selected,
+    RCP_OT_bone_include_selected,
     RCP_OT_config_from_selected,
     RCP_OT_promote_degenerate,
     RCP_OT_repair_roots,

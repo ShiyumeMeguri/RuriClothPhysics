@@ -274,7 +274,7 @@ class RCPColliderReference(bpy.types.PropertyGroup):
 ATTRIBUTE_OVERRIDE_ITEMS = (
     ('FIXED', "固定", "完全跟随动画, 不参与模拟, 并成为下游骨骼摆动的锚点", 'PINNED', 0),
     ('MOVE', "可动", "参与模拟, 会被重力/风/碰撞带动", 'UNPINNED', 1),
-    ('IGNORE', "剔除", "从模拟中完全移除, 既不动也不作为锚点(会切断这条链)", 'X', 2),
+    ('IGNORE', "排除", "该骨骼连同其全部子级一起退出本配置的模拟", 'X', 2),
 )
 
 
@@ -348,10 +348,10 @@ CAPSULE_DIRECTION_ITEMS = (
 class RCPColliderItem(bpy.types.PropertyGroup):
     enabled: BoolProperty(
         name="启用", default=True,
-        description="关闭后本碰撞体对所有配置立即失效。"
-                    "【已知坑: 禁用期间它的历史位置不会更新, 所以中途重新启用时, "
-                    "求解器会认为它在这一步里从'上次禁用时的位置'一路扫到现在的位置, "
-                    "有可能把布料狠狠打飞。请在烘焙开始前就设定好, 不要在时间轴中段切换】",
+        description="关闭后本碰撞体对所有配置立即失效, 中途重新启用是安全的: "
+                    "求解器会在重新启用的那一帧自动重新快照它的历史位姿, "
+                    "不会把它当成'从禁用前的位置一路扫过来'而把布料打飞。"
+                    "另外, 当它被缩放到接近 0 时会自动挂起, 恢复正常缩放时同样重新快照。",
         update=_collider_update)
     shape: EnumProperty(name="形状", items=COLLIDER_SHAPE_ITEMS, default='SPHERE',
                         description="碰撞体的几何形状。球最快, 胶囊适合四肢躯干, 平面用来做地面。",

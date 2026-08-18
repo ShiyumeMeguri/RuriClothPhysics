@@ -226,6 +226,7 @@ class RCP_PT_config_main(_ConfigPanel, bpy.types.Panel):
             legend = layout.row(align=True)
             legend.label(text="■ 根骨骼", icon='LAYER_ACTIVE')
             legend.label(text="■ 被带动的子骨骼", icon='LAYER_USED')
+            legend.label(text="■ 已排除", icon='X')
 
         layout.label(text="根骨骼")
         row = layout.row()
@@ -245,6 +246,9 @@ class RCP_PT_config_main(_ConfigPanel, bpy.types.Panel):
                      text="选中本链")
         operator = row.operator("ruri_cloth_physics.chain_select", icon='PINNED', text="只选根骨")
         operator.roots_only = True
+        row = layout.row(align=True)
+        row.operator("ruri_cloth_physics.bone_exclude_selected", icon='X', text="排除选中")
+        row.operator("ruri_cloth_physics.bone_include_selected", icon='CHECKMARK', text="取消排除")
         layout.operator("ruri_cloth_physics.config_from_selected", icon='DUPLICATE',
                         text="选中骨骼新建配置")
 
@@ -339,7 +343,7 @@ class RCP_PT_culling(_ConfigPanel, bpy.types.Panel):
         config = _active_config(context)
         culling = config.culling
         layout.prop(culling, "camera_culling_mode")
-        draw_check_slider(layout, culling, "distance_culling_length", "剔除距离")
+        draw_check_slider(layout, culling, "distance_culling_length", "剔除距离 (米)")
         sub = layout.column()
         sub.enabled = culling.distance_culling_length.use
         sub.prop(culling, "distance_culling_fade_ratio")
@@ -378,7 +382,7 @@ class RCP_PT_force(_ConfigPanel, bpy.types.Panel):
             layout.prop(config, "gravity")
             layout.prop(config, "gravity_direction")
             layout.prop(config, "gravity_falloff")
-        draw_curve(layout, config, "damping", "阻尼")
+        draw_curve(layout, config, "damping", "空气阻尼")
         layout.prop(config, "stablization_time")
 
 
@@ -423,7 +427,7 @@ class RCP_PT_angle_restoration(_ConfigPanel, bpy.types.Panel):
 
 
 class RCP_PT_angle_limit(_ConfigPanel, bpy.types.Panel):
-    bl_label = "角度制限"
+    bl_label = "角度限制"
     bl_parent_id = "RCP_PT_parameters"
     bl_options = {'DEFAULT_CLOSED'}
 
@@ -436,7 +440,7 @@ class RCP_PT_angle_limit(_ConfigPanel, bpy.types.Panel):
         _setup_layout(layout)
         limit = _active_config(context).angle_limit
         layout.enabled = limit.use
-        draw_curve(layout, limit, "limit_angle", "制限角度")
+        draw_curve(layout, limit, "limit_angle", "最大弯曲角")
         layout.prop(limit, "stiffness")
 
 
@@ -450,8 +454,12 @@ class RCP_PT_shape_restoration(_NonSpringPanel, bpy.types.Panel):
         _setup_layout(layout)
         config = _active_config(context)
         draw_curve(layout, config.distance, "stiffness", "距离刚性")
-        layout.prop(config.tether, "distance_compression", text="系绳收缩限界")
-        layout.prop(config.triangle_bending, "stiffness", text="三角弯曲刚性")
+        layout.prop(config.tether, "distance_compression", text="允许收缩量")
+        row = layout.row()
+        row.enabled = config.connection_mode != 'LINE'
+        row.prop(config.triangle_bending, "stiffness", text="抗弯折刚性")
+        if config.connection_mode == 'LINE':
+            layout.label(text="抗弯折需要三角面, 请改用网格连接方式", icon='INFO')
 
 
 class RCP_PT_inertia(_ConfigPanel, bpy.types.Panel):
@@ -471,8 +479,8 @@ class RCP_PT_inertia(_ConfigPanel, bpy.types.Panel):
         layout.separator()
         layout.prop(inertia, "world_inertia")
         layout.prop(inertia, "movement_inertia_smoothing")
-        draw_check_slider(layout, inertia, "movement_speed_limit", "世界移动限速")
-        draw_check_slider(layout, inertia, "rotation_speed_limit", "世界旋转限速")
+        draw_check_slider(layout, inertia, "movement_speed_limit", "世界移动限速 (米/秒)")
+        draw_check_slider(layout, inertia, "rotation_speed_limit", "世界旋转限速 (度/秒)")
         layout.prop(inertia, "teleport_mode")
         sub = layout.column()
         sub.enabled = inertia.teleport_mode != 'NONE'
@@ -480,11 +488,11 @@ class RCP_PT_inertia(_ConfigPanel, bpy.types.Panel):
         sub.prop(inertia, "teleport_rotation")
         layout.separator()
         layout.prop(inertia, "local_inertia")
-        draw_check_slider(layout, inertia, "local_movement_speed_limit", "局部移动限速")
-        draw_check_slider(layout, inertia, "local_rotation_speed_limit", "局部旋转限速")
+        draw_check_slider(layout, inertia, "local_movement_speed_limit", "局部移动限速 (米/秒)")
+        draw_check_slider(layout, inertia, "local_rotation_speed_limit", "局部旋转限速 (度/秒)")
         layout.prop(inertia, "depth_inertia")
         layout.prop(inertia, "centrifugal_acceleration")
-        draw_check_slider(layout, inertia, "particle_speed_limit", "粒子限速")
+        draw_check_slider(layout, inertia, "particle_speed_limit", "粒子限速 (米/秒)")
 
 
 class RCP_PT_movement_limit(_NonSpringPanel, bpy.types.Panel):
@@ -499,12 +507,12 @@ class RCP_PT_movement_limit(_NonSpringPanel, bpy.types.Panel):
         layout.prop(motion, "use_max_distance")
         sub = layout.column()
         sub.enabled = motion.use_max_distance
-        draw_curve(sub, motion, "max_distance", "最大距离")
+        draw_curve(sub, motion, "max_distance", "最大偏移距离")
         layout.prop(motion, "use_backstop")
         sub = layout.column()
         sub.enabled = motion.use_backstop
         sub.prop(motion, "backstop_radius")
-        draw_curve(sub, motion, "backstop_distance", "背挡距离")
+        draw_curve(sub, motion, "backstop_distance", "背挡距离 (米)")
         layout.prop(motion, "stiffness")
 
 
@@ -526,9 +534,9 @@ class RCP_PT_collider_collision(_ConfigPanel, bpy.types.Panel):
             row.label(text="模式: 点(固定)")
         else:
             layout.prop(collision, "mode")
-        draw_curve(layout, config, "radius", "粒子半径")
+        draw_curve(layout, config, "radius", "粒子半径 (米)")
         if is_spring:
-            draw_curve(layout, collision, "limit_distance", "推出限距")
+            draw_curve(layout, collision, "limit_distance", "推出距离上限")
             layout.label(text="碰撞骨骼")
             row = layout.row()
             row.template_list("RCP_UL_bone_references", "pb_collision_bones", collision,
@@ -565,7 +573,7 @@ class RCP_PT_self_collision(_NonSpringPanel, bpy.types.Panel):
         layout.prop(self_collision, "sync_mode")
         if self_collision.sync_mode != 'NONE':
             layout.prop_search(self_collision, "sync_partner", obj.ruri_cloth_physics, "configs")
-        draw_curve(layout, self_collision, "surface_thickness", "表面厚度")
+        draw_curve(layout, self_collision, "surface_thickness", "表面厚度 (米)")
         layout.prop(self_collision, "cloth_mass")
 
 

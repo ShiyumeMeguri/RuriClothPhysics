@@ -15,6 +15,7 @@ COLOR_CHILD = (0.10, 0.85, 0.95, 1.0)
 COLOR_ROOT_IDLE = (0.55, 0.44, 0.10, 0.55)
 COLOR_CHILD_IDLE = (0.10, 0.42, 0.48, 0.45)
 COLOR_SELECTED = (1.0, 1.0, 1.0, 1.0)
+COLOR_EXCLUDED = (0.85, 0.15, 0.15, 0.60)
 
 
 def _armatures(context):
@@ -71,6 +72,21 @@ def collect(context, canvas):
             if role == chain.ROLE_ROOT:
                 canvas.points(head[None, :], np.array([color], dtype=np.float32),
                               depth_test=depth_test)
+
+        # Excluded bones are pruned out of the role map, so draw them from the override list. They
+        # are exactly the bones the user needs to see to trust that the boundary landed where they
+        # meant it to -- invisible exclusions are how you end up re-excluding the wrong branch.
+        for index, config in enumerate(settings.configs):
+            if scope is not None and index not in scope:
+                continue
+            for name in chain.excluded_names(obj, config):
+                bone = pose.get(name)
+                if bone is None:
+                    continue
+                head = np.array(matrix_world @ bone.head, dtype=np.float32)
+                tail = np.array(matrix_world @ bone.tail, dtype=np.float32)
+                canvas.lines(*shapes.octahedron(head, tail), color=COLOR_EXCLUDED,
+                             depth_test=depth_test)
 
 
 LAYER = viewport.Layer("bones", poll=poll, collect=collect, order=20)
