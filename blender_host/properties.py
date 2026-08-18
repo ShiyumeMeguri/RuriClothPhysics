@@ -23,10 +23,16 @@ def _owner_object(self):
     return id_data if isinstance(id_data, bpy.types.Object) else None
 
 
+def _redraw(self=None, context=None):
+    from . import viewport
+    viewport.tag_redraw()
+
+
 def _param_update(self, context):
     obj = _owner_object(self)
     if obj is not None and obj.type == 'ARMATURE':
         obj.ruri_cloth_physics.param_serial += 1
+    _redraw()
 
 
 def _topology_update(self, context):
@@ -43,12 +49,14 @@ def _topology_update(self, context):
         for config in settings.configs:
             config.rebuild_pending = True
     settings.param_serial += 1
+    _redraw()
 
 
 def _collider_update(self, context):
     obj = _owner_object(self)
     if obj is not None and obj.type == 'ARMATURE':
         obj.ruri_cloth_physics.collider_serial += 1
+    _redraw()
 
 
 def _use_curve_update(self, context):
@@ -524,34 +532,34 @@ class RCPObjectSettings(bpy.types.PropertyGroup):
     live: BoolProperty(name="实时模拟", default=False,
                        description="在播放/拖动时间轴时实时模拟布料")
     show_colliders: BoolProperty(
-        name="编辑碰撞体", default=False,
+        name="编辑碰撞体", default=False, update=_redraw,
         description="打开后在视口里画出全部碰撞体并显示拖拽控制器, 平时关闭不干扰视图; "
                     "与模拟是否开启无关")
     show_collider_gizmo: BoolProperty(
-        name="拖拽控制器", default=True,
+        name="拖拽控制器", default=True, update=_redraw,
         description="编辑碰撞体时, 为当前碰撞体显示可拖拽的半径/长度/位置控制器")
     sync_list_selection: BoolProperty(
         name="列表联动视口选中", default=True,
         description="在根骨骼列表里选中一行时, 同步选中并激活视口里的那根骨骼")
     gizmo_size: FloatProperty(
-        name="控制器大小", default=1.0, min=0.1, max=6.0,
+        name="控制器大小", default=1.0, min=0.1, max=6.0, update=_redraw,
         description="碰撞体拖拽控制器的抓取块大小倍率, 觉得太小抓不住就调大")
     show_bones: BoolProperty(
-        name="显示骨骼", default=False,
+        name="显示骨骼", default=False, update=_redraw,
         description="在视口里画出配置驱动的骨骼: 根骨骼与被带动的子骨骼两种颜色; "
                     "与模拟是否开启无关, 关掉模拟也能看")
     bone_display_scope: EnumProperty(
-        name="显示范围",
+        name="显示范围", update=_redraw,
         items=(('ACTIVE', "当前配置", "只画当前配置的链"),
                ('ALL', "全部配置", "画出全部配置, 非当前配置压暗")),
         default='ACTIVE')
     bone_display_depth: BoolProperty(
-        name="骨骼深度测试", default=False,
+        name="骨骼深度测试", default=False, update=_redraw,
         description="关闭时骨骼画在模型前面, 不会被身体挡住")
     configs: CollectionProperty(type=RCPClothConfig)
     active_config_index: IntProperty(default=0)
     colliders: CollectionProperty(type=RCPColliderItem)
-    active_collider_index: IntProperty(default=0)
+    active_collider_index: IntProperty(default=0, update=_redraw)
     param_serial: IntProperty(default=0, options={'HIDDEN'})
     collider_serial: IntProperty(default=0, options={'HIDDEN'})
 

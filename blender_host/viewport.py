@@ -20,6 +20,18 @@ PICK = 'PICK'
 _layers = []
 
 
+def rgba(color):
+    """Accept RGB or RGBA and always return RGBA.
+
+    Gizmo colours are RGB while the shader wants RGBA, and a bare `colors[:] = color` turns that
+    mismatch into a ValueError inside the draw handler -- which does not just drop one shape, it
+    aborts the whole pass and blanks every overlay for that frame. Normalising here means no caller
+    can reintroduce it.
+    """
+    values = tuple(color)
+    return values if len(values) == 4 else (values[0], values[1], values[2], 1.0)
+
+
 class Canvas:
     """Accumulates wireframe for one frame, split by whether it is depth tested."""
 
@@ -36,7 +48,7 @@ class Canvas:
         interleaved[1::2] = ends
         line_positions.append(interleaved)
         colors = np.empty((count * 2, 4), dtype=np.float32)
-        colors[:] = color
+        colors[:] = rgba(color)
         line_colors.append(colors)
 
     def lines_colored(self, starts, ends, colors, depth_test=False):
@@ -104,6 +116,26 @@ class Layer:
         self.poll = poll
         self.collect = collect
         self.handles = handles
+
+
+def tag_redraw():
+    """Ask every 3D view to redraw.
+
+    Editing an add-on PropertyGroup tags nothing on its own, so the viewport keeps showing the old
+    wireframe until something unrelated forces a redraw -- which is why re-binding a collider's bone
+    only appeared to take effect after toggling the collider display off and on again.
+    """
+    import bpy
+    manager = bpy.context.window_manager
+    if manager is None:
+        return
+    for window in manager.windows:
+        screen = window.screen
+        if screen is None:
+            continue
+        for area in screen.areas:
+            if area.type == 'VIEW_3D':
+                area.tag_redraw()
 
 
 def register_layer(layer):
