@@ -166,7 +166,12 @@ def _restore_pose(obj, setup):
         captured = store.get(name)
         pose_bone = pose_bones.get(name)
         if captured is not None and pose_bone is not None:
-            pose_bone.matrix_basis = captured.tolist()
+            # matrix_basis storage is COLUMN-major (same as the write_basis scatter, c795cdf): assigning a
+            # row-major nested list stores its transpose, so transpose `captured` first to restore it
+            # faithfully. Harmless in practice (the captured pre-cloth rest basis is near-identity, hence
+            # near-symmetric) but keeps this restore path correct for any non-identity rest basis and
+            # consistent with the per-frame write-back.
+            pose_bone.matrix_basis = captured.T.tolist()
 
 
 def _topology_token(config):
