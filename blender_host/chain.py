@@ -117,6 +117,70 @@ def role_map(obj, config_indices=None):
     return mapping
 
 
+# Calibrated against the two hubs on this rig, which look identical in shape and behave nothing
+# alike. SleeveC_Jnt sits at 0.016-0.020 of its config's median gap and whips at 67 deg per frame;
+# BowB_Jnt is also a 5 mm stub with two children but sits at 0.16-0.31 and is perfectly calm at
+# 3.3 deg. 0.05 is three times above the broken one and three times below the healthy one.
+DEGENERATE_RATIO = 0.05
+
+
+def _head(bone):
+    return bone.head_local
+
+
+def degenerate_links(obj, config):
+    """Child bones that start almost on top of their parent, which the solver cannot handle.
+
+    A constraint whose rest length is a rounding error next to the particle radius fights itself,
+    and a hub solved from near-coincident children has no stable orientation: measured on this rig,
+    SleeveC_Jnt sat 1.0-1.3 mm from both its children against 60-90 mm everywhere else in the same
+    config, and whipped at 67 deg per frame while every other chain stayed under half a degree.
+
+    The test is scale free -- a gap is only suspicious against the OTHER gaps of the same config --
+    so a legitimately dense chain, where every link is short, reports nothing.
+    """
+    import statistics
+
+    roots, ordered = config_chain(obj, config)
+    if not ordered:
+        return []
+    bones = obj.data.bones
+    inside = set(ordered)
+    gaps = []
+    for name in ordered:
+        bone = bones.get(name)
+        parent = bone.parent if bone is not None else None
+        if parent is None or parent.name not in inside:
+            continue
+        head = _head(bone)
+        parent_head = _head(parent)
+        distance = ((head[0] - parent_head[0]) ** 2 + (head[1] - parent_head[1]) ** 2
+                    + (head[2] - parent_head[2]) ** 2) ** 0.5
+        gaps.append((name, parent.name, distance))
+    if len(gaps) < 2:
+        return []
+    median = statistics.median(distance for _, _, distance in gaps)
+    if median <= 0.0:
+        return []
+    return [(name, parent, distance, median) for name, parent, distance in gaps
+            if distance < median * DEGENERATE_RATIO]
+
+
+def unpinned_roots(obj, config):
+    """Roots whose attribute override drags them off FIXED.
+
+    compile.py fills MOVE for every bone, then FIXED for the roots, then lets overrides REPLACE the
+    result -- so an override saying MOVE on a root removes the only anchor the chain has and it
+    drifts away under gravity. The override is usually harmless when it is written, because the bone
+    is mid-chain and MOVE is what it would have been anyway; it only turns fatal later, when that
+    bone is promoted to a root. Measured: promoting SleeveC_01/03 with their old MOVE overrides
+    still in place sent the chain 2.6 m off the body over 240 frames.
+    """
+    declared = set(root_names(obj, config))
+    return [(override.bone, override.attribute) for override in config.attribute_overrides
+            if override.bone in declared and override.attribute != 'FIXED']
+
+
 def owning_root(obj, bone_name):
     """Walk up from `bone_name` to the first bone that is a declared root of any config.
 

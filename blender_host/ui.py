@@ -243,6 +243,24 @@ class RCP_PT_config_main(_ConfigPanel, bpy.types.Panel):
         layout.operator("ruri_cloth_physics.config_from_selected", icon='DUPLICATE',
                         text="选中骨骼新建配置")
 
+        from . import chain
+        links = chain.degenerate_links(context.object, config)
+        if links:
+            box = layout.box()
+            box.label(text="检测到退化链(会剧烈自转)", icon='ERROR')
+            for name, parent, distance, median in links[:4]:
+                box.label(text="%s 距 %s 仅 %.1fmm, 本配置中位 %.1fmm"
+                               % (name, parent, distance * 1000.0, median * 1000.0))
+            box.operator("ruri_cloth_physics.promote_degenerate", icon='SHADERFX')
+
+        loose = chain.unpinned_roots(context.object, config)
+        if loose:
+            box = layout.box()
+            box.label(text="根骨骼被覆盖解除了固定(整条链会飘走)", icon='ERROR')
+            for name, attribute in loose[:4]:
+                box.label(text="%s 被设为 %s" % (name, attribute))
+            box.operator("ruri_cloth_physics.repair_roots", icon='PINNED')
+
         if is_spring:
             row = layout.row()
             row.enabled = False

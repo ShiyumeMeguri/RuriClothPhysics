@@ -620,6 +620,83 @@ class RCP_OT_config_from_selected(bpy.types.Operator):
         return {'FINISHED'}
 
 
+def _pin_roots(config):
+    """Force every override that lands on a root back to FIXED, preserving its other flags."""
+    declared = {item.bone for item in config.root_bones}
+    repaired = []
+    for override in config.attribute_overrides:
+        if override.bone in declared and override.attribute != 'FIXED':
+            override.attribute = 'FIXED'
+            repaired.append(override.bone)
+    return repaired
+
+
+class RCP_OT_repair_roots(bpy.types.Operator):
+    bl_idname = "ruri_cloth_physics.repair_roots"
+    bl_label = "修复被解除固定的根骨骼"
+    bl_description = ("属性覆盖把根骨骼从固定改成了移动, 该链会失去锚点整条飘走; "
+                      "点此把这些覆盖改回固定")
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        config = _active_config(context)
+        return config is not None and bool(chain.unpinned_roots(context.object, config))
+
+    def execute(self, context):
+        config = _active_config(context)
+        repaired = _pin_roots(config)
+        if not repaired:
+            return {'CANCELLED'}
+        _mark_rebuild(config)
+        self.report({'INFO'}, "已重新固定: %s" % ", ".join(repaired))
+        return {'FINISHED'}
+
+
+class RCP_OT_promote_degenerate(bpy.types.Operator):
+    bl_idname = "ruri_cloth_physics.promote_degenerate"
+    bl_label = "修复退化链"
+    bl_description = ("把与父骨几乎重合的子骨升为根骨骼, 并移除退化的中枢骨; "
+                      "零长约束会让该链剧烈自转")
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        config = _active_config(context)
+        return config is not None and bool(chain.degenerate_links(context.object, config))
+
+    def execute(self, context):
+        obj = context.object
+        config = _active_config(context)
+        links = chain.degenerate_links(obj, config)
+        if not links:
+            return {'CANCELLED'}
+        # The offending parent is the hub; its near-coincident children become the new roots and it
+        # goes back to being plain kinematic geometry, which is what every healthy root here does.
+        hubs = {parent for _, parent, _, _ in links}
+        promoted = {name for name, _, _, _ in links}
+        names = [item.bone for item in config.root_bones]
+        rebuilt = []
+        for name in names:
+            if name in hubs:
+                rebuilt.extend(sorted(child for child, parent, _, _ in links if parent == name))
+            else:
+                rebuilt.append(name)
+        for child in sorted(promoted):
+            if child not in rebuilt:
+                rebuilt.append(child)
+        config.root_bones.clear()
+        for name in rebuilt:
+            config.root_bones.add().bone = name
+        config.active_root_bone_index = 0
+        # Promotion is exactly what turns a harmless mid-chain MOVE override into an unpinned root,
+        # so repair them in the same step rather than leaving a chain that silently drifts away.
+        _pin_roots(config)
+        _mark_rebuild(config)
+        self.report({'INFO'}, "已升为根: %s" % ", ".join(sorted(promoted)))
+        return {'FINISHED'}
+
+
 class RCP_MT_bones(bpy.types.Menu):
     """Right-click entry point. Right-click any row here to put it on the Q menu."""
 
@@ -641,6 +718,8 @@ class RCP_MT_bones(bpy.types.Menu):
         layout.operator("ruri_cloth_physics.root_remove_selected", icon='REMOVE')
         layout.operator("ruri_cloth_physics.config_from_selected", icon='DUPLICATE')
         layout.separator()
+        layout.operator("ruri_cloth_physics.promote_degenerate", icon='ERROR')
+        layout.operator("ruri_cloth_physics.repair_roots", icon='PINNED')
         layout.operator("ruri_cloth_physics.chain_select", icon='RESTRICT_SELECT_OFF')
         operator = layout.operator("ruri_cloth_physics.chain_select", icon='PINNED',
                                    text="只选中根骨骼")
@@ -685,6 +764,8 @@ _CLASSES = (
     RCP_OT_root_remove_selected,
     RCP_OT_chain_select,
     RCP_OT_config_from_selected,
+    RCP_OT_promote_degenerate,
+    RCP_OT_repair_roots,
     RCP_MT_bones,
     RCP_OT_wind_zone_add,
     RCP_OT_wind_zone_convert,
