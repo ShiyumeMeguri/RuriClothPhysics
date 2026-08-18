@@ -30,6 +30,7 @@ from ..cloth_kernel import world as kernel_world
 _world = kernel_world.World()
 _registry = {}
 _basis_store = {}
+_batch_registry = {}
 _last_frame = None
 # Config revision: bumped whenever the curve node-tree (the FloatCurve control points behind the
 # depth-modulation curves) may have changed. Curve points live in a standalone fake-user node tree
@@ -98,6 +99,7 @@ def clear_registry():
             _world.unregister_team(entry.team)
     _registry.clear()
     _basis_store.clear()
+    _batch_registry.clear()
     frame_cache.clear_all()
     global _last_frame
     _last_frame = None
@@ -626,6 +628,22 @@ def try_replay(scene):
     return True
 
 
+def _ensure_batch(obj, entries):
+    # One BatchedKinematics per armature aggregates every active entry's kinematics so the per-frame
+    # gather / forward-kinematics / world / collider / write-back run as a single vectorized pass instead
+    # of a per-entry, per-bone Python loop. It is cached and rebuilt only when the active set or any
+    # entry's signature changes -- the same A2 signature_rev revision that gates ensure_entry (no separate
+    # invalidation mechanism). Inherits A2's boundary: an outliner bone rename mid-playback without a mode
+    # switch is a pathological case that is not defended.
+    key = obj.session_uid
+    token = tuple((id(entry), id(entry.setup), entry.signature_rev) for entry in entries)
+    cached = _batch_registry.get(key)
+    if cached is None or cached[0] != token:
+        cached = (token, armature.BatchedKinematics(obj, entries))
+        _batch_registry[key] = cached
+    return cached[1]
+
+
 def run_frame(scene, frame_delta_time):
     scene_settings = scene.ruri_cloth_physics
     frame_globals = kernel_io.FrameGlobals()
@@ -651,29 +669,35 @@ def run_frame(scene, frame_delta_time):
         name_map = {}
         name_maps[obj.session_uid] = name_map
 
+        active = []
         for index, config in enumerate(settings.configs):
             if not config.enabled:
                 continue
             entry = ensure_entry(obj, index, config)
             if entry.setup is None or entry.team is None:
                 continue
+            active.append((index, config, entry))
+        if not active:
+            continue
+
+        batch = _ensure_batch(obj, [entry for _, _, entry in active])
+        all_basis = armature.read_pose_matrices(obj, "matrix_basis")
+        all_matrix = armature.read_pose_matrices(obj, "matrix")
+        gathered = batch.gather(all_basis, animated, store)
+        anim_world_all = batch.compute_world(matrix_world, all_matrix, gathered)
+        batch._frame_all_matrix = all_matrix
+        batch._frame_anim_world = anim_world_all
+        batch._frame_matrix_world_inverse = matrix_world_inverse
+
+        for entry_index, (index, config, entry) in enumerate(active):
             invisible, distance_weight = _evaluate_culling(obj, entry, config, scene)
             if invisible:
                 continue
 
-            setup = entry.setup
-            kin = entry.kinematics
-            basis = kin.gather_basis(obj, animated, store)
-            anim_pose = kin.compute_pose(obj, basis)
-            anim_world = kin.world_from_pose(matrix_world, anim_pose)
-
-            n = len(setup.bone_names)
-            transform_count = len(setup.transform_names)
-            transform_worlds = np.empty((transform_count, 4, 4))
-            transform_worlds[:n] = anim_world
-            for extra in range(n, transform_count):
-                world = armature.evaluate_live_bone_world(obj, setup.transform_names[extra])
-                transform_worlds[extra] = world if world is not None else matrix_world
+            start, stop = batch.slices[entry_index]
+            anim_world = anim_world_all[start:stop]
+            transform_worlds = batch.entry_transform_worlds(entry_index, matrix_world,
+                                                            all_matrix, anim_world)
 
             anchor = _anchor_world(obj, config)
             kernel_io.set_team_frame_input(_world, entry.team, component_position,
@@ -683,15 +707,16 @@ def run_frame(scene, frame_delta_time):
 
             binding = entry.binding
             if binding.count:
-                import mathutils
                 positions = np.zeros((binding.count, 3), dtype=np.float32)
                 rotations = np.zeros((binding.count, 4), dtype=np.float32)
                 scales = np.ones((binding.count, 3), dtype=np.float32)
                 enabled = np.ones(binding.count, dtype=bool)
                 pose_bones = obj.pose.bones
+                collider_start, _ = batch.collider_slices[entry_index]
+                collider_index = batch.collider_pose_index
                 for k in range(binding.count):
-                    name = binding.bone_names[k]
-                    pose_bone = pose_bones.get(name) if name else None
+                    bone_index = int(collider_index[collider_start + k])
+                    pose_bone = pose_bones[bone_index] if bone_index >= 0 else None
                     if pose_bone is not None:
                         world = obj.matrix_world @ pose_bone.matrix
                     else:
@@ -709,13 +734,13 @@ def run_frame(scene, frame_delta_time):
                 digest = (index, _cache_signature(obj, config, salt),
                           frame_cache.input_hash(
                               obj, entry.input_names,
-                              frame_cache.animated_inputs(setup, animated), salt))
+                              frame_cache.animated_inputs(entry.setup, animated), salt))
 
             name_map[config.name] = entry.team
-            collected.append((entry, obj, config, anim_world, matrix_world_inverse,
+            collected.append((entry, obj, config, batch, entry_index, start, stop,
                               obj.session_uid, digest))
 
-    for entry, obj, config, anim_world, matrix_world_inverse, uid, digest in collected:
+    for entry, obj, config, batch, entry_index, start, stop, uid, digest in collected:
         partner_name = config.self_collision.sync_partner
         partner = 0
         if partner_name and partner_name != config.name:
@@ -728,11 +753,12 @@ def run_frame(scene, frame_delta_time):
         frame_globals.zones = []
     pipeline.run_frame(_world, frame_globals)
 
-    for entry, obj, config, anim_world, matrix_world_inverse, uid, digest in collected:
+    for entry, obj, config, batch, entry_index, start, stop, uid, digest in collected:
         out_positions, out_rotations = kernel_io.team_output(_world, entry.team)
+        anim_world = batch._frame_anim_world[start:stop]
         basis = entry.kinematics.write_back(obj, out_positions.astype(np.float64), out_rotations,
                                             entry.write_mask, entry.position_mask, anim_world,
-                                            matrix_world_inverse)
+                                            batch._frame_matrix_world_inverse)
         if digest is None:
             continue
         index, signature, input_digest = digest

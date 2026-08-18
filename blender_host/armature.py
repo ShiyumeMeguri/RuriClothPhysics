@@ -198,51 +198,6 @@ class KinematicsHost:
             if pose_bone is not None:
                 storage[name] = read_matrix(pose_bone.matrix_basis)
 
-    def gather_basis(self, obj, animated_names, storage):
-        pose_bones = obj.pose.bones
-        n = len(self.bone_names)
-        basis = np.empty((n, 4, 4), dtype=np.float64)
-        identity = np.eye(4, dtype=np.float64)
-        for i, name in enumerate(self.bone_names):
-            if name in animated_names:
-                pose_bone = pose_bones.get(name)
-                basis[i] = read_matrix(pose_bone.matrix_basis) if pose_bone is not None else identity
-            else:
-                captured = storage.get(name)
-                if captured is None:
-                    pose_bone = pose_bones.get(name)
-                    captured = read_matrix(pose_bone.matrix_basis) if pose_bone is not None else identity
-                    storage[name] = captured
-                basis[i] = captured
-        return basis
-
-    def compute_pose(self, obj, basis):
-        pose_bones = obj.pose.bones
-        n = len(self.bone_names)
-        local = np.einsum('nij,njk->nik', self.rest_relative, basis)
-        pose = np.empty((n, 4, 4), dtype=np.float64)
-        for level in self.levels:
-            parents = self.parent_index[level]
-            internal = parents >= 0
-            if np.any(internal):
-                v = level[internal]
-                pose[v] = np.einsum('nij,njk->nik', pose[parents[internal]], local[v])
-            roots = level[~internal]
-            for v in roots:
-                external = self.external_parent[v]
-                if external is not None:
-                    parent_bone = pose_bones.get(external)
-                    if parent_bone is not None:
-                        pose[v] = read_matrix(parent_bone.matrix) @ local[v]
-                    else:
-                        pose[v] = local[v]
-                else:
-                    pose[v] = local[v]
-        return pose
-
-    def world_from_pose(self, obj_matrix_world, pose):
-        return np.einsum('ij,njk->nik', obj_matrix_world, pose)
-
     def write_back(self, obj, world_positions, world_rotations, write_mask, position_mask,
                    anim_world, obj_matrix_world_inverse):
         pose_bones = obj.pose.bones
@@ -280,3 +235,143 @@ class KinematicsHost:
             if pose_bone is not None:
                 pose_bone.matrix_basis = basis[i].tolist()
         return basis
+
+
+def read_pose_matrices(obj, attribute):
+    pose_bones = obj.pose.bones
+    count = len(pose_bones)
+    flat = np.empty(count * 16, dtype=np.float64)
+    pose_bones.foreach_get(attribute, flat)
+    return flat.reshape(count, 4, 4).transpose(0, 2, 1)
+
+
+class BatchedKinematics:
+    def __init__(self, obj, entries):
+        name_to_index = {bone.name: index for index, bone in enumerate(obj.pose.bones)}
+        rest_relative = []
+        rest_relative_inverse = []
+        parent_index = []
+        pose_index = []
+        external_index = []
+        bone_names = []
+        write_mask = []
+        position_mask = []
+        transform_extra = []
+        collider_pose_index = []
+        self.slices = []
+        self.collider_slices = []
+        levels_by_depth = {}
+        offset = 0
+        collider_offset = 0
+        for entry in entries:
+            kinematics = entry.kinematics
+            count = len(kinematics.bone_names)
+            self.slices.append((offset, offset + count))
+            rest_relative.append(kinematics.rest_relative)
+            rest_relative_inverse.append(kinematics.rest_relative_inverse)
+            for local in range(count):
+                parent = int(kinematics.parent_index[local])
+                parent_index.append(parent + offset if parent >= 0 else -1)
+            for name in kinematics.bone_names:
+                pose_index.append(name_to_index.get(name, -1))
+            for name in kinematics.external_parent:
+                external_index.append(name_to_index.get(name, -1) if name is not None else -1)
+            bone_names.extend(kinematics.bone_names)
+            write_mask.append(entry.write_mask)
+            position_mask.append(entry.position_mask)
+            for depth, level in enumerate(kinematics.levels):
+                levels_by_depth.setdefault(depth, []).append(np.asarray(level, dtype=np.int64) + offset)
+            extras = entry.setup.transform_names[count:]
+            transform_extra.append(np.array([name_to_index.get(name, -1) for name in extras], dtype=np.int64))
+            binding = entry.binding
+            self.collider_slices.append((collider_offset, collider_offset + binding.count))
+            for index in range(binding.count):
+                name = binding.bone_names[index]
+                collider_pose_index.append(name_to_index.get(name, -1) if name else -1)
+            collider_offset += binding.count
+            offset += count
+        self.count = offset
+        self.rest_relative = np.concatenate(rest_relative, axis=0) if rest_relative \
+            else np.zeros((0, 4, 4))
+        self.rest_relative_inverse = np.concatenate(rest_relative_inverse, axis=0) if rest_relative_inverse \
+            else np.zeros((0, 4, 4))
+        self.parent_index = np.array(parent_index, dtype=np.int64)
+        self.pose_index = np.array(pose_index, dtype=np.int64)
+        self.external_index = np.array(external_index, dtype=np.int64)
+        self.bone_names = bone_names
+        self.write_mask = np.concatenate(write_mask) if write_mask else np.zeros(0, dtype=bool)
+        self.position_mask = np.concatenate(position_mask) if position_mask else np.zeros(0, dtype=bool)
+        self.transform_extra = transform_extra
+        self.collider_pose_index = np.array(collider_pose_index, dtype=np.int64)
+        self.root_mask = self.parent_index < 0
+        self.pose_safe = np.where(self.pose_index >= 0, self.pose_index, 0)
+        self.pose_missing = self.pose_index < 0
+        self.level_groups = []
+        for depth in sorted(levels_by_depth.keys()):
+            level = np.concatenate(levels_by_depth[depth])
+            parents = self.parent_index[level]
+            internal = parents >= 0
+            self.level_groups.append((level[internal], parents[internal]))
+        self.frozen_basis = None
+        self.captured_mask = None
+
+    def _build_frozen(self, storage):
+        self.frozen_basis = np.zeros((self.count, 4, 4), dtype=np.float64)
+        self.captured_mask = np.zeros(self.count, dtype=bool)
+        for index, name in enumerate(self.bone_names):
+            captured = storage.get(name)
+            if captured is not None:
+                self.frozen_basis[index] = captured
+                self.captured_mask[index] = True
+
+    def gather(self, all_basis, animated_names, storage):
+        live = all_basis[self.pose_safe]
+        if self.pose_missing.any():
+            live[self.pose_missing] = np.eye(4)
+        animated = np.fromiter((name in animated_names for name in self.bone_names),
+                               dtype=bool, count=self.count)
+        if self.frozen_basis is None:
+            self._build_frozen(storage)
+        pending = (~animated) & (~self.captured_mask)
+        if pending.any():
+            for index in np.flatnonzero(pending):
+                name = self.bone_names[index]
+                captured = storage.get(name)
+                if captured is None:
+                    captured = live[index].copy()
+                    storage[name] = captured
+                self.frozen_basis[index] = captured
+                self.captured_mask[index] = True
+        return np.where(animated[:, None, None], live, self.frozen_basis)
+
+    def compute_world(self, matrix_world, all_matrix, basis):
+        local = np.einsum('nij,njk->nik', self.rest_relative, basis)
+        pose = np.empty_like(local)
+        if self.root_mask.any():
+            roots = np.flatnonzero(self.root_mask)
+            external = self.external_index[roots]
+            has_external = external >= 0
+            attached = roots[has_external]
+            if attached.size:
+                pose[attached] = np.matmul(all_matrix[external[has_external]], local[attached])
+            detached = roots[~has_external]
+            if detached.size:
+                pose[detached] = local[detached]
+        for level, parents in self.level_groups:
+            if level.size:
+                pose[level] = np.einsum('nij,njk->nik', pose[parents], local[level])
+        return np.einsum('ij,njk->nik', matrix_world, pose)
+
+    def entry_transform_worlds(self, entry_index, matrix_world, all_matrix, anim_world):
+        extras = self.transform_extra[entry_index]
+        count = anim_world.shape[0]
+        transform_worlds = np.empty((count + extras.shape[0], 4, 4))
+        transform_worlds[:count] = anim_world
+        if extras.shape[0]:
+            safe = np.where(extras >= 0, extras, 0)
+            worlds = np.einsum('ij,njk->nik', matrix_world, all_matrix[safe])
+            missing = extras < 0
+            if missing.any():
+                worlds[missing] = matrix_world
+            transform_worlds[count:] = worlds
+        return transform_worlds
