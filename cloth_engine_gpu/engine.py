@@ -70,7 +70,12 @@ _SELF_PAIR_GUARD = 30_000_000
 # team structural columns (chunk pointers + valid) -- register/unregister move these;
 # collider/pair CONTENT is folded in separately so a same-count collider rebind (which
 # can reuse the freed [start,count) block, leaving these columns untouched) is still caught.
-_STRUCT_TEAM_COLUMNS = ("valid", "p_start", "p_count", "t_start", "t_count",
+# is_spring is the spring gate, not per-frame state: flipping it reshapes the update_move /
+# spring / collision_process / distance static tables while every particle, transform and
+# self-primitive count stays put, so a re-register can hand every chunk pointer back
+# unchanged. With no collider bound the pair content is empty too, leaving this flag as the
+# only witness of the rebuild.
+_STRUCT_TEAM_COLUMNS = ("valid", "is_spring", "p_start", "p_count", "t_start", "t_count",
                         "c_start", "c_count", "sp_start", "sp_count",
                         "se_start", "se_count", "st_start", "st_count")
 

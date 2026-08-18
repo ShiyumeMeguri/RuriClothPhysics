@@ -17,6 +17,7 @@ def make_chain_snapshot(name, chain_count, link_count, spacing=0.1, offset=(0.0,
     snapshot = kernel_compile.TopologySnapshot()
     snapshot.token = None
     snapshot.is_spring = is_spring
+    snapshot.spring_active = is_spring
     snapshot.connection_mode = 'SEQUENTIAL_NON_LOOP_MESH' if chain_count > 1 else 'LINE'
     snapshot.wind_seed = 7
 

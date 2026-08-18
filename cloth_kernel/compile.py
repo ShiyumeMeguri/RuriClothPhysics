@@ -33,6 +33,7 @@ class TopologySnapshot:
         self.rest_relative = None
         self.matrix_world = None
         self.is_spring = False
+        self.spring_active = False
         self.connection_mode = 'LINE'
         self.root_names = []
         self.overrides = []
@@ -49,6 +50,7 @@ class SetupTables:
         self.valid = False
         self.error = ""
         self.is_spring = False
+        self.spring_active = False
         self.wind_seed = 1
         self.bone_names = []
         self.index_map = {}
@@ -488,6 +490,7 @@ def build_setup(snapshot):
 def _build(snapshot):
     setup = SetupTables()
     setup.is_spring = snapshot.is_spring
+    setup.spring_active = snapshot.is_spring and snapshot.spring_active
     setup.wind_seed = snapshot.wind_seed
 
     bone_names = snapshot.bone_names
@@ -1002,7 +1005,7 @@ def _build_distance_data(setup, vertex_to_vertex, parent_index, attributes, loca
     particle = []
     target = []
     rest = []
-    is_spring = setup.is_spring
+    is_spring = setup.spring_active
     for i in range(n):
         attr = attributes[i]
         if _is_invalid(attr):
@@ -1209,14 +1212,14 @@ def _build_static_index_sets(setup, attributes):
     setup.tether_index = np.flatnonzero(move & (setup.vertex_root >= 0)).astype(np.int32)
     setup.motion_index = np.flatnonzero(move & motion_ok).astype(np.int32)
 
-    update_move = move | (setup.is_spring & ~invalid)
+    update_move = move | (setup.spring_active & ~invalid)
     setup.update_move_index = np.flatnonzero(update_move).astype(np.int32)
     setup.update_fixed_index = np.flatnonzero(~update_move).astype(np.int32)
-    setup.spring_index = np.flatnonzero(fixed).astype(np.int32) if setup.is_spring \
+    setup.spring_index = np.flatnonzero(fixed).astype(np.int32) if setup.spring_active \
         else np.zeros(0, dtype=np.int32)
 
     process = ~invalid & ~disable
-    if not setup.is_spring:
+    if not setup.spring_active:
         process = process & move
     setup.collision_process_index = np.flatnonzero(process).astype(np.int32)
 

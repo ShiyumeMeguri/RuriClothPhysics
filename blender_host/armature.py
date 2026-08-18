@@ -85,6 +85,7 @@ def evaluate_live_bone_world(obj, bone_name):
 def build_snapshot(obj, config):
     snapshot = kc.TopologySnapshot()
     snapshot.is_spring = config.cloth_type == 'BONE_SPRING'
+    snapshot.spring_active = snapshot.is_spring and config.spring.use_spring
     snapshot.connection_mode = config.connection_mode
 
     bones = obj.data.bones

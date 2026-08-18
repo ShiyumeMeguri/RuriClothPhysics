@@ -290,7 +290,7 @@ class World:
         tt[slot] = np.zeros((), dtype=TEAM_DTYPE)
         row = tt[slot]
         row["valid"] = True
-        row["is_spring"] = setup.is_spring
+        row["is_spring"] = setup.spring_active
         row["reset_pending"] = True
         row["time_reset_pending"] = True
         row["sync_target"] = 0

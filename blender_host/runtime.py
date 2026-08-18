@@ -167,6 +167,7 @@ def _restore_pose(obj, setup):
 def _topology_token(config):
     return (
         config.cloth_type,
+        config.spring.use_spring,
         config.connection_mode,
         tuple(item.bone for item in config.root_bones),
         tuple((o.bone, o.attribute, o.disable_collision, o.exclude_motion)
@@ -400,7 +401,7 @@ def ensure_entry(obj, config_index, config):
         invalid = ((attrs & defs.ATTR_MOVE) == 0) & ((attrs & defs.ATTR_FIXED) == 0)
         move = (attrs & defs.ATTR_MOVE) != 0
         entry.write_mask = ~invalid
-        entry.position_mask = (move | setup.is_spring) & ~invalid
+        entry.position_mask = (move | setup.spring_active) & ~invalid
         params = _build_params(config)
         entry.params_token = params_token
         entry.team = _world.register_team(setup, params, entry.binding)
