@@ -466,22 +466,6 @@ class RCP_OT_reset(bpy.types.Operator):
         return {'FINISHED'}
 
 
-class RCP_OT_cache_clear(bpy.types.Operator):
-    bl_idname = "ruri_cloth_physics.cache_clear"
-    bl_label = "清空帧缓存"
-    bl_description = "丢弃本骨架已缓存的模拟帧, 下次播放重新计算并重新缓存"
-    bl_options = {'REGISTER'}
-
-    @classmethod
-    def poll(cls, context):
-        return _active_settings(context) is not None
-
-    def execute(self, context):
-        from . import frame_cache
-        frame_cache.clear_object(context.object.session_uid)
-        return {'FINISHED'}
-
-
 _CLASSES = (
     RCP_OT_config_add,
     RCP_OT_config_remove,
@@ -499,7 +483,6 @@ _CLASSES = (
     RCP_OT_wind_zone_convert,
     RCP_OT_wind_zone_remove,
     RCP_OT_reset,
-    RCP_OT_cache_clear,
 )
 
 

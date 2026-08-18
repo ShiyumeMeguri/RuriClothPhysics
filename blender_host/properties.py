@@ -511,16 +511,7 @@ class RCPObjectSettings(bpy.types.PropertyGroup):
     collider_serial: IntProperty(default=0, options={'HIDDEN'})
 
 
-CACHE_MODE_ITEMS = (
-    ('AUTO', "自动", "骨架带动画时缓存已播放过的帧, 没有动画时每帧实时计算"),
-    ('ALWAYS', "始终", "总是缓存已播放过的帧"),
-    ('OFF', "关闭", "永远每帧实时计算"),
-)
-
-
 class RCPSceneSettings(bpy.types.PropertyGroup):
-    cache_mode: EnumProperty(name="帧缓存", items=CACHE_MODE_ITEMS, default='AUTO',
-                             description="播放过的帧记录结果, 再次回到该帧直接回放不重算")
     simulation_frequency: IntProperty(name="模拟频率", default=90, min=30, max=150,
                                       description="每秒模拟步数")
     max_simulation_count: IntProperty(name="单帧最大步数", default=3, min=1, max=5)
