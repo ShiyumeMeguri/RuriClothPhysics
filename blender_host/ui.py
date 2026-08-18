@@ -149,6 +149,10 @@ class RCP_PT_ruri_cloth_physics(bpy.types.Panel):
         op.mode = 'KEEP'
         layout.operator("ruri_cloth_physics.bake", icon='ACTION')
 
+        layout.separator()
+        from . import presets
+        presets.draw_preset_row(layout, context)
+
 
 class RCP_PT_scene_settings(bpy.types.Panel):
     bl_label = "全局模拟设置"
@@ -356,14 +360,6 @@ class RCP_PT_parameters(_ConfigPanel, bpy.types.Panel):
     bl_parent_id = "RCP_PT_ruri_cloth_physics"
     bl_order = 2
     bl_idname = "RCP_PT_parameters"
-
-    def draw_header_preset(self, context):
-        layout = self.layout
-        row = layout.row(align=True)
-        row.menu("RCP_MT_config_presets", text="预设")
-        row.operator("ruri_cloth_physics.config_preset_add", text="", icon='ADD')
-        op = row.operator("ruri_cloth_physics.config_preset_add", text="", icon='REMOVE')
-        op.remove_active = True
 
     def draw(self, context):
         pass
