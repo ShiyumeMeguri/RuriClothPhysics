@@ -118,6 +118,22 @@ class Layer:
         self.handles = handles
 
 
+def axis_frame(origin, direction):
+    """4x4 at `origin` whose +Z is `direction`. ARROW handles slide along their own +Z."""
+    import mathutils
+    forward = mathutils.Vector(direction).normalized()
+    reference = mathutils.Vector((0.0, 0.0, 1.0))
+    if abs(forward.dot(reference)) > 0.99:
+        reference = mathutils.Vector((1.0, 0.0, 0.0))
+    side = reference.cross(forward).normalized()
+    up = forward.cross(side)
+    frame = mathutils.Matrix(((side.x, up.x, forward.x),
+                              (side.y, up.y, forward.y),
+                              (side.z, up.z, forward.z))).to_4x4()
+    frame.translation = mathutils.Vector(origin)
+    return frame
+
+
 def tag_redraw():
     """Ask every 3D view to redraw.
 

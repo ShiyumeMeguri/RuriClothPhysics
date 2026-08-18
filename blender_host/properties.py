@@ -446,9 +446,6 @@ class RCPGizmoSettings(bpy.types.PropertyGroup):
     animated_position: BoolProperty(name="动画位置", default=False)
     animated_axis: BoolProperty(name="动画轴", default=False)
     animated_shape: BoolProperty(name="动画形状", default=False)
-    collision_radius: BoolProperty(
-        name="骨骼碰撞半径", default=False,
-        description="画出每个模拟骨骼实际参与碰撞的球/扫掠体, 就是它和碰撞体交互用的那个体积")
     inertia_center: BoolProperty(name="惯性中心", default=True)
 
 
@@ -597,6 +594,10 @@ class RCPObjectSettings(bpy.types.PropertyGroup):
         items=(('ACTIVE', "当前配置", "只画当前配置的链"),
                ('ALL', "全部配置", "画出全部配置, 非当前配置压暗")),
         default='ACTIVE')
+    show_collision_radius: BoolProperty(
+        name="碰撞半径", default=False, update=_redraw,
+        description="画出每根模拟骨骼实际参与碰撞的体积, 就是它和碰撞体交互用的那个球/扫掠体; "
+                    "需要开启实时模拟才有数据")
     bone_display_depth: BoolProperty(
         name="骨骼深度测试", default=False, update=_redraw,
         description="关闭时骨骼画在模型前面, 不会被身体挡住")

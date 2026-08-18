@@ -2,6 +2,7 @@
 
 import numpy as np
 
+from . import chain
 from . import runtime
 from . import shapes
 from . import viewport
@@ -131,7 +132,11 @@ def collect(context, canvas):
         if index >= len(settings.configs):
             continue
         gizmos = settings.configs[index].gizmos
-        if not gizmos.enable:
+        active_index = min(settings.active_config_index, len(settings.configs) - 1)
+        in_scope = settings.bone_display_scope == 'ALL' or index == active_index
+        want_radius = (settings.show_collision_radius and in_scope
+                       and obj.name in selected)
+        if not gizmos.enable and not want_radius:
             continue
         if not gizmos.always and obj.name not in selected:
             continue
@@ -139,6 +144,11 @@ def collect(context, canvas):
         depth_test = gizmos.ztest
         setup = entry.setup
         span = world.particle_slice(entry.team)
+        if want_radius:
+            _collision_volume(canvas, world, entry, setup,
+                              particles["positions"][span], settings.bone_display_depth)
+        if not gizmos.enable:
+            continue
         positions = particles["positions"][span]
         base_positions = particles["base_positions"][span]
 
@@ -161,14 +171,76 @@ def collect(context, canvas):
         if gizmos.animated_shape:
             _shape(canvas, setup, base_positions, COLOR_ANIMATED_LINE,
                    COLOR_ANIMATED_TRIANGLE, depth_test)
-        if gizmos.collision_radius:
-            _collision_volume(canvas, world, entry, setup, positions, depth_test)
         if gizmos.inertia_center:
             canvas.lines(*shapes.cross(team["now_world_position"][entry.team]),
                          color=COLOR_INERTIA, depth_test=depth_test)
 
 
-LAYER = viewport.Layer("particles", poll=poll, collect=collect, order=30)
+COLOR_RADIUS_HANDLE = (1.0, 0.78, 0.10)
+RADIUS_MINIMUM = 0.001
+GLYPH_FACTOR = 12.0
+MINIMUM_GLYPH = 0.18
+
+
+def handles(context):
+    """One arrow that scales the whole config's bone collision radius.
+
+    The radius is authored as a base value times an optional depth curve, so a handle cannot own a
+    single particle's radius outright. Dragging therefore rescales the BASE by the ratio the grabbed
+    particle needs, which keeps the curve's shape along the chain intact -- exactly what you get by
+    typing in the radius field, just with the sphere in front of you.
+
+    The grabbed particle is the selected bone when one of the chain's bones is selected, so you
+    drag the ball you are actually looking at.
+    """
+    obj = context.object
+    if obj is None or obj.type != 'ARMATURE':
+        return ()
+    settings = getattr(obj, "ruri_cloth_physics", None)
+    if settings is None or not settings.show_collision_radius or not settings.configs:
+        return ()
+    index = min(settings.active_config_index, len(settings.configs) - 1)
+    config = settings.configs[index]
+    entry = runtime._registry.get((obj.session_uid, index))
+    if entry is None or entry.setup is None or entry.team is None:
+        return ()
+
+    world = runtime.get_world()
+    if int(world.team["collision_mode"][entry.team]) == defs.COLLISION_NONE:
+        return ()
+    names = list(entry.setup.bone_names)
+    allowed = list(entry.setup.collision_process_index)
+    if not allowed:
+        return ()
+    chosen = allowed[len(allowed) // 2]
+    for slot in allowed:
+        if chain.is_selected(obj, names[slot]):
+            chosen = slot
+            break
+
+    span = world.particle_slice(entry.team)
+    position = np.array(world.particles["positions"][span][chosen], dtype=np.float64)
+
+    def read():
+        return float(particle_radii(world, entry.team)[chosen])
+
+    def write(value):
+        current = read()
+        if current <= 1e-9:
+            return
+        scaled = config.radius.value * (float(value) / current)
+        config.radius.value = max(min(scaled, 1.0), 0.001)
+        runtime.sync_params(obj, index)
+
+    glyph = max(read() * GLYPH_FACTOR, MINIMUM_GLYPH) * settings.gizmo_size
+    return (viewport.Handle(
+        "particle.radius", viewport.ARROW,
+        viewport.axis_frame(position, (1.0, 0.0, 0.0)),
+        read=read, write=write, scale=glyph, color=COLOR_RADIUS_HANDLE,
+        minimum=RADIUS_MINIMUM),)
+
+
+LAYER = viewport.Layer("particles", poll=poll, collect=collect, handles=handles, order=30)
 
 
 def register():

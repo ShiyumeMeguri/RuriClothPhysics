@@ -580,6 +580,23 @@ def _ensure_batch(obj, entries):
     return cached[1]
 
 
+def sync_params(obj, config_index):
+    """Push a config's parameters into its live team right now.
+
+    Editing a parameter normally only reaches the solver on the next simulated frame, which is fine
+    while playing but leaves a viewport drag looking dead when paused: the base radius changes and
+    the drawn collision sphere keeps the old size until something steps a frame. Handles call this
+    so what you drag is what you see immediately.
+    """
+    entry = _registry.get((obj.session_uid, config_index))
+    if entry is None or entry.team is None or config_index >= len(obj.ruri_cloth_physics.configs):
+        return False
+    config = obj.ruri_cloth_physics.configs[config_index]
+    _world.update_params(entry.team, _build_params(config))
+    entry.params_token = _params_token(obj, config)
+    return True
+
+
 def run_frame(scene, frame_delta_time):
     scene_settings = scene.ruri_cloth_physics
     frame_globals = kernel_io.FrameGlobals()

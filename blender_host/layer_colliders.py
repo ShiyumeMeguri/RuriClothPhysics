@@ -103,21 +103,6 @@ def _axis_frame(matrix, center, column):
     return result
 
 
-def _world_axis_frame(origin, direction):
-    """Frame at `origin` whose +Z is the given WORLD direction; ARROW gizmos slide along their +Z."""
-    forward = mathutils.Vector(direction).normalized()
-    reference = mathutils.Vector((0.0, 0.0, 1.0))
-    if abs(forward.dot(reference)) > 0.99:
-        reference = mathutils.Vector((1.0, 0.0, 0.0))
-    side = reference.cross(forward).normalized()
-    up = forward.cross(side)
-    frame = mathutils.Matrix(((side.x, up.x, forward.x),
-                              (side.y, up.y, forward.y),
-                              (side.z, up.z, forward.z))).to_4x4()
-    frame.translation = mathutils.Vector(origin)
-    return frame
-
-
 def _glyph_scale(settings, reference):
     """Grab-glyph size for a handle.
 
@@ -222,7 +207,7 @@ def handles(context):
         return rotation @ mathutils.Vector(item.center)
 
     def make_axis(index, direction, color, name):
-        basis = _world_axis_frame(matrix.translation, direction)
+        basis = viewport.axis_frame(matrix.translation, direction)
 
         def write(value):
             current = world_offset()

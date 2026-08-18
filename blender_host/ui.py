@@ -217,6 +217,11 @@ class RCP_PT_config_main(_ConfigPanel, bpy.types.Panel):
         sub.enabled = settings.show_bones
         sub.prop(settings, "bone_display_scope", text="")
         sub.prop(settings, "bone_display_depth", text="", icon='XRAY')
+        row = layout.row(align=True)
+        row.scale_y = 1.2
+        row.prop(settings, "show_collision_radius", toggle=True, icon='MESH_UVSPHERE')
+        if settings.show_collision_radius and not settings.live:
+            row.label(text="需开启实时模拟", icon='INFO')
         if settings.show_bones:
             legend = layout.row(align=True)
             legend.label(text="■ 根骨骼", icon='LAYER_ACTIVE')
@@ -681,7 +686,6 @@ class RCP_PT_viewport_display(_ConfigPanel, bpy.types.Panel):
         column.prop(gizmos, "animated_position")
         column.prop(gizmos, "animated_axis")
         column.prop(gizmos, "animated_shape")
-        column.prop(gizmos, "collision_radius")
         column.prop(gizmos, "inertia_center")
 
 
