@@ -350,7 +350,7 @@ class RCP_PT_culling(_ConfigPanel, bpy.types.Panel):
 class RCP_PT_parameters(_ConfigPanel, bpy.types.Panel):
     bl_label = "物理参数"
     bl_parent_id = "RCP_PT_ruri_cloth_physics"
-    bl_order = 3
+    bl_order = 2
     bl_idname = "RCP_PT_parameters"
 
     def draw_header_preset(self, context):
@@ -592,7 +592,7 @@ class RCP_PT_colliders(_ConfigPanel, bpy.types.Panel):
     bl_label = "碰撞体"
     bl_idname = "RCP_PT_colliders"
     bl_parent_id = "RCP_PT_ruri_cloth_physics"
-    bl_order = 2
+    bl_order = 3
 
     @classmethod
     def poll(cls, context):
