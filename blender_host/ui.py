@@ -681,6 +681,7 @@ class RCP_PT_viewport_display(_ConfigPanel, bpy.types.Panel):
         column.prop(gizmos, "animated_position")
         column.prop(gizmos, "animated_axis")
         column.prop(gizmos, "animated_shape")
+        column.prop(gizmos, "collision_radius")
         column.prop(gizmos, "inertia_center")
 
 

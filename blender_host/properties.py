@@ -446,6 +446,9 @@ class RCPGizmoSettings(bpy.types.PropertyGroup):
     animated_position: BoolProperty(name="动画位置", default=False)
     animated_axis: BoolProperty(name="动画轴", default=False)
     animated_shape: BoolProperty(name="动画形状", default=False)
+    collision_radius: BoolProperty(
+        name="骨骼碰撞半径", default=False,
+        description="画出每个模拟骨骼实际参与碰撞的球/扫掠体, 就是它和碰撞体交互用的那个体积")
     inertia_center: BoolProperty(name="惯性中心", default=True)
 
 

@@ -74,11 +74,18 @@ class RCP_OT_viewport_handle(bpy.types.Operator):
 _live_slots = {}
 
 
-def _reader(slot):
+VECTOR_KINDS = {viewport.MOVE, viewport.PICK}
+
+
+def _reader(slot, kind):
+    """Blender polls the getter even for hidden pool slots, so the idle value has to have the right
+    arity: move_3d's offset is a 3-vector and handing it a scalar raises "Gizmo get callback"."""
+    idle = (0.0, 0.0, 0.0) if kind in VECTOR_KINDS else 0.0
+
     def read():
         handle = _live_slots.get(slot)
         if handle is None or handle.read is None:
-            return 0.0
+            return idle
         return handle.read()
     return read
 
@@ -129,7 +136,7 @@ class RCP_GGT_handles(bpy.types.GizmoGroup):
                     properties = gizmo.target_set_operator(RCP_OT_viewport_handle.bl_idname)
                     properties.slot = slot
                 else:
-                    gizmo.target_set_handler("offset", get=_reader(slot), set=_writer(slot))
+                    gizmo.target_set_handler("offset", get=_reader(slot, kind), set=_writer(slot))
                 gizmos.append(gizmo)
             self._pool[kind] = gizmos
 

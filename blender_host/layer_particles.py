@@ -5,6 +5,7 @@ import numpy as np
 from . import runtime
 from . import shapes
 from . import viewport
+from ..cloth_kernel import defs
 from ..cloth_kernel import math as pm
 
 COLOR_MOVE = (0.8, 0.8, 0.8, 0.8)
@@ -18,6 +19,8 @@ COLOR_INERTIA = (1.0, 0.0, 1.0, 1.0)
 COLOR_AXIS_X = (1.0, 0.2, 0.2, 1.0)
 COLOR_AXIS_Y = (0.2, 1.0, 0.2, 1.0)
 COLOR_AXIS_Z = (0.3, 0.3, 1.0, 1.0)
+COLOR_COLLISION = (1.0, 0.78, 0.10, 0.75)
+COLOR_COLLISION_EDGE = (1.0, 0.55, 0.10, 0.65)
 
 
 def poll(context):
@@ -63,6 +66,44 @@ def _shape(canvas, setup, positions, line_color, triangle_color, depth_test):
         for first, second in ((0, 1), (1, 2), (2, 0)):
             canvas.lines(positions[triangles[:, first]], positions[triangles[:, second]],
                          triangle_color, depth_test)
+
+
+def particle_radii(world, slot):
+    """The radius the solver actually collides each particle with.
+
+    Recomputed here exactly as cloth_kernel/stages/collider.py does it -- the radius LUT sampled at
+    the particle's own depth, floored, times the team's scale ratio. The `particle_radius` field in
+    the arena is declared but never written, so reading it would show a field of zeros; the LUT is
+    the real source and this reads the very same team data the solver reads.
+    """
+    span = world.particle_slice(slot)
+    depth = world.particles["depth"][span]
+    index = np.full(len(depth), slot, dtype=np.int64)
+    radius = pm.evaluate_team_lut(world.team["radius_lut"], index, depth)
+    return np.maximum(radius, 0.0001) * float(world.team["scale_ratio"][slot])
+
+
+def _collision_volume(canvas, world, entry, setup, positions, depth_test):
+    """Outline the volume the simulated bones present to the colliders.
+
+    POINT mode collides a sphere per particle; EDGE mode sweeps the sphere along each collision
+    edge, so it is drawn as the two end spheres plus the four tangent rails.
+    """
+    mode = int(world.team["collision_mode"][entry.team])
+    if mode == defs.COLLISION_NONE:
+        return
+    radius = particle_radii(world, entry.team)
+    selected = setup.collision_process_index
+    if len(selected):
+        canvas.lines(*shapes.spheres(positions[selected], radius[selected]),
+                     color=COLOR_COLLISION, depth_test=depth_test)
+    if mode != defs.COLLISION_EDGE or not len(setup.collision_edge_index):
+        return
+    edges = setup.edges[setup.collision_edge_index]
+    first, second = edges[:, 0], edges[:, 1]
+    canvas.lines(*shapes.swept_rails(positions[first], positions[second],
+                                     radius[first], radius[second]),
+                 color=COLOR_COLLISION_EDGE, depth_test=depth_test)
 
 
 def _baseline(canvas, setup, positions, depth_test):
@@ -120,6 +161,8 @@ def collect(context, canvas):
         if gizmos.animated_shape:
             _shape(canvas, setup, base_positions, COLOR_ANIMATED_LINE,
                    COLOR_ANIMATED_TRIANGLE, depth_test)
+        if gizmos.collision_radius:
+            _collision_volume(canvas, world, entry, setup, positions, depth_test)
         if gizmos.inertia_center:
             canvas.lines(*shapes.cross(team["now_world_position"][entry.team]),
                          color=COLOR_INERTIA, depth_test=depth_test)

@@ -116,6 +116,52 @@ def octahedron(head, tail, width=None):
     return starts.astype(np.float32), ends.astype(np.float32)
 
 
+def spheres(centers, radii, segments=12):
+    """Many wire spheres at once. One canvas call for 236 particles instead of 236."""
+    centers = np.asarray(centers, dtype=np.float32)
+    radii = np.asarray(radii, dtype=np.float32)
+    if centers.size == 0:
+        return np.zeros((0, 3), np.float32), np.zeros((0, 3), np.float32)
+    ring = unit_circle(segments)
+    starts, ends = [], []
+    for first, second in ((0, 1), (1, 2), (2, 0)):
+        offsets = np.zeros((centers.shape[0], segments, 3), dtype=np.float32)
+        offsets[:, :, first] = ring[None, :, 0] * radii[:, None]
+        offsets[:, :, second] = ring[None, :, 1] * radii[:, None]
+        points = centers[:, None, :] + offsets
+        starts.append(points.reshape(-1, 3))
+        ends.append(np.roll(points, -1, axis=1).reshape(-1, 3))
+    return np.concatenate(starts), np.concatenate(ends)
+
+
+def swept_rails(first, second, first_radius, second_radius):
+    """The four tangent rails of a swept sphere pair, batched.
+
+    Together with a sphere at each end this outlines the volume an edge sweeps, which is what the
+    solver tests against colliders in EDGE mode.
+    """
+    first = np.asarray(first, dtype=np.float64)
+    second = np.asarray(second, dtype=np.float64)
+    if first.size == 0:
+        return np.zeros((0, 3), np.float32), np.zeros((0, 3), np.float32)
+    axis = second - first
+    length = np.linalg.norm(axis, axis=1, keepdims=True)
+    axis = np.divide(axis, np.where(length > 1e-12, length, 1.0))
+    reference = np.tile(np.array([0.0, 0.0, 1.0]), (first.shape[0], 1))
+    swap = np.abs(axis[:, 2]) > 0.9
+    reference[swap] = np.array([1.0, 0.0, 0.0])
+    side_a = np.cross(axis, reference)
+    norm = np.linalg.norm(side_a, axis=1, keepdims=True)
+    side_a = np.divide(side_a, np.where(norm > 1e-12, norm, 1.0))
+    side_b = np.cross(axis, side_a)
+    starts, ends = [], []
+    for direction in (side_a, -side_a, side_b, -side_b):
+        starts.append(first + direction * np.asarray(first_radius)[:, None])
+        ends.append(second + direction * np.asarray(second_radius)[:, None])
+    return (np.concatenate(starts).astype(np.float32),
+            np.concatenate(ends).astype(np.float32))
+
+
 def segments(pairs):
     if not len(pairs):
         return np.zeros((0, 3), np.float32), np.zeros((0, 3), np.float32)
