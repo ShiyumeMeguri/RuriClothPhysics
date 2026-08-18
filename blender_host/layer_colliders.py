@@ -184,21 +184,9 @@ def handles(context):
                 scale=_glyph_scale(settings, item.end_radius), color=COLOR_END_RADIUS,
                 minimum=MINIMUM_RADIUS))
 
-    # move_3d draws at matrix_basis + rotation @ offset and the offset IS item.center, so this
-    # frame must stay at the bone origin or the centre would be applied twice.
-    origin = matrix.to_3x3().normalized().to_4x4()
-    origin.translation = matrix.translation
-    found.append(viewport.Handle(
-        "collider.center", viewport.MOVE, origin,
-        read=lambda: tuple(item.center),
-        write=lambda value: setattr(item, "center",
-                                    (float(value[0]), float(value[1]), float(value[2]))),
-        scale=_glyph_scale(settings, radius) * 1.2, color=COLOR_CENTER))
-
-    # Three WORLD-aligned arrows for the centre. The free-drag ball alone gives no clue which way
-    # the offset runs, and the stored offset is bone-local -- on an upright head bone that is world
-    # -X / +Z / +Y, so "up" and "forward" are swapped and left/right is mirrored against every
-    # expectation. These arrows are labelled by world axis and move along it, whatever the bone does.
+    # The centre offset is stored bone-local because that is what the solver eats, but every control
+    # for it works in WORLD axes: on an upright head bone the bone frame is world -X / +Z / +Y, so
+    # a bone-local control has "up" and "forward" swapped and left/right mirrored.
     rotation = matrix.to_3x3()
     inverse = rotation.copy()
     inverse.invert_safe()
@@ -206,8 +194,32 @@ def handles(context):
     def world_offset():
         return rotation @ mathutils.Vector(item.center)
 
+    # The free-drag ball carries an IDENTITY rotation and a world-space offset on purpose. A
+    # move_3d is drawn from matrix_basis and its offset target, and whether that offset is rotated
+    # by matrix_basis or simply added to its translation decides where the ball lands. With the bone
+    # rotation in the frame the two readings differ by (R @ c) - c, which on this rig put the ball a
+    # head's width to the other side of the collider -- the mismatch that kept being reported. With
+    # an identity rotation both readings collapse to origin + offset, so the ball sits on the
+    # collider no matter which convention Blender uses. Never put a rotation in this frame again.
+    ball_frame = mathutils.Matrix.Translation(matrix.translation)
+    found.append(viewport.Handle(
+        "collider.center", viewport.MOVE, ball_frame,
+        read=lambda: tuple(world_offset()),
+        write=lambda value: setattr(item, "center",
+                                    tuple(inverse @ mathutils.Vector(
+                                        (float(value[0]), float(value[1]), float(value[2]))))),
+        scale=_glyph_scale(settings, radius) * 1.2, color=COLOR_CENTER))
+
     def make_axis(index, direction, color, name):
-        basis = viewport.axis_frame(matrix.translation, direction)
+        # An arrow draws its tip at matrix_basis.translation + axis * value, so anchoring it at the
+        # BONE origin puts the tip at bone + axis*component -- which coincides with the collider
+        # only when the other two components are zero. Measured: at centre (0.04, 0.06, 0.03) the
+        # three tips sat 67 / 72 / 50 mm off the shape and only lined up at the origin. Anchor each
+        # arrow one component back from the collider centre so its tip lands ON the centre for any
+        # offset, and all three converge there.
+        component = world_offset()[index]
+        centre_world = matrix @ mathutils.Vector(item.center)
+        basis = viewport.axis_frame(centre_world - direction * component, direction)
 
         def write(value):
             current = world_offset()
