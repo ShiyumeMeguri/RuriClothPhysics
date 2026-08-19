@@ -47,6 +47,31 @@ def _draw():
     gpu.state.line_width_set(1.0)
 
 
+_MSGBUS_OWNER = object()
+_TRANSFORM_PROPERTIES = ("location", "rotation_euler", "rotation_quaternion",
+                         "rotation_axis_angle", "scale", "matrix_world",
+                         "empty_display_size", "empty_display_type")
+
+
+def _subscribe_transform():
+    bpy.msgbus.clear_by_owner(_MSGBUS_OWNER)
+    for name in _TRANSFORM_PROPERTIES:
+        if bpy.types.Object.bl_rna.properties.get(name) is None:
+            continue
+        bpy.msgbus.subscribe_rna(
+            key=(bpy.types.Object, name),
+            owner=_MSGBUS_OWNER,
+            args=(),
+            notify=viewport.tag_redraw,
+            options={'PERSISTENT'},
+        )
+
+
+@persistent
+def _on_load_post(*args):
+    _subscribe_transform()
+
+
 @persistent
 def _on_depsgraph_update(scene, depsgraph=None):
     if scene is None or depsgraph is None:
@@ -66,10 +91,16 @@ def register():
         _handle = bpy.types.SpaceView3D.draw_handler_add(_draw, (), 'WINDOW', 'POST_VIEW')
     if _on_depsgraph_update not in bpy.app.handlers.depsgraph_update_post:
         bpy.app.handlers.depsgraph_update_post.append(_on_depsgraph_update)
+    if _on_load_post not in bpy.app.handlers.load_post:
+        bpy.app.handlers.load_post.append(_on_load_post)
+    _subscribe_transform()
 
 
 def unregister():
     global _handle
+    bpy.msgbus.clear_by_owner(_MSGBUS_OWNER)
+    if _on_load_post in bpy.app.handlers.load_post:
+        bpy.app.handlers.load_post.remove(_on_load_post)
     if _on_depsgraph_update in bpy.app.handlers.depsgraph_update_post:
         bpy.app.handlers.depsgraph_update_post.remove(_on_depsgraph_update)
     if _handle is not None:
