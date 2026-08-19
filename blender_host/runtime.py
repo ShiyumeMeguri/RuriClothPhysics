@@ -521,7 +521,7 @@ def _gather_wind_zones(scene):
         if wind.mode == wind_geom.RADIAL_MODE:
             zone.attenuation_lut = curve_host.get_lut(wind.attenuation)
         else:
-            zone.world_direction = wind_geom.world_direction(world, wind)
+            zone.world_direction = wind_geom.world_direction(world)
         zones.append(zone)
     return zones
 

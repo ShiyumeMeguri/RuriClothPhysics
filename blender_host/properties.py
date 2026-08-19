@@ -901,12 +901,6 @@ class RCPWindZoneSettings(bpy.types.PropertyGroup):
     turbulence: FloatProperty(name="乱流", default=1.0, min=0.0, max=1.0, update=_redraw,
                               description="本风区的风向抖动强度, 会与每条布料自己的'乱流倍率'相乘。"
                                           "0 = 风向恒定不变。")
-    direction_angle_x: FloatProperty(name="方向角 X", default=0.0, min=-180.0, max=180.0,
-                                     update=_redraw,
-                                     description="风向的俯仰角(度), 相对风区对象自身朝向。")
-    direction_angle_y: FloatProperty(name="方向角 Y", default=0.0, min=-180.0, max=180.0,
-                                     update=_redraw,
-                                     description="风向的水平偏转角(度), 相对风区对象自身朝向。")
     attenuation: PointerProperty(type=RCPCurveWindAttenuation)
     is_addition: BoolProperty(
         name="叠加风", default=False, update=_redraw,

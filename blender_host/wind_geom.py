@@ -42,16 +42,9 @@ def zone_volume(obj, wind, world_scale):
     return float("inf")
 
 
-def local_direction(wind):
-    angle_x = math.radians(wind.direction_angle_x)
-    angle_y = math.radians(wind.direction_angle_y)
-    local_q = pm.euler_yx(np.float32(angle_x), np.float32(angle_y))
-    return pm.quat_to_tangent(local_q[None])[0]
-
-
-def world_direction(matrix_world, wind):
+def world_direction(matrix_world):
     rotation = armature.matrix_to_quat(matrix_world).astype(np.float32)
-    direction = pm.quat_rotate(rotation[None], local_direction(wind)[None])[0]
+    direction = pm.quat_rotate(rotation[None], pm.VEC_FORWARD[None])[0]
     length = float(np.linalg.norm(direction))
     if length > 1e-30:
         return (direction / length).astype(np.float32)
@@ -59,7 +52,7 @@ def world_direction(matrix_world, wind):
 
 
 def turbulence_spread(matrix_world, wind, offsets):
-    base = world_direction(matrix_world, wind)
+    base = world_direction(matrix_world)
     dirq = pm.axis_quaternion(base[None].astype(np.float32))
     limit_x = math.radians(defs.WIND_TURBULENCE_ANGLE) * float(wind.turbulence)
     limit_y = limit_x * TURBULENCE_Y_RATIO

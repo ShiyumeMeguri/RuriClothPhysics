@@ -756,8 +756,9 @@ class RCP_PT_wind_zone(bpy.types.Panel):
         if wind.mode == 'SPHERE_RADIAL':
             draw_curve(layout, wind, "attenuation", "衰减")
         else:
-            layout.prop(wind, "direction_angle_x")
-            layout.prop(wind, "direction_angle_y")
+            box = layout.box()
+            box.label(text="风向 = 空物体 +Z, 旋转物体即可调", icon='CON_ROTLIKE')
+            box.prop(context.object, "rotation_euler", text="旋转")
         layout.prop(wind, "is_addition")
         layout.operator("ruri_cloth_physics.wind_zone_remove", icon='X')
 
