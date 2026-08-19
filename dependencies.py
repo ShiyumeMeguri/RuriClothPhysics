@@ -1,5 +1,8 @@
+import hashlib
 import importlib
+import os
 import pathlib
+import shutil
 import subprocess
 import sys
 
@@ -8,14 +11,35 @@ _REQUIRED_MODULES = (
     ("numba_cuda", "numba-cuda"),
 )
 
-_KERNEL_CACHE_DIR = pathlib.Path(__file__).resolve().parent / "cloth_engine_gpu" / "__pycache__"
+_ROOT = pathlib.Path(__file__).resolve().parent
+_KERNEL_CACHE_DIR = _ROOT / "__kernelcache__"
+_KERNEL_STAMP = _KERNEL_CACHE_DIR / "source.stamp"
+_KERNEL_SOURCE_DIRS = (_ROOT / "cloth_engine_gpu", _ROOT / "cloth_kernel")
 
 
-def _clear_stale_kernel_cache():
-    if not _KERNEL_CACHE_DIR.is_dir():
-        return
-    for stale in _KERNEL_CACHE_DIR.glob("*.nb*"):
-        stale.unlink(missing_ok=True)
+def _kernel_source_digest():
+    digest = hashlib.sha256()
+    for directory in _KERNEL_SOURCE_DIRS:
+        if not directory.is_dir():
+            continue
+        for path in sorted(directory.rglob("*.py")):
+            if "__pycache__" in path.parts:
+                continue
+            digest.update(str(path.relative_to(_ROOT)).encode("utf-8"))
+            digest.update(path.read_bytes())
+    return digest.hexdigest()
+
+
+def prepare_kernel_cache():
+    digest = _kernel_source_digest()
+    if not _KERNEL_STAMP.is_file() or _KERNEL_STAMP.read_text(encoding="utf-8") != digest:
+        shutil.rmtree(_KERNEL_CACHE_DIR, ignore_errors=True)
+        _KERNEL_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        _KERNEL_STAMP.write_text(digest, encoding="utf-8")
+    os.environ["NUMBA_CACHE_DIR"] = str(_KERNEL_CACHE_DIR)
+    config = sys.modules.get("numba.core.config")
+    if config is not None:
+        config.reload_config()
 
 
 def _importable(module_name):
@@ -31,6 +55,7 @@ def _missing_packages():
 
 
 def ensure_installed():
+    prepare_kernel_cache()
     missing = _missing_packages()
     if not missing:
         return
@@ -42,4 +67,6 @@ def ensure_installed():
         raise RuntimeError(
             "RuriClothPhysics: failed to install required packages: %s"
             % ", ".join(still_missing))
-    _clear_stale_kernel_cache()
+
+
+prepare_kernel_cache()
