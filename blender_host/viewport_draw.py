@@ -51,9 +51,6 @@ def _draw():
 def _on_depsgraph_update(scene, depsgraph=None):
     if scene is None or depsgraph is None:
         return
-    settings = getattr(scene, "ruri_cloth_physics", None)
-    if settings is None or not settings.overlay_enabled:
-        return
     screen = bpy.context.screen
     if screen is not None and screen.is_animation_playing:
         return

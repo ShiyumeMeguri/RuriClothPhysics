@@ -107,6 +107,9 @@ def axis_frame(origin, direction):
     return frame
 
 
+REDRAW_AREAS = ('VIEW_3D', 'PROPERTIES')
+
+
 def tag_redraw():
     import bpy
     manager = bpy.context.window_manager
@@ -117,7 +120,7 @@ def tag_redraw():
         if screen is None:
             continue
         for area in screen.areas:
-            if area.type == 'VIEW_3D':
+            if area.type in REDRAW_AREAS:
                 area.tag_redraw()
 
 
