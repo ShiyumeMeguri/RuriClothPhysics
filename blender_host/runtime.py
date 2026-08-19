@@ -515,10 +515,10 @@ def _gather_wind_zones(scene, depsgraph=None):
         display_size = wind_geom.zone_display_size(obj, depsgraph)
         zone.world_position = world[:3, 3].astype(np.float32)
         zone.world_to_local = np.linalg.inv(world)
-        zone.world_scale = armature.matrix_scale(world).astype(np.float32)
+        world_scale = armature.matrix_scale(world).astype(np.float32)
 
         zone.size = wind_geom.local_extent(display_size, wind)
-        zone.zone_volume = wind_geom.zone_volume(display_size, wind, zone.world_scale)
+        zone.zone_volume = wind_geom.zone_volume(display_size, wind, world_scale)
 
         if wind.mode == wind_geom.RADIAL_MODE:
             zone.attenuation_lut = curve_host.get_lut(wind.attenuation)

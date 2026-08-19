@@ -3,7 +3,6 @@ import math
 import numpy as np
 
 from . import armature
-from ..cloth_kernel import defs
 from ..cloth_kernel import math as pm
 
 RADIAL_MODE = 'SPHERE_RADIAL'
@@ -16,8 +15,6 @@ DISPLAY_TYPE = {
     'SPHERE_RADIAL': 'SPHERE',
     BOX_MODE: 'CUBE',
 }
-
-TURBULENCE_Y_RATIO = 0.5
 
 
 def sync_display(obj, wind):
@@ -65,14 +62,3 @@ def world_direction(matrix_world, wind):
     return direction
 
 
-def turbulence_spread(matrix_world, wind, offsets):
-    base = world_direction(matrix_world, wind)
-    dirq = pm.axis_quaternion(base[None].astype(np.float32))
-    limit_x = math.radians(defs.WIND_TURBULENCE_ANGLE) * float(wind.turbulence)
-    limit_y = limit_x * TURBULENCE_Y_RATIO
-    out = []
-    for unit_x, unit_y in offsets:
-        rq = pm.euler_yx(np.float32(unit_x * limit_x), np.float32(unit_y * limit_y))
-        combined = pm.quat_mul(dirq, rq[None])
-        out.append(pm.quat_to_tangent(combined)[0].astype(np.float64))
-    return base.astype(np.float64), out

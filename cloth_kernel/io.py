@@ -3,7 +3,7 @@ import numpy as np
 
 class WindZoneInput:
     __slots__ = ("zone_id", "mode", "main", "turbulence", "is_addition", "world_position",
-                 "world_direction", "world_to_local", "world_scale", "size", "zone_volume",
+                 "world_direction", "world_to_local", "size", "zone_volume",
                  "attenuation_lut")
 
     def __init__(self):
@@ -15,7 +15,6 @@ class WindZoneInput:
         self.world_position = np.zeros(3, dtype=np.float32)
         self.world_direction = np.array([0, 1, 0], dtype=np.float32)
         self.world_to_local = np.eye(4)
-        self.world_scale = np.ones(3, dtype=np.float32)
         self.size = np.zeros(3, dtype=np.float32)
         self.zone_volume = 0.0
         self.attenuation_lut = None

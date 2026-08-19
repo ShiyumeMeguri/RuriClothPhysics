@@ -33,7 +33,6 @@ from .kernels import (
     SCAL_F_LEN,
     SCAL_I_LEN,
     WIND_ZONE_SLOTS,
-    ZONE_GLOBAL,
     ZONE_BOX,
     ZONE_SPHERE_DIR,
     ZONE_SPHERE_RADIAL,
