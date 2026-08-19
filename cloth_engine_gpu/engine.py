@@ -466,7 +466,8 @@ class GpuEngine:
 
     def _ensure_graph(self, sub_end, blocks):
         total_ct, total_it = self._self_upload_totals
-        key = (sub_end, total_ct > 0, total_it > 0, blocks)
+        pointers = tuple(a.__cuda_array_interface__["data"][0] for a in self._phase_args())
+        key = (sub_end, total_ct > 0, total_it > 0, blocks, pointers)
         if self._graph is not None and self._graph_key == key:
             return self._graph
         builder = self.device.create_graph_builder()
