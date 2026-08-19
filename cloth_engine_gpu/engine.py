@@ -806,7 +806,7 @@ class GpuEngine:
             tt["st_start"][:nt].tobytes(), tt["st_count"][:nt].tobytes()))
 
     def _build_self_tasks(self, tt, nt):
-        """Mirror of cloth_kernel.self_collision.frame_begin's TEAM-LEVEL logic (D2: the use_point/
+        """Mirror of cloth_engine_cpu.stages.self_collision.frame_begin's TEAM-LEVEL logic (D2: the use_point/
         edge/triangle flags and the (EE/PT/TP) contact + intersect task pairs are frame-level pure
         team logic -> host). Returns (contact, intersect, use_point, use_edge, use_triangle). TP is
         stored flipped to PT (my=points, target=triangles). Cross-team (sync) tasks carry

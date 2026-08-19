@@ -2061,7 +2061,7 @@ def do_output_particle(p, mt, p_rotations, p_vertex_to_transform_rotations,
 
 
 # ---------------------------------------------------------------------------
-# G3a self-collision device helpers (mirror cloth_kernel.stages.self_collision). n^2 broad-phase
+# G3a self-collision device helpers (mirror cloth_engine_cpu.stages.self_collision). n^2 broad-phase
 # (D1): the exact-AABB-overlap predicate + filters reproduce the oracle grid+_filter_pairs pair set.
 # ---------------------------------------------------------------------------
 

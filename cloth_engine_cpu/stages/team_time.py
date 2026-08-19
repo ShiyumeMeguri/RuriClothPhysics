@@ -1,7 +1,7 @@
 import numpy as np
 
-from .. import defs
-from .. import math as pm
+from ...cloth_kernel import defs
+from ...cloth_kernel import math as pm
 
 TIME_RESET_FIELDS = ("time", "old_time", "now_update_time", "old_update_time",
                      "frame_update_time", "frame_old_time")

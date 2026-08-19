@@ -1,7 +1,7 @@
 import numpy as np
 
-from .. import defs
-from .. import math as pm
+from ...cloth_kernel import defs
+from ...cloth_kernel import math as pm
 
 
 def frame_pre(world, ctx):

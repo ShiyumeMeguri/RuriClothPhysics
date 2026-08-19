@@ -8,7 +8,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 from RuriClothPhysics.cloth_kernel import compile as kernel_compile
 from RuriClothPhysics.cloth_kernel import defs
 from RuriClothPhysics.cloth_kernel import io as kernel_io
-from RuriClothPhysics.cloth_kernel import pipeline
+from RuriClothPhysics.cloth_engine_cpu import pipeline
 from RuriClothPhysics.cloth_kernel import world as kernel_world
 
 

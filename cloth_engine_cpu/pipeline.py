@@ -1,7 +1,8 @@
 import numpy as np
 
-from . import defs
-from . import io
+from ..cloth_kernel import defs
+from ..cloth_kernel import frame
+from ..cloth_kernel import io
 from .stages import angle
 from .stages import baseline
 from .stages import bending
@@ -27,9 +28,7 @@ class Context:
         self.power = np.array(defs.simulation_power(frame_globals.simulation_frequency),
                               dtype=np.float32)
         self.intersect_frame_index = frame_globals.frame_index % defs.SELF_COLLISION_INTERSECT_DIV
-        component_scale = world.team["component_world_scale"]
-        scale_alive = np.abs(component_scale).min(axis=1) >= 1e-6
-        self.frame_team_mask = world.team["enabled"] & world.team["valid"] & scale_alive
+        self.frame_team_mask = frame.frame_team_mask(world)
         self.frame_team_index = np.flatnonzero(self.frame_team_mask)
         self.frame_particle_index = np.flatnonzero(
             self.frame_team_mask[world.particles["team"]])
