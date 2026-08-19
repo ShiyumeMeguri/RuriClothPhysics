@@ -1,3 +1,4 @@
+import math
 import re
 
 import bpy
@@ -906,6 +907,16 @@ class RCPWindZoneSettings(bpy.types.PropertyGroup):
     turbulence: FloatProperty(name="乱流", default=1.0, min=0.0, max=1.0, update=_redraw,
                               description="本风区的风向抖动强度, 会与每条布料自己的'乱流倍率'相乘。"
                                           "0 = 风向恒定不变。")
+    direction_angle_x: FloatProperty(
+        name="风向俯仰", default=0.0, min=-math.pi, max=math.pi, subtype='ANGLE',
+        update=_redraw,
+        description="在空物体 +Z 的基础上再把风向往下/往上掰。"
+                    "范围风靠这两项把'风往哪吹'和'盒子朝哪摆'拆开: "
+                    "想让轴对齐的盒子里刮斜风, 调这里而不是转物体。")
+    direction_angle_y: FloatProperty(
+        name="风向偏航", default=0.0, min=-math.pi, max=math.pi, subtype='ANGLE',
+        update=_redraw,
+        description="在空物体 +Z 的基础上再把风向左右转。视口箭头会同步显示最终风向。")
     attenuation: PointerProperty(type=RCPCurveWindAttenuation)
     is_addition: BoolProperty(
         name="叠加风", default=False, update=_redraw,

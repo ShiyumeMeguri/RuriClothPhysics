@@ -52,6 +52,8 @@ EPSILON = float32(1e-8)
 WIND_BASE_SPEED = float32(7.5)
 WIND_TURBULENCE_ANGLE = float32(45.0)
 WIND_MAX_TIME = float32(10000.0)
+WIND_ZONE_MIN_MAIN = float32(1e-6)
+WIND_MIN_SPEED = float32(0.01)
 DEG2RAD = float32(math.pi / 180.0)
 RAD2DEG = float32(180.0 / math.pi)
 
@@ -241,7 +243,7 @@ def do_tether(e, tether_particle, p_team, next_positions, velocity_positions,
 @cuda.jit(device=True)
 def do_wind_blend(wind_main, time, dqx, dqy, dqz, dqw, zone_turbulence,
                   blend, turbulence_param, wind_position):
-    active = wind_main >= float32(0.01)
+    active = wind_main >= WIND_MIN_SPEED
     main_ratio = wind_main / WIND_BASE_SPEED
 
     sin_pos = wind_position + time * float32(10.0)

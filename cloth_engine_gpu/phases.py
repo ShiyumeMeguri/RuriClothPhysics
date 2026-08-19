@@ -45,6 +45,8 @@ from .kernels import (
     WIND_BASE_SPEED,
     WIND_TURBULENCE_ANGLE,
     WIND_MAX_TIME,
+    WIND_ZONE_MIN_MAIN,
+    WIND_MIN_SPEED,
     DEG2RAD,
     RAD2DEG,
     FORCE_VELOCITY_ADD,
@@ -1039,15 +1041,17 @@ def phase_03b(scal_f, scal_i, blob_u8_s, blob_f32_v3, blob_f32_s, blob_i32_s, bl
                         if oi < old_count and old_zid[oi] == zid:
                             t_prev = old_wt[oi]
                     zturb = z_turbulence[zi]
+                    registrable = zmain > WIND_ZONE_MIN_MAIN
                     if is_add:
-                        res_zone_id[count] = zid
-                        res_time[count] = t_prev
-                        res_main[count] = zmain
-                        res_dx[count] = dirx
-                        res_dy[count] = diry
-                        res_dz[count] = dirz
-                        res_turb[count] = zturb
-                        count += 1
+                        if registrable:
+                            res_zone_id[count] = zid
+                            res_time[count] = t_prev
+                            res_main[count] = zmain
+                            res_dx[count] = dirx
+                            res_dy[count] = diry
+                            res_dz[count] = dirz
+                            res_turb[count] = zturb
+                            count += 1
                         addition_count += 1
                     else:
                         if latest_valid:
@@ -1063,14 +1067,15 @@ def phase_03b(scal_f, scal_i, blob_u8_s, blob_f32_v3, blob_f32_s, blob_i32_s, bl
                                     res_turb[w] = res_turb[r]
                                     w += 1
                             count = w
-                        res_zone_id[count] = zid
-                        res_time[count] = t_prev
-                        res_main[count] = zmain
-                        res_dx[count] = dirx
-                        res_dy[count] = diry
-                        res_dz[count] = dirz
-                        res_turb[count] = zturb
-                        count += 1
+                        if registrable:
+                            res_zone_id[count] = zid
+                            res_time[count] = t_prev
+                            res_main[count] = zmain
+                            res_dx[count] = dirx
+                            res_dy[count] = diry
+                            res_dz[count] = dirz
+                            res_turb[count] = zturb
+                            count += 1
                         min_volume = zvol
                         latest_id = zid
                         latest_valid = True
@@ -1638,7 +1643,7 @@ def phase_12(scal_f, scal_i, blob_u8_s, blob_f32_v3, blob_f32_s, blob_i32_s, blo
                     wfx = wfx + cx
                     wfy = wfy + cy
                     wfz = wfz + cz
-            moving_on = (t_moving_wind_main[mt] > float32(0.01)) and (t_wind_moving[mt] > float32(0.01))
+            moving_on = t_wind_moving[mt] > WIND_MIN_SPEED
             if moving_on:
                 cx, cy, cz = do_wind_blend(
                     t_moving_wind_main[mt], t_moving_wind_time[mt],

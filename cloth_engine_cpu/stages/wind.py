@@ -50,13 +50,16 @@ def select_team_wind(world, ctx, team_index, center_world_positions):
 
                 info = (zone.zone_id, old_map.get(zone.zone_id, -defs.WIND_MAX_TIME), main,
                         np.asarray(direction, dtype=np.float32), zone.turbulence)
+                registrable = main > defs.WIND_ZONE_MIN_MAIN
                 if zone.is_addition:
-                    result.append(info)
+                    if registrable:
+                        result.append(info)
                     addition_count += 1
                 else:
                     if latest_id is not None:
                         result = [r for r in result if r[0] != latest_id]
-                    result.append(info)
+                    if registrable:
+                        result.append(info)
                     min_volume = zone_volume
                     latest_id = zone.zone_id
         result = result[:defs.WIND_ZONE_SLOTS]
@@ -96,8 +99,7 @@ def calc_wind_force(world, ctx, particle_index, particle_team, depth, friction):
                                          blend, turbulence_param, wind_positions)
         force = force + np.where(slot_on[:, None], contribution, 0.0)
 
-    moving_on = (tt["moving_wind_main"][particle_team] > 0.01) \
-        & (tt["wind_moving"][particle_team] > 0.01)
+    moving_on = tt["wind_moving"][particle_team] > defs.WIND_MIN_SPEED
     if np.any(moving_on):
         contribution = _wind_force_blend(tt["moving_wind_main"][particle_team],
                                          tt["moving_wind_time"][particle_team],
@@ -114,7 +116,7 @@ def calc_wind_force(world, ctx, particle_index, particle_team, depth, friction):
 
 def _wind_force_blend(wind_main, time, dirq, zone_turbulence, blend, turbulence_param,
                       wind_positions):
-    active = wind_main >= 0.01
+    active = wind_main >= defs.WIND_MIN_SPEED
     main_ratio = wind_main / defs.WIND_BASE_SPEED
 
     sin_pos = wind_positions + time * 10.0
