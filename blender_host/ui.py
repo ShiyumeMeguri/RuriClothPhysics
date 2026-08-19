@@ -746,10 +746,11 @@ class RCP_PT_wind_zone(bpy.types.Panel):
             layout.operator("ruri_cloth_physics.wind_zone_convert", icon='FORCE_WIND')
             return
         layout.prop(wind, "mode")
-        if wind.mode == 'BOX_DIRECTION':
-            layout.prop(wind, "size")
-        elif wind.mode in {'SPHERE_DIRECTION', 'SPHERE_RADIAL'}:
-            layout.prop(wind, "radius")
+        if wind.mode != 'GLOBAL_DIRECTION':
+            box = layout.box()
+            box.label(text="范围 = 空物体显示尺寸 × 缩放", icon='OBJECT_ORIGIN')
+            box.prop(context.object, "empty_display_size", text="显示尺寸")
+            box.prop(context.object, "scale", text="缩放")
         layout.prop(wind, "main")
         layout.prop(wind, "turbulence")
         if wind.mode == 'SPHERE_RADIAL':

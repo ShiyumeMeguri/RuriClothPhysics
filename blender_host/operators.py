@@ -3,6 +3,7 @@ from bpy.props import BoolProperty, EnumProperty, IntProperty, StringProperty
 
 from . import chain
 from . import runtime
+from . import wind_geom
 
 
 def _active_settings(context):
@@ -406,11 +407,12 @@ class RCP_OT_wind_zone_add(bpy.types.Operator):
 
     def execute(self, context):
         empty = bpy.data.objects.new("风区", None)
-        empty.empty_display_type = 'SINGLE_ARROW'
-        empty.empty_display_size = 0.5
+        empty.empty_display_size = 1.0
         empty.location = context.scene.cursor.location
         context.collection.objects.link(empty)
-        empty.ruri_cloth_physics_wind.is_wind_zone = True
+        wind = empty.ruri_cloth_physics_wind
+        wind.is_wind_zone = True
+        wind_geom.sync_display(empty, wind)
         context.view_layer.objects.active = empty
         return {'FINISHED'}
 

@@ -81,6 +81,14 @@ def _backend_update(self, context):
     runtime.notify_backend_changed()
 
 
+def _wind_mode_update(self, context):
+    from . import wind_geom
+    obj = _owner_object(self)
+    if obj is not None and obj.type == 'EMPTY':
+        wind_geom.sync_display(obj, self)
+    _redraw(self, context)
+
+
 _curve_classes = []
 
 
@@ -880,29 +888,28 @@ WIND_ZONE_MODE_ITEMS = (
 
 
 class RCPWindZoneSettings(bpy.types.PropertyGroup):
-    is_wind_zone: BoolProperty(default=False, options={'HIDDEN'})
-    enabled: BoolProperty(name="启用", default=True,
+    is_wind_zone: BoolProperty(default=False, options={'HIDDEN'}, update=_redraw)
+    enabled: BoolProperty(name="启用", default=True, update=_redraw,
                           description="关闭后本风区不再影响任何布料。")
     mode: EnumProperty(name="模式", items=WIND_ZONE_MODE_ITEMS, default='GLOBAL_DIRECTION',
-                       description="风区的作用范围与吹法。范围风只影响落在范围内的布料。")
-    size: FloatVectorProperty(name="盒尺寸", size=3, default=(10.0, 10.0, 10.0), min=0.0,
-                              subtype='XYZ',
-                              description="盒形风区的三轴尺寸(米)。仅盒形方向风使用。")
-    radius: FloatProperty(name="半径", default=10.0, min=0.0,
-                          description="球形风区的半径(米)。仅球形方向风/球形放射风使用。")
-    main: FloatProperty(name="风速", default=5.0, min=0.0, max=30.0,
+                       update=_wind_mode_update,
+                       description="风区的作用范围与吹法。范围风只影响落在范围内的布料。"
+                                   "范围大小直接由空物体的显示尺寸与缩放决定, 拖物体即可调。")
+    main: FloatProperty(name="风速", default=5.0, min=0.0, max=30.0, update=_redraw,
                         description="风的基础速度(米/秒)。注意风速越高, 乱流造成的忽强忽弱越不明显 —— "
                                     "低速风才会呈现明显的一阵一阵。")
-    turbulence: FloatProperty(name="乱流", default=1.0, min=0.0, max=1.0,
+    turbulence: FloatProperty(name="乱流", default=1.0, min=0.0, max=1.0, update=_redraw,
                               description="本风区的风向抖动强度, 会与每条布料自己的'乱流倍率'相乘。"
                                           "0 = 风向恒定不变。")
     direction_angle_x: FloatProperty(name="方向角 X", default=0.0, min=-180.0, max=180.0,
+                                     update=_redraw,
                                      description="风向的俯仰角(度), 相对风区对象自身朝向。")
     direction_angle_y: FloatProperty(name="方向角 Y", default=0.0, min=-180.0, max=180.0,
+                                     update=_redraw,
                                      description="风向的水平偏转角(度), 相对风区对象自身朝向。")
     attenuation: PointerProperty(type=RCPCurveWindAttenuation)
     is_addition: BoolProperty(
-        name="叠加风", default=False,
+        name="叠加风", default=False, update=_redraw,
         description="默认情况下多个范围风互相抢占, 只有体积最小的那个生效(小范围优先); "
                     "勾选本项后它改为叠加, 不参与抢占。最多同时叠加 3 个, 超出的被忽略。")
 

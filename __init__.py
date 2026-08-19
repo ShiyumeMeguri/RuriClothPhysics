@@ -23,6 +23,7 @@ from .blender_host import (
     layer_colliders,
     layer_bones,
     layer_particles,
+    layer_wind,
     viewport_draw,
     viewport_handles,
 )
@@ -38,6 +39,7 @@ _MODULES = (
     layer_colliders,
     layer_bones,
     layer_particles,
+    layer_wind,
     viewport_draw,
     viewport_handles,
 )

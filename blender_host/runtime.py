@@ -9,6 +9,7 @@ from bpy.app.handlers import persistent
 from . import armature
 from . import bone_binding
 from . import curve_host
+from . import wind_geom
 from ..cloth_kernel import compile as kernel_compile
 from ..cloth_kernel import defs
 from ..cloth_kernel import io as kernel_io
@@ -514,30 +515,13 @@ def _gather_wind_zones(scene):
         zone.world_to_local = np.linalg.inv(world)
         zone.world_scale = armature.matrix_scale(world).astype(np.float32)
 
-        if wind.mode == 'BOX_DIRECTION':
-            zone.size = np.array(wind.size, dtype=np.float32)
-            g = zone.size * zone.world_scale
-            zone.zone_volume = float(g[0] * g[1] * g[2])
-        elif wind.mode in {'SPHERE_DIRECTION', 'SPHERE_RADIAL'}:
-            zone.size = np.full(3, wind.radius, dtype=np.float32)
-            r = wind.radius * float(zone.world_scale[0])
-            zone.zone_volume = (4.0 / 3.0) * r * r * r * math.pi
-        else:
-            zone.zone_volume = float("inf")
+        zone.size = wind_geom.local_extent(obj, wind)
+        zone.zone_volume = wind_geom.zone_volume(obj, wind, zone.world_scale)
 
-        if wind.mode == 'SPHERE_RADIAL':
+        if wind.mode == wind_geom.RADIAL_MODE:
             zone.attenuation_lut = curve_host.get_lut(wind.attenuation)
         else:
-            from ..cloth_kernel import math as pm
-            angle_x = math.radians(wind.direction_angle_x)
-            angle_y = math.radians(wind.direction_angle_y)
-            local_q = pm.euler_yx(np.float32(angle_x), np.float32(angle_y))
-            local_dir = pm.quat_to_tangent(local_q[None])[0]
-            rotation = armature.matrix_to_quat(world).astype(np.float32)
-            zone.world_direction = pm.quat_rotate(rotation[None], local_dir[None])[0]
-            length = np.linalg.norm(zone.world_direction)
-            if length > 1e-30:
-                zone.world_direction = (zone.world_direction / length).astype(np.float32)
+            zone.world_direction = wind_geom.world_direction(world, wind)
         zones.append(zone)
     return zones
 
