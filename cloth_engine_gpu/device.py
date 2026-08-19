@@ -79,10 +79,6 @@ class FieldSet:
     def upload(self, name, host_array):
         self.device[name].copy_to_device(_device_friendly(host_array))
 
-    def upload_many(self, host_dict, names):
-        for name in names:
-            self.upload(name, host_dict[name])
-
     def download(self, name):
         raw = self.device[name].copy_to_host()
         if self.host_dtypes[name] == np.bool_:

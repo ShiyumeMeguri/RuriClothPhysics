@@ -18,17 +18,6 @@ _ZONE_ARG_ORDER = ("zone_id", "mode", "is_addition", "main", "turbulence",
                    "world_position", "world_direction", "world_to_local",
                    "size", "zone_volume", "attenuation_lut")
 
-FRAME_PRE_PHASES = int(kernels.PHASE_SYNC | kernels.PHASE_ADVANCE | kernels.PHASE_BASE_POSE
-                       | kernels.PHASE_CENTER | kernels.PHASE_PARTICLES_PRE
-                       | kernels.PHASE_COLLIDER_PRE | kernels.PHASE_SELF_BEGIN)
-STEP_PHASES = int(kernels.PHASE_TEAM_STEP | kernels.PHASE_COLLIDER_START
-                  | kernels.PHASE_PARTICLES_STEP | kernels.PHASE_BASELINE | kernels.PHASE_TETHER
-                  | kernels.PHASE_DISTANCE_A | kernels.PHASE_ANGLE | kernels.PHASE_BENDING
-                  | kernels.PHASE_COLLIDER_SOLVE | kernels.PHASE_DISTANCE_B | kernels.PHASE_MOTION
-                  | kernels.PHASE_STEP_POST | kernels.PHASE_COLLIDER_END | kernels.PHASE_SELF_STEP)
-FRAME_POST_PHASES = int(kernels.PHASE_DISPLAY | kernels.PHASE_COLLIDER_POST
-                        | kernels.PHASE_TEAM_POST | kernels.PHASE_SELF_END)
-
 _SELF_TASK_EE = 0
 _SELF_TASK_PT = 1
 _SELF_PAIR_GUARD = 30_000_000
@@ -43,7 +32,6 @@ _INPUT_TEAM_FIELDS = ("enabled", "component_world_position", "component_world_ro
 _CONSUMABLE_TEAM_FIELDS = ("reset_pending", "time_reset_pending", "keep_teleport_pending",
                            "force_mode", "impact_force")
 _INPUT_UPLOAD_FIELDS = _INPUT_TEAM_FIELDS + _CONSUMABLE_TEAM_FIELDS
-_SELF_OWNED_TEAM_FIELDS = ("use_point", "use_edge", "use_triangle")
 _CONFIG_TEAM_FIELDS = (
     "gravity", "gravity_direction", "gravity_falloff", "stablization_time",
     "blend_weight_param", "damping_lut", "radius_lut", "normal_axis_vector",
@@ -77,8 +65,7 @@ def _arena_subset_dtype(spec, fields):
 
 
 class GpuEngine:
-    def __init__(self, world, io_mode="slim"):
-        self.io_mode = io_mode
+    def __init__(self, world):
         self.world = None
         self.signature = None
         self.program = None
@@ -253,7 +240,6 @@ class GpuEngine:
                 if name not in fieldset.device:
                     fieldset.set_view(name, cuda.to_device(device._device_friendly(host[name])))
 
-        self.team_staging = staging.StructStaging(world.team.dtype, num_teams)
         self.input_staging = staging.StructStaging(world.team.dtype, num_teams, fields=_INPUT_UPLOAD_FIELDS)
         self.feedback_staging = staging.StructStaging(world.team.dtype, num_teams, fields=_CONSUMABLE_TEAM_FIELDS)
         self.config_staging = staging.StructStaging(world.team.dtype, num_teams, fields=_CONFIG_TEAM_FIELDS)
@@ -365,42 +351,6 @@ class GpuEngine:
                 base = min(max(base, pair_blocks), cap)
         return base
 
-    def upload_all(self, world):
-        team_keys = [k for k in self.team.device.keys() if k not in _SELF_OWNED_TEAM_FIELDS]
-        self.team.upload_many(device.dump_struct(world.team, self.program.num_teams), team_keys)
-        self.particles.upload_many(device.dump_arena(world.particles, self.program.num_particles),
-                                   self.particles.device.keys())
-        self.colliders.upload_many(device.dump_arena(world.colliders, self.program.num_colliders),
-                                   self.colliders.device.keys())
-        self.transforms.upload_many(device.dump_arena(world.transforms, self.program.num_transforms),
-                                    self.transforms.device.keys())
-        self.upload_self_primitives(world)
-
-    def upload_self_primitives(self, world):
-        for fieldset, arena, count in (
-                (self.self_points, world.self_points, self.program.num_self_points),
-                (self.self_edges, world.self_edges, self.program.num_self_edges),
-                (self.self_triangles, world.self_triangles, self.program.num_self_triangles)):
-            fieldset.upload_many(self._dump_primitive(arena, count), fieldset.device.keys())
-
-    def download_self_primitive(self, arena_name, names=None):
-        fieldset = getattr(self, arena_name)
-        names = names or list(fieldset.device.keys())
-        out = {}
-        for name in names:
-            raw = fieldset.device[name].copy_to_host()
-            if name in ("fix", "intersect"):
-                out[name] = np.stack([(raw >> bit) & 1 for bit in range(3)], axis=1).astype(bool)
-            elif name in ("all_fix", "ignore", "use"):
-                out[name] = raw.astype(bool)
-            else:
-                out[name] = raw
-        return out
-
-    def download_self_state(self, names=None):
-        names = names or list(self.self_state.keys())
-        return {name: self.self_state[name].copy_to_host() for name in names}
-
     def download_team(self, world, names=None):
         names = names or list(self.team.device.keys())
         flat = {name: self.team.download(name) for name in names}
@@ -425,11 +375,11 @@ class GpuEngine:
                 np.float32(power[0]), np.float32(power[1]),
                 np.float32(power[2]), np.float32(power[3]))
 
-    def launch(self, phase_mask, sub_begin, sub_end, frame_globals, stream=0):
+    def launch(self, sub_end, frame_globals, stream=0):
         fdt, sim_dt, msc, gts, pw0, pw1, pw2, pw3 = self._frame_scalars(frame_globals)
         blocks = self._blocks()
         kernels.frame_kernel[blocks, _THREADS, stream](
-            int32(phase_mask), int32(sub_begin), int32(sub_end),
+            int32(sub_end),
             fdt, sim_dt, msc, gts, pw0, pw1, pw2, pw3,
             *[self.blobs[group] for group in kernels.RESIDENT_BLOB_GROUPS],
             self.offs, self.lens,
@@ -443,16 +393,6 @@ class GpuEngine:
 
     def step_frame(self, world, frame_globals):
         self.load(world)
-        if self.io_mode == "slim":
-            self._step_frame_slim(world, frame_globals)
-            return
-        self._upload_inputs(world)
-        self.upload_zones(frame_globals.zones)
-        self._self_frame_prepare(world, frame_globals.frame_index)
-        self.launch(kernels.ALL_PHASES, 0, self._sub_end(frame_globals), frame_globals)
-        self._download_outputs(world)
-
-    def _step_frame_slim(self, world, frame_globals):
         stream = self.stream
         tblocks, tthreads = self._team_bridge_grid()
         self.input_staging.upload_async(world.team, self.team, tblocks, tthreads, stream)
@@ -467,7 +407,7 @@ class GpuEngine:
         self._maybe_upload_config(world, tblocks, tthreads, stream)
         self.upload_zones(frame_globals.zones)
         self._self_frame_prepare(world, frame_globals.frame_index, stream)
-        self.launch(kernels.ALL_PHASES, 0, self._sub_end(frame_globals), frame_globals, stream=stream)
+        self.launch(self._sub_end(frame_globals), frame_globals, stream=stream)
         pblocks, pthreads = self._particle_bridge_grid()
         self.particle_out_staging.download_issue(self.particles, pblocks, pthreads, stream)
         self.feedback_staging.download_issue(self.team, tblocks, tthreads, stream)
@@ -475,54 +415,9 @@ class GpuEngine:
         self.particle_out_staging.download_finish(world.particles.arrays)
         self.feedback_staging.download_finish(world.team)
 
-    def step_frame_captured(self, world, frame_globals, capture=None):
-        self.load(world)
-        self._upload_inputs(world)
-        self.upload_zones(frame_globals.zones)
-        self._self_frame_prepare(world, frame_globals.frame_index)
-        captured = self.launch_segmented(frame_globals, capture)
-        self._download_outputs(world)
-        return captured
-
-    def launch_segmented(self, frame_globals, capture=None):
-        captured = {"frame_pre": None, "substeps": [], "frame_post": None}
-        self.launch(FRAME_PRE_PHASES, 0, 0, frame_globals)
-        if capture is not None:
-            captured["frame_pre"] = self._capture_fields(capture)
-        for k in range(kernels.MAX_SIM_COUNT):
-            self.launch(STEP_PHASES, k, k + 1, frame_globals)
-            if capture is not None:
-                captured["substeps"].append(self._capture_fields(capture))
-        self.launch(FRAME_POST_PHASES, 0, 0, frame_globals)
-        if capture is not None:
-            captured["frame_post"] = self._capture_fields(capture)
-        return captured
-
-    def _capture_fields(self, capture):
-        snapshot = {}
-        for fieldset_name, field_name in capture:
-            snapshot[(fieldset_name, field_name)] = getattr(self, fieldset_name).download(field_name)
-        return snapshot
-
-    _OUTPUT_PARTICLE_FIELDS = ("positions", "out_rotations", "velocities")
-
     def _team_bridge_grid(self):
         blocks = (max(self.program.num_teams, 1) + _THREADS - 1) // _THREADS
         return blocks, _THREADS
-
-    def _upload_inputs(self, world):
-        blocks, threads = self._team_bridge_grid()
-        self.team_staging.upload(world.team, self.team, blocks, threads)
-        self.transforms.upload("world", world.transforms.arrays["world"][:self.program.num_transforms])
-        collider_arrays = world.colliders.arrays
-        for name in ("input_positions", "input_rotations", "input_scales", "enabled"):
-            if name in self.colliders.device:
-                self.colliders.upload(name, collider_arrays[name][:self.program.num_colliders])
-
-    def _download_outputs(self, world):
-        blocks, threads = self._team_bridge_grid()
-        self.team_staging.download(world.team, self.team, blocks, threads)
-        self.download_particles(world, list(self._OUTPUT_PARTICLE_FIELDS))
 
     def _collider_bridge_grid(self):
         blocks = (max(self.program.num_colliders, 1) + _THREADS - 1) // _THREADS
@@ -531,15 +426,6 @@ class GpuEngine:
     def _particle_bridge_grid(self):
         blocks = (max(self.program.num_particles, 1) + _THREADS - 1) // _THREADS
         return blocks, _THREADS
-
-    def _upload_inputs_slim(self, world):
-        tblocks, tthreads = self._team_bridge_grid()
-        self.input_staging.upload(world.team, self.team, tblocks, tthreads)
-        self.transforms.upload("world", world.transforms.arrays["world"][:self.program.num_transforms])
-        if self.collider_input_staging is not None:
-            cblocks, cthreads = self._collider_bridge_grid()
-            self.collider_input_staging.upload(world.colliders.arrays, self.colliders, cblocks, cthreads)
-        self._maybe_upload_config(world, tblocks, tthreads)
 
     def _maybe_upload_config(self, world, blocks, threads, stream=0):
         self.config_staging._repack_in(world.team)
@@ -550,12 +436,6 @@ class GpuEngine:
         self.config_staging.stage.copy_to_device(self.config_staging._host, stream=stream)
         soa = [self.team.device[name] for name in self.config_staging.field_order]
         self.config_staging._explode[blocks, threads, stream](self.config_staging.stage, *soa)
-
-    def _download_outputs_slim(self, world):
-        pblocks, pthreads = self._particle_bridge_grid()
-        self.particle_out_staging.download(world.particles.arrays, self.particles, pblocks, pthreads)
-        tblocks, tthreads = self._team_bridge_grid()
-        self.feedback_staging.download(world.team, self.team, tblocks, tthreads)
 
     def _self_task_fingerprint(self, tt, nt):
         cws = tt["component_world_scale"][:nt]
