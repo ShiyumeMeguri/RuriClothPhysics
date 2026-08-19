@@ -895,9 +895,14 @@ class RCPWindZoneSettings(bpy.types.PropertyGroup):
                        update=_wind_mode_update,
                        description="风区的作用范围与吹法。范围风只影响落在范围内的布料。"
                                    "范围大小直接由空物体的显示尺寸与缩放决定, 拖物体即可调。")
-    main: FloatProperty(name="风速", default=5.0, min=0.0, max=30.0, update=_redraw,
-                        description="风的基础速度(米/秒)。注意风速越高, 乱流造成的忽强忽弱越不明显 —— "
-                                    "低速风才会呈现明显的一阵一阵。")
+    main: FloatProperty(name="风力强度", default=5.0, min=0.0, max=30.0, soft_max=10.0,
+                        update=_redraw,
+                        description="风推动布料的力度。注意这是艺术化数值, 不是米/秒那种物理单位: "
+                                    "实测超过 10 之后响应迅速趋平(位置约束把多余的力投影掉了), "
+                                    "20 与 30 只差 8%, 50 以上完全没有区别 —— 滑块因此只拖到 10, "
+                                    "更大的值仍可手动输入。"
+                                    "【另: 力度越高, 乱流造成的忽强忽弱越不明显, "
+                                    "低力度才会呈现明显的一阵一阵】")
     turbulence: FloatProperty(name="乱流", default=1.0, min=0.0, max=1.0, update=_redraw,
                               description="本风区的风向抖动强度, 会与每条布料自己的'乱流倍率'相乘。"
                                           "0 = 风向恒定不变。")
