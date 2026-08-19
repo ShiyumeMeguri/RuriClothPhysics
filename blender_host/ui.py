@@ -54,6 +54,23 @@ def draw_curve(layout, owner, prop_name, label):
             layout.label(text="曲线节点将在下次更新时创建", icon='INFO')
 
 
+def draw_collider_references(layout, config):
+    """Which colliders this config tests against.
+
+    Drawn in the main panel beside the root bones: those two lists are what you actually edit while
+    building a chain, and they used to sit two panels apart -- roots in 主设置, references buried in
+    碰撞体 > 本配置的碰撞, with the whole 物理参数 tree in between.
+    """
+    collision = config.collider_collision
+    layout.label(text="碰撞体引用")
+    row = layout.row()
+    row.template_list("RCP_UL_collider_references", "", collision, "collider_references",
+                      collision, "active_collider_reference_index", rows=3)
+    side = row.column(align=True)
+    _draw_side_buttons(side, "ruri_cloth_physics.list_add", "ruri_cloth_physics.list_remove",
+                       "ruri_cloth_physics.list_move", 'COLLIDER_REFERENCES')
+
+
 def draw_check_slider(layout, owner, prop_name, label):
     check = getattr(owner, prop_name)
     row = layout.row(align=True)
@@ -274,6 +291,10 @@ class RCP_PT_config_main(_ConfigPanel, bpy.types.Panel):
                 box.label(text="%s 被设为 %s" % (name, attribute))
             box.operator("ruri_cloth_physics.repair_roots", icon='PINNED')
 
+        layout.separator()
+        draw_collider_references(layout, config)
+
+        layout.separator()
         if is_spring:
             row = layout.row()
             row.enabled = False
@@ -568,14 +589,6 @@ class RCP_PT_collider_collision(_ConfigPanel, bpy.types.Panel):
             op.list_id = 'COLLISION_BONES'
         else:
             layout.prop(collision, "friction")
-
-        layout.label(text="碰撞体引用")
-        row = layout.row()
-        row.template_list("RCP_UL_collider_references", "", collision, "collider_references",
-                          collision, "active_collider_reference_index", rows=3)
-        side = row.column(align=True)
-        _draw_side_buttons(side, "ruri_cloth_physics.list_add", "ruri_cloth_physics.list_remove",
-                           "ruri_cloth_physics.list_move", 'COLLIDER_REFERENCES')
 
 
 class RCP_PT_self_collision(_NonSpringPanel, bpy.types.Panel):
