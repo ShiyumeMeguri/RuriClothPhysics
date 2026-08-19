@@ -315,14 +315,11 @@ def phase_03(scal_f, scal_i, blob_u8_s, blob_f32_v3, blob_f32_s, blob_i32_s, blo
     tid = cuda.grid(1)
     stride = cuda.gridsize(1)
     sim_dt = scal_f[SCAL_SIM_DT]
-    n_zones = scal_i[SCAL_N_ZONES]
     csr_center_fixed_offsets = blob_i32_s[offs[252]:offs[252] + lens[252]]
     csr_center_fixed_order = blob_i32_s[offs[253]:offs[253] + lens[253]]
-    n_zones = scal_i[SCAL_N_ZONES]
     p_positions = blob_f32_v3[offs[151]:offs[151] + lens[151]]
     p_rotations = blob_f32_v4[offs[152]:offs[152] + lens[152]]
     p_vertex_bind_pose_rotations = blob_f32_v4[offs[175]:offs[175] + lens[175]]
-    sim_dt = scal_f[SCAL_SIM_DT]
     st_center_fixed_particle = blob_i32_s[offs[239]:offs[239] + lens[239]]
     t_anchor_component_local_position = blob_f32_v3[offs[90]:offs[90] + lens[90]]
     t_anchor_inertia = blob_f32_s[offs[125]:offs[125] + lens[125]]
@@ -382,39 +379,11 @@ def phase_03(scal_f, scal_i, blob_u8_s, blob_f32_v3, blob_f32_s, blob_i32_s, blo
     t_time_reset = blob_u8_s[offs[3]:offs[3] + lens[3]]
     t_valid = blob_u8_s[offs[1]:offs[1] + lens[1]]
     t_velocity_weight = blob_f32_s[offs[24]:offs[24] + lens[24]]
-    t_wind_count = blob_i8_s[offs[41]:offs[41] + lens[41]]
-    t_wind_direction = blob_f32_m4x3[offs[134]:offs[134] + lens[134]]
-    t_wind_dirq = blob_f32_m4x4[offs[44]:offs[44] + lens[44]]
-    t_wind_influence = blob_f32_s[offs[46]:offs[46] + lens[46]]
-    t_wind_main = blob_f32_v4[offs[42]:offs[42] + lens[42]]
-    t_wind_time = blob_f32_v4[offs[43]:offs[43] + lens[43]]
-    t_wind_zone_id = blob_i32_v4[offs[135]:offs[135] + lens[135]]
-    t_wind_zone_turbulence = blob_f32_v4[offs[45]:offs[45] + lens[45]]
     t_world_inertia = blob_f32_s[offs[126]:offs[126] + lens[126]]
-    z_attenuation_lut = zone_f32_v16[zone_offs[10]:zone_offs[10] + zone_lens[10]]
-    z_is_addition = zone_u8_s[zone_offs[2]:zone_offs[2] + zone_lens[2]]
-    z_main = zone_f32_s[zone_offs[3]:zone_offs[3] + zone_lens[3]]
-    z_mode = zone_i32_s[zone_offs[1]:zone_offs[1] + zone_lens[1]]
-    z_size = zone_f32_v3[zone_offs[8]:zone_offs[8] + zone_lens[8]]
-    z_turbulence = zone_f32_s[zone_offs[4]:zone_offs[4] + zone_lens[4]]
-    z_world_direction = zone_f32_v3[zone_offs[6]:zone_offs[6] + zone_lens[6]]
-    z_world_position = zone_f32_v3[zone_offs[5]:zone_offs[5] + zone_lens[5]]
-    z_world_to_local = zone_f64_m4x4[zone_offs[7]:zone_offs[7] + zone_lens[7]]
-    z_zone_id = zone_i32_s[zone_offs[0]:zone_offs[0] + zone_lens[0]]
-    z_zone_volume = zone_f32_s[zone_offs[9]:zone_offs[9] + zone_lens[9]]
     num_teams = t_enabled.shape[0]
     mat_a = cuda.local.array((4, 4), float64)
     mat_b = cuda.local.array((4, 4), float64)
     mat_c = cuda.local.array((4, 4), float64)
-    res_zone_id = cuda.local.array(8, int32)
-    res_time = cuda.local.array(8, float32)
-    res_main = cuda.local.array(8, float32)
-    res_dx = cuda.local.array(8, float32)
-    res_dy = cuda.local.array(8, float32)
-    res_dz = cuda.local.array(8, float32)
-    res_turb = cuda.local.array(8, float32)
-    old_zid = cuda.local.array(4, int32)
-    old_wt = cuda.local.array(4, float32)
     i = tid
     while i < num_teams:
         if team_frame_mask(t_enabled, t_valid, t_cws, i):
@@ -961,7 +930,50 @@ def phase_03(scal_f, scal_i, blob_u8_s, blob_f32_v3, blob_f32_s, blob_i32_s, blo
                     wgt = float32(1.0)
                 t_velocity_weight[i] = wgt
                 t_blend_weight[i] = wgt
+        i += stride
 
+
+@cuda.jit(cache=True)
+def phase_03b(scal_f, scal_i, blob_u8_s, blob_f32_v3, blob_f32_s, blob_i32_s, blob_f32_v4, blob_f32_v16, blob_i8_s, blob_f32_m4x4, blob_f64_m4x4, blob_f32_v2, blob_f32_m4x3, blob_i32_v4, blob_f32_m2x3, blob_i32_v2, blob_i32_v3, blob_f32_v22, blob_f64_v3, offs, lens, zone_i32_s, zone_u8_s, zone_f32_s, zone_f32_v3, zone_f64_m4x4, zone_f32_v16, zone_offs, zone_lens, k, sit):
+    tid = cuda.grid(1)
+    stride = cuda.gridsize(1)
+    n_zones = scal_i[SCAL_N_ZONES]
+    t_cws = blob_f32_v3[offs[2]:offs[2] + lens[2]]
+    t_enabled = blob_u8_s[offs[0]:offs[0] + lens[0]]
+    t_frame_world_position = blob_f32_v3[offs[80]:offs[80] + lens[80]]
+    t_valid = blob_u8_s[offs[1]:offs[1] + lens[1]]
+    t_wind_count = blob_i8_s[offs[41]:offs[41] + lens[41]]
+    t_wind_direction = blob_f32_m4x3[offs[134]:offs[134] + lens[134]]
+    t_wind_dirq = blob_f32_m4x4[offs[44]:offs[44] + lens[44]]
+    t_wind_influence = blob_f32_s[offs[46]:offs[46] + lens[46]]
+    t_wind_main = blob_f32_v4[offs[42]:offs[42] + lens[42]]
+    t_wind_time = blob_f32_v4[offs[43]:offs[43] + lens[43]]
+    t_wind_zone_id = blob_i32_v4[offs[135]:offs[135] + lens[135]]
+    t_wind_zone_turbulence = blob_f32_v4[offs[45]:offs[45] + lens[45]]
+    z_attenuation_lut = zone_f32_v16[zone_offs[10]:zone_offs[10] + zone_lens[10]]
+    z_is_addition = zone_u8_s[zone_offs[2]:zone_offs[2] + zone_lens[2]]
+    z_main = zone_f32_s[zone_offs[3]:zone_offs[3] + zone_lens[3]]
+    z_mode = zone_i32_s[zone_offs[1]:zone_offs[1] + zone_lens[1]]
+    z_size = zone_f32_v3[zone_offs[8]:zone_offs[8] + zone_lens[8]]
+    z_turbulence = zone_f32_s[zone_offs[4]:zone_offs[4] + zone_lens[4]]
+    z_world_direction = zone_f32_v3[zone_offs[6]:zone_offs[6] + zone_lens[6]]
+    z_world_position = zone_f32_v3[zone_offs[5]:zone_offs[5] + zone_lens[5]]
+    z_world_to_local = zone_f64_m4x4[zone_offs[7]:zone_offs[7] + zone_lens[7]]
+    z_zone_id = zone_i32_s[zone_offs[0]:zone_offs[0] + zone_lens[0]]
+    z_zone_volume = zone_f32_s[zone_offs[9]:zone_offs[9] + zone_lens[9]]
+    num_teams = t_enabled.shape[0]
+    res_zone_id = cuda.local.array(8, int32)
+    res_time = cuda.local.array(8, float32)
+    res_main = cuda.local.array(8, float32)
+    res_dx = cuda.local.array(8, float32)
+    res_dy = cuda.local.array(8, float32)
+    res_dz = cuda.local.array(8, float32)
+    res_turb = cuda.local.array(8, float32)
+    old_zid = cuda.local.array(4, int32)
+    old_wt = cuda.local.array(4, float32)
+    i = tid
+    while i < num_teams:
+        if team_frame_mask(t_enabled, t_valid, t_cws, i):
             old_count = t_wind_count[i]
             for oc in range(WIND_ZONE_SLOTS):
                 if oc < old_count:
@@ -969,9 +981,9 @@ def phase_03(scal_f, scal_i, blob_u8_s, blob_f32_v3, blob_f32_s, blob_i32_s, blo
                     old_wt[oc] = t_wind_time[i, oc]
             count = 0
             if n_zones > 0 and t_wind_influence[i] > EPSILON:
-                cx64 = float64(cwpx)
-                cy64 = float64(cwpy)
-                cz64 = float64(cwpz)
+                cx64 = float64(t_frame_world_position[i, 0])
+                cy64 = float64(t_frame_world_position[i, 1])
+                cz64 = float64(t_frame_world_position[i, 2])
                 min_volume = INF
                 addition_count = 0
                 latest_valid = False
@@ -1078,6 +1090,7 @@ def phase_03(scal_f, scal_i, blob_u8_s, blob_f32_v3, blob_f32_s, blob_i32_s, blo
                 t_wind_dirq[i, s, 2] = dqz
                 t_wind_dirq[i, s, 3] = dqw
         i += stride
+
 
 
 @cuda.jit(cache=True)
@@ -3877,7 +3890,8 @@ PHASE_TABLE = (
     ('phase_00', (), 27),
     ('phase_01', (), 20),
     ('phase_02', (), 13),
-    ('phase_03', (), 86),
+    ('phase_03', (), 65),
+    ('phase_03b', (), 23),
     ('phase_04', (), 27),
     ('phase_05', (), 28),
     ('phase_06', (), 1),
