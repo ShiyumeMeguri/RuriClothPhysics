@@ -72,25 +72,10 @@ def _on_load_post(*args):
     _subscribe_transform()
 
 
-@persistent
-def _on_depsgraph_update(scene, depsgraph=None):
-    if scene is None or depsgraph is None:
-        return
-    screen = bpy.context.screen
-    if screen is not None and screen.is_animation_playing:
-        return
-    for update in depsgraph.updates:
-        if update.is_updated_transform or update.is_updated_geometry:
-            viewport.tag_redraw()
-            return
-
-
 def register():
     global _handle
     if _handle is None:
         _handle = bpy.types.SpaceView3D.draw_handler_add(_draw, (), 'WINDOW', 'POST_VIEW')
-    if _on_depsgraph_update not in bpy.app.handlers.depsgraph_update_post:
-        bpy.app.handlers.depsgraph_update_post.append(_on_depsgraph_update)
     if _on_load_post not in bpy.app.handlers.load_post:
         bpy.app.handlers.load_post.append(_on_load_post)
     _subscribe_transform()
@@ -101,8 +86,6 @@ def unregister():
     bpy.msgbus.clear_by_owner(_MSGBUS_OWNER)
     if _on_load_post in bpy.app.handlers.load_post:
         bpy.app.handlers.load_post.remove(_on_load_post)
-    if _on_depsgraph_update in bpy.app.handlers.depsgraph_update_post:
-        bpy.app.handlers.depsgraph_update_post.remove(_on_depsgraph_update)
     if _handle is not None:
         bpy.types.SpaceView3D.draw_handler_remove(_handle, 'WINDOW')
         _handle = None

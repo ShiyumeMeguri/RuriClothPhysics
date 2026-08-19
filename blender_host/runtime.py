@@ -1,4 +1,3 @@
-import math
 import zlib
 
 import numpy as np
