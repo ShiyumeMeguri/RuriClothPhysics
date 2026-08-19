@@ -1,5 +1,6 @@
 import bpy
 import gpu
+from bpy.app.handlers import persistent
 from gpu_extras.batch import batch_for_shader
 
 from . import shapes
@@ -46,14 +47,34 @@ def _draw():
     gpu.state.line_width_set(1.0)
 
 
+@persistent
+def _on_depsgraph_update(scene, depsgraph=None):
+    if scene is None or depsgraph is None:
+        return
+    settings = getattr(scene, "ruri_cloth_physics", None)
+    if settings is None or not settings.overlay_enabled:
+        return
+    screen = bpy.context.screen
+    if screen is not None and screen.is_animation_playing:
+        return
+    for update in depsgraph.updates:
+        if update.is_updated_transform or update.is_updated_geometry:
+            viewport.tag_redraw()
+            return
+
+
 def register():
     global _handle
     if _handle is None:
         _handle = bpy.types.SpaceView3D.draw_handler_add(_draw, (), 'WINDOW', 'POST_VIEW')
+    if _on_depsgraph_update not in bpy.app.handlers.depsgraph_update_post:
+        bpy.app.handlers.depsgraph_update_post.append(_on_depsgraph_update)
 
 
 def unregister():
     global _handle
+    if _on_depsgraph_update in bpy.app.handlers.depsgraph_update_post:
+        bpy.app.handlers.depsgraph_update_post.remove(_on_depsgraph_update)
     if _handle is not None:
         bpy.types.SpaceView3D.draw_handler_remove(_handle, 'WINDOW')
         _handle = None

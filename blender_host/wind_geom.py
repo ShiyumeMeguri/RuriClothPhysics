@@ -24,15 +24,23 @@ def sync_display(obj, wind):
     obj.empty_display_type = DISPLAY_TYPE.get(wind.mode, 'SINGLE_ARROW')
 
 
-def local_extent(obj, wind):
-    size = float(obj.empty_display_size)
+def zone_matrix(obj, depsgraph):
+    source = obj.evaluated_get(depsgraph) if depsgraph is not None else obj
+    return armature.read_matrix(source.matrix_world)
+
+
+def zone_display_size(obj, depsgraph):
+    source = obj.evaluated_get(depsgraph) if depsgraph is not None else obj
+    return float(source.empty_display_size)
+
+
+def local_extent(size, wind):
     if wind.mode == BOX_MODE:
         return np.full(3, size * 2.0, dtype=np.float32)
     return np.full(3, size, dtype=np.float32)
 
 
-def zone_volume(obj, wind, world_scale):
-    size = float(obj.empty_display_size)
+def zone_volume(size, wind, world_scale):
     if wind.mode == BOX_MODE:
         extent = size * 2.0 * np.asarray(world_scale, dtype=np.float64)
         return float(extent[0] * extent[1] * extent[2])

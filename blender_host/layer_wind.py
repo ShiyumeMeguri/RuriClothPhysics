@@ -66,9 +66,9 @@ def _arrow(canvas, origin, direction, length, color, head=True):
     canvas.lines(*shapes.segments(pairs), color=color)
 
 
-def _radial(canvas, obj, matrix, origin, wind, color):
+def _radial(canvas, display_size, matrix, origin, wind, color):
     lut = curve_host.get_lut(wind.attenuation)
-    reach = float(wind_geom.local_extent(obj, wind)[0])
+    reach = float(wind_geom.local_extent(display_size, wind)[0])
     for unit in RADIAL_DIRECTIONS:
         boundary = matrix[:3, :3] @ (unit * reach) + origin
         offset = boundary - origin
@@ -93,11 +93,13 @@ def _radial(canvas, obj, matrix, origin, wind, color):
 
 def collect(context, canvas):
     active = context.object
+    depsgraph = context.evaluated_depsgraph_get()
     for obj, wind in _zones(context):
-        matrix = armature.read_matrix(obj.matrix_world)
+        matrix = wind_geom.zone_matrix(obj, depsgraph)
+        display_size = wind_geom.zone_display_size(obj, depsgraph)
         origin = matrix[:3, 3].astype(np.float64)
         scale = armature.matrix_scale(matrix)
-        span = float(obj.empty_display_size) * float(scale[0])
+        span = display_size * float(scale[0])
         if span < 1e-5:
             span = 1.0
         if not wind.enabled:
@@ -111,7 +113,7 @@ def collect(context, canvas):
         length = span * (0.35 + 0.65 * speed)
 
         if wind.mode == wind_geom.RADIAL_MODE:
-            _radial(canvas, obj, matrix, origin, wind, color)
+            _radial(canvas, display_size, matrix, origin, wind, color)
             continue
 
         base, spread = wind_geom.turbulence_spread(matrix, wind, SPREAD_OFFSETS)

@@ -496,7 +496,9 @@ def _evaluate_culling(obj, entry, config, scene):
     return invisible, distance_weight
 
 
-def _gather_wind_zones(scene):
+def _gather_wind_zones(scene, depsgraph=None):
+    if depsgraph is None:
+        depsgraph = bpy.context.evaluated_depsgraph_get()
     zones = []
     for obj in scene.objects:
         wind = getattr(obj, "ruri_cloth_physics_wind", None)
@@ -510,13 +512,14 @@ def _gather_wind_zones(scene):
         zone.main = wind.main
         zone.turbulence = wind.turbulence
         zone.is_addition = wind.is_addition
-        world = armature.read_matrix(obj.matrix_world)
+        world = wind_geom.zone_matrix(obj, depsgraph)
+        display_size = wind_geom.zone_display_size(obj, depsgraph)
         zone.world_position = world[:3, 3].astype(np.float32)
         zone.world_to_local = np.linalg.inv(world)
         zone.world_scale = armature.matrix_scale(world).astype(np.float32)
 
-        zone.size = wind_geom.local_extent(obj, wind)
-        zone.zone_volume = wind_geom.zone_volume(obj, wind, zone.world_scale)
+        zone.size = wind_geom.local_extent(display_size, wind)
+        zone.zone_volume = wind_geom.zone_volume(display_size, wind, zone.world_scale)
 
         if wind.mode == wind_geom.RADIAL_MODE:
             zone.attenuation_lut = curve_host.get_lut(wind.attenuation)
