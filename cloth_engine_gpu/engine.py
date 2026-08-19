@@ -259,6 +259,12 @@ class GpuEngine:
         self.config_staging._repack_in(world.team)
         self._config_shadow = self.config_staging._host.tobytes()
         self.stream = cuda.stream()
+        self._scal_f_host = cuda.pinned_array(kernels.SCAL_F_LEN, dtype=np.float32)
+        self._scal_i_host = cuda.pinned_array(kernels.SCAL_I_LEN, dtype=np.int32)
+        self._scal_f_host[:] = 0
+        self._scal_i_host[:] = 0
+        self.scal_f = cuda.device_array(kernels.SCAL_F_LEN, dtype=np.float32)
+        self.scal_i = cuda.device_array(kernels.SCAL_I_LEN, dtype=np.int32)
         world_field = world.transforms.arrays["world"]
         self._world_pinned = cuda.pinned_array(
             (max(self.program.num_transforms, 1),) + world_field.shape[1:], dtype=world_field.dtype)
@@ -375,15 +381,30 @@ class GpuEngine:
                 np.float32(power[0]), np.float32(power[1]),
                 np.float32(power[2]), np.float32(power[3]))
 
-    def launch(self, sub_end, frame_globals, stream=0):
+    def _upload_scalars(self, sub_end, frame_globals, stream):
         fdt, sim_dt, msc, gts, pw0, pw1, pw2, pw3 = self._frame_scalars(frame_globals)
+        f = self._scal_f_host
+        f[kernels.SCAL_FRAME_DT] = fdt
+        f[kernels.SCAL_SIM_DT] = sim_dt
+        f[kernels.SCAL_TIME_SCALE] = gts
+        f[kernels.SCAL_POWER0] = pw0
+        f[kernels.SCAL_POWER1] = pw1
+        f[kernels.SCAL_POWER2] = pw2
+        f[kernels.SCAL_POWER3] = pw3
+        i = self._scal_i_host
+        i[kernels.SCAL_MAX_SIM] = msc
+        i[kernels.SCAL_N_ZONES] = self.n_zones
+        i[kernels.SCAL_SUB_END] = sub_end
+        self.scal_f.copy_to_device(f, stream=stream)
+        self.scal_i.copy_to_device(i, stream=stream)
+
+    def launch(self, sub_end, frame_globals, stream=0):
+        self._upload_scalars(sub_end, frame_globals, stream)
         blocks = self._blocks()
         kernels.frame_kernel[blocks, _THREADS, stream](
-            int32(sub_end),
-            fdt, sim_dt, msc, gts, pw0, pw1, pw2, pw3,
+            self.scal_f, self.scal_i,
             *[self.blobs[group] for group in kernels.RESIDENT_BLOB_GROUPS],
             self.offs, self.lens,
-            int32(self.n_zones),
             *[self.zone_blobs[group] for group in kernels.ZONE_BLOB_GROUPS],
             self.zone_offs, self.zone_lens)
 

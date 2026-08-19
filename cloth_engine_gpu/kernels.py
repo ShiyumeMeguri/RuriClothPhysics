@@ -23,6 +23,20 @@ SCL_FRAME_INDEX = 5
 
 MAX_SIM_COUNT = 5
 
+SCAL_FRAME_DT = 0
+SCAL_SIM_DT = 1
+SCAL_TIME_SCALE = 2
+SCAL_POWER0 = 3
+SCAL_POWER1 = 4
+SCAL_POWER2 = 5
+SCAL_POWER3 = 6
+SCAL_F_LEN = 8
+
+SCAL_MAX_SIM = 0
+SCAL_N_ZONES = 1
+SCAL_SUB_END = 2
+SCAL_I_LEN = 4
+
 WIND_ZONE_SLOTS = 4
 ZONE_GLOBAL = int32(0)
 ZONE_BOX = int32(1)
@@ -2130,15 +2144,12 @@ def self_pt_geometry(point_prim, tri_prim, thickness, first, sfp_particles, sft_
 
 
 @cuda.jit(cache=True)
-def frame_kernel(sub_end,
-                 fdt, sim_dt, max_sim_count, global_time_scale,
-                 power0, power1, power2, power3,
+def frame_kernel(scal_f, scal_i,
                  blob_u8_s, blob_f32_v3, blob_f32_s, blob_i32_s, blob_f32_v4,
                  blob_f32_v16, blob_i8_s, blob_f32_m4x4, blob_f64_m4x4, blob_f32_v2,
                  blob_f32_m4x3, blob_i32_v4, blob_f32_m2x3, blob_i32_v2, blob_i32_v3,
                  blob_f32_v22, blob_f64_v3,
                  offs, lens,
-                 n_zones,
                  zone_i32_s, zone_u8_s, zone_f32_s, zone_f32_v3, zone_f64_m4x4,
                  zone_f32_v16,
                  zone_offs, zone_lens):
@@ -2147,6 +2158,17 @@ def frame_kernel(sub_end,
     stride = cuda.gridsize(1)
     bid = cuda.blockIdx.x
     bdim = cuda.blockDim.x
+
+    fdt = scal_f[SCAL_FRAME_DT]
+    sim_dt = scal_f[SCAL_SIM_DT]
+    global_time_scale = scal_f[SCAL_TIME_SCALE]
+    power0 = scal_f[SCAL_POWER0]
+    power1 = scal_f[SCAL_POWER1]
+    power2 = scal_f[SCAL_POWER2]
+    power3 = scal_f[SCAL_POWER3]
+    max_sim_count = scal_i[SCAL_MAX_SIM]
+    n_zones = scal_i[SCAL_N_ZONES]
+    sub_end = scal_i[SCAL_SUB_END]
 
     t_enabled = blob_u8_s[offs[0]:offs[0] + lens[0]]
     t_valid = blob_u8_s[offs[1]:offs[1] + lens[1]]
