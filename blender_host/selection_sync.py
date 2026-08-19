@@ -1,12 +1,3 @@
-"""Selecting a bone in the viewport activates the config that drives it.
-
-The panel and the 3D view are two views of one selection. The list row already drives the viewport;
-this is the other direction, so picking a bone in pose or edit mode lands you on its parameters
-instead of making you hunt for which of two dozen configs owns it.
-
-Bone selection does raise a depsgraph update (measured), so no polling and no timer is needed.
-"""
-
 import bpy
 from bpy.app.handlers import persistent
 
@@ -17,12 +8,6 @@ _suppressed = False
 
 
 class suppressed:
-    """Hold while writing panel state, so the list-row callback does not bounce the selection back.
-
-    Without this the two directions fight: selecting a mid-chain bone would activate its config,
-    which sets the active root row, whose update callback re-selects the ROOT -- silently throwing
-    away the child the user just clicked.
-    """
 
     def __enter__(self):
         global _suppressed
@@ -47,7 +32,6 @@ def _active_bone_name(obj):
 
 
 def sync(obj):
-    """Point the panel at whatever config owns the active bone. Returns True when it moved."""
     settings = getattr(obj, "ruri_cloth_physics", None)
     if settings is None or not settings.sync_list_selection or len(settings.configs) == 0:
         return False
@@ -58,8 +42,6 @@ def sync(obj):
     mapping = chain.role_map(obj)
     owner = mapping.get(name)
     if owner is None:
-        # Not simulated by anything: the parameters on screen have nothing to do with this bone, so
-        # leave the panel where it is rather than jumping somewhere arbitrary.
         return False
 
     config_index, _ = owner

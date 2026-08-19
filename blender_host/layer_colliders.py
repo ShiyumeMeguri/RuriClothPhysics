@@ -1,5 +1,3 @@
-"""Collider layer: wireframe plus the radius / length / centre drag handles."""
-
 import mathutils
 import numpy as np
 
@@ -22,8 +20,6 @@ COLOR_AXIS_Y = (0.35, 0.85, 0.30)
 COLOR_AXIS_Z = (0.30, 0.50, 0.95)
 
 MINIMUM_RADIUS = 0.001
-# Calibrated against a real viewport: scale_basis feeds the glyph, not the shaft, and the glyph
-# comes out roughly a twentieth of the value handed in.
 GLYPH_FACTOR = 12.0
 MINIMUM_GLYPH = 0.18
 
@@ -87,7 +83,6 @@ def _active(context):
 
 
 def _axis_frame(matrix, center, column):
-    """Frame whose +Z is bone axis `column`; ARROW gizmos slide along their own +Z."""
     basis = matrix.to_3x3().normalized()
     forward = basis.col[column].normalized()
     reference = basis.col[(column + 1) % 3]
@@ -104,22 +99,10 @@ def _axis_frame(matrix, center, column):
 
 
 def _glyph_scale(settings, reference):
-    """Grab-glyph size for a handle.
-
-    scale_basis sizes the gizmo GLYPH, while the arrow's shaft length comes from its target value --
-    so feeding scale_basis the raw radius drew a grab box about a twentieth of the collider, which
-    is the "tiny tick at the sphere edge" this replaced. The reference is scaled up and floored so a
-    17 mm toe collider is still grabbable, and gizmo_size is the user's escape hatch.
-    """
     return max(reference * GLYPH_FACTOR, MINIMUM_GLYPH) * settings.gizmo_size
 
 
 def picks(context, obj):
-    """One click target per non-active collider, so every collider can be reached in the viewport.
-
-    Without these only the active collider carried any gizmo, which reads as "some colliders have no
-    handles at all" -- the other twenty-three were only reachable through the properties list.
-    """
     settings = obj.ruri_cloth_physics
     found = []
     for index, item in enumerate(settings.colliders):
@@ -184,9 +167,6 @@ def handles(context):
                 scale=_glyph_scale(settings, item.end_radius), color=COLOR_END_RADIUS,
                 minimum=MINIMUM_RADIUS))
 
-    # The centre offset is stored bone-local because that is what the solver eats, but every control
-    # for it works in WORLD axes: on an upright head bone the bone frame is world -X / +Z / +Y, so
-    # a bone-local control has "up" and "forward" swapped and left/right mirrored.
     rotation = matrix.to_3x3()
     inverse = rotation.copy()
     inverse.invert_safe()
@@ -194,13 +174,6 @@ def handles(context):
     def world_offset():
         return rotation @ mathutils.Vector(item.center)
 
-    # The free-drag ball carries an IDENTITY rotation and a world-space offset on purpose. A
-    # move_3d is drawn from matrix_basis and its offset target, and whether that offset is rotated
-    # by matrix_basis or simply added to its translation decides where the ball lands. With the bone
-    # rotation in the frame the two readings differ by (R @ c) - c, which on this rig put the ball a
-    # head's width to the other side of the collider -- the mismatch that kept being reported. With
-    # an identity rotation both readings collapse to origin + offset, so the ball sits on the
-    # collider no matter which convention Blender uses. Never put a rotation in this frame again.
     ball_frame = mathutils.Matrix.Translation(matrix.translation)
     found.append(viewport.Handle(
         "collider.center", viewport.MOVE, ball_frame,
@@ -211,12 +184,6 @@ def handles(context):
         scale=_glyph_scale(settings, radius) * 1.2, color=COLOR_CENTER))
 
     def make_axis(index, direction, color, name):
-        # An arrow draws its tip at matrix_basis.translation + axis * value, so anchoring it at the
-        # BONE origin puts the tip at bone + axis*component -- which coincides with the collider
-        # only when the other two components are zero. Measured: at centre (0.04, 0.06, 0.03) the
-        # three tips sat 67 / 72 / 50 mm off the shape and only lined up at the origin. Anchor each
-        # arrow one component back from the collider centre so its tip lands ON the centre for any
-        # offset, and all three converge there.
         component = world_offset()[index]
         centre_world = matrix @ mathutils.Vector(item.center)
         basis = viewport.axis_frame(centre_world - direction * component, direction)

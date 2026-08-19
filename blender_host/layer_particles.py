@@ -1,5 +1,3 @@
-"""Particle layer: the live solver state -- positions, axes, constraint shape, inertia centre."""
-
 import numpy as np
 
 from . import chain
@@ -70,13 +68,6 @@ def _shape(canvas, setup, positions, line_color, triangle_color, depth_test):
 
 
 def particle_radii(world, slot):
-    """The radius the solver actually collides each particle with.
-
-    Recomputed here exactly as cloth_kernel/stages/collider.py does it -- the radius LUT sampled at
-    the particle's own depth, floored, times the team's scale ratio. The `particle_radius` field in
-    the arena is declared but never written, so reading it would show a field of zeros; the LUT is
-    the real source and this reads the very same team data the solver reads.
-    """
     span = world.particle_slice(slot)
     depth = world.particles["depth"][span]
     index = np.full(len(depth), slot, dtype=np.int64)
@@ -85,11 +76,6 @@ def particle_radii(world, slot):
 
 
 def _collision_volume(canvas, world, entry, setup, positions, depth_test):
-    """Outline the volume the simulated bones present to the colliders.
-
-    POINT mode collides a sphere per particle; EDGE mode sweeps the sphere along each collision
-    edge, so it is drawn as the two end spheres plus the four tangent rails.
-    """
     mode = int(world.team["collision_mode"][entry.team])
     if mode == defs.COLLISION_NONE:
         return
@@ -183,16 +169,6 @@ MINIMUM_GLYPH = 0.18
 
 
 def handles(context):
-    """One arrow that scales the whole config's bone collision radius.
-
-    The radius is authored as a base value times an optional depth curve, so a handle cannot own a
-    single particle's radius outright. Dragging therefore rescales the BASE by the ratio the grabbed
-    particle needs, which keeps the curve's shape along the chain intact -- exactly what you get by
-    typing in the radius field, just with the sphere in front of you.
-
-    The grabbed particle is the selected bone when one of the chain's bones is selected, so you
-    drag the ball you are actually looking at.
-    """
     obj = context.object
     if obj is None or obj.type != 'ARMATURE':
         return ()

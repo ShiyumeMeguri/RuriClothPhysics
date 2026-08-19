@@ -143,16 +143,6 @@ class KinematicsHost:
 
 
 def clear_pose_basis(obj, names):
-    """Reset the solver's output channel on the given bones to the channel default.
-
-    This is the whole of the input contract: matrix_basis is solver-OUTPUT, so it is wiped before
-    Blender evaluates animation for the frame, and whatever animation owns is then written back on
-    top of it by Blender itself -- NLA, drivers and layered actions included, per channel. Measured
-    on a bone keyed only on location: the keyed location comes back, the rotation stays default.
-    """
-    # Per-bone assignment, deliberately: the bulk foreach_get/foreach_set alternative was measured
-    # and is slightly SLOWER here (33.4 ms against 32.9 ms best-of), because it moves all 497 bones
-    # to touch the ~236 that matter and rebuilds a name lookup every frame.
     pose_bones = obj.pose.bones
     identity = np.eye(4).tolist()
     for name in names:
@@ -237,14 +227,6 @@ class BatchedKinematics:
             internal = parents >= 0
             self.level_groups.append((level[internal], parents[internal]))
     def gather(self, all_basis):
-        """The kinematic pose to simulate from -- read straight out of matrix_basis.
-
-        No shadow copy and no animated/frozen split: runtime clears this channel in
-        frame_change_pre, so by the time anyone reads it Blender's animation evaluation has refilled
-        exactly the channels it owns and everything else is the channel default. The old code had to
-        cache a "pre-cloth" basis here precisely because the solver's own write-back was still
-        sitting in the channel it wanted to read.
-        """
         basis = all_basis[self.pose_safe]
         if self.pose_missing.any():
             basis[self.pose_missing] = np.eye(4)

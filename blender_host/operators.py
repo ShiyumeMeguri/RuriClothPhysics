@@ -506,8 +506,6 @@ class RCP_OT_root_add_selected(bpy.types.Operator):
         for name in _selected_bone_names(context):
             if name in existing:
                 continue
-            # A bone already driven as somebody's child would become a second, competing root of
-            # the same chain, so say so instead of quietly building an ambiguous topology.
             owner_index, owner_root = chain.owning_root(obj, name)
             if owner_index is not None and owner_root != name:
                 self.report({'WARNING'}, "%s 已属于 %s 的链, 跳过"
@@ -688,7 +686,6 @@ class RCP_OT_config_from_selected(bpy.types.Operator):
 
 
 def _pin_roots(config):
-    """Force every override that lands on a root back to FIXED, preserving its other flags."""
     declared = {item.bone for item in config.root_bones}
     repaired = []
     for override in config.attribute_overrides:
@@ -738,8 +735,6 @@ class RCP_OT_promote_degenerate(bpy.types.Operator):
         links = chain.degenerate_links(obj, config)
         if not links:
             return {'CANCELLED'}
-        # The offending parent is the hub; its near-coincident children become the new roots and it
-        # goes back to being plain kinematic geometry, which is what every healthy root here does.
         hubs = {parent for _, parent, _, _ in links}
         promoted = {name for name, _, _, _ in links}
         names = [item.bone for item in config.root_bones]
@@ -756,8 +751,6 @@ class RCP_OT_promote_degenerate(bpy.types.Operator):
         for name in rebuilt:
             config.root_bones.add().bone = name
         config.active_root_bone_index = 0
-        # Promotion is exactly what turns a harmless mid-chain MOVE override into an unpinned root,
-        # so repair them in the same step rather than leaving a chain that silently drifts away.
         _pin_roots(config)
         _mark_rebuild(config)
         self.report({'INFO'}, "已升为根: %s" % ", ".join(sorted(promoted)))

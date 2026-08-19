@@ -1,11 +1,3 @@
-"""Save and load the add-on state as JSON under scripts/presets/RuriClothPhysics.
-
-Replaces the old .py preset system outright. That one wrote a hand-maintained list of parameter
-paths and nothing else -- no root bones, no attribute overrides, no collider pool -- so restoring a
-"preset" put numbers onto a config that simulated no bones at all. There is no migration path
-because there was nothing to migrate: the preset folder was empty.
-"""
-
 import os
 
 import bpy
@@ -108,7 +100,6 @@ class RCP_OT_preset_load(bpy.types.Operator, ImportHelper):
         report = config_io.deserialize(settings, payload, self.mode)
         if not _report_problems(self, report):
             return {'CANCELLED'}
-        # The teams were built from the old topology; drop them so the next frame recompiles.
         runtime.clear_registry()
         self.report({'INFO'}, "已载入 %s (%d 配置 / %d 碰撞体)"
                     % (os.path.basename(self.filepath), len(settings.configs),

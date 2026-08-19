@@ -1,21 +1,8 @@
-"""Which bones a config simulates, and in what role.
-
-One truth source. The overlay colours bones from this, the operators decide what to add and remove
-from this, and the compiler builds its topology from this -- previously the traversal lived inside
-build_snapshot alone, so anything else that wanted to know "is this bone simulated" had to
-re-derive it and could silently disagree with the solver.
-"""
-
 ROLE_ROOT = 'ROOT'
 ROLE_CHILD = 'CHILD'
 
 
 def is_selected(obj, name):
-    """Blender 5.x keeps bone selection on PoseBone / EditBone -- Bone.select no longer exists.
-
-    Every caller goes through here so the version-specific spelling lives in one place instead of
-    being copied into the overlay, the operators and the property callbacks.
-    """
     edit_bones = obj.data.edit_bones if obj.mode == 'EDIT' else None
     if edit_bones is not None:
         bone = edit_bones.get(name)
@@ -33,7 +20,6 @@ def selected_names(obj):
 
 
 def select(obj, names, active=None):
-    """Replace the armature's bone selection with `names` and activate `active`."""
     wanted = set(names)
     if obj.mode == 'EDIT':
         for bone in obj.data.edit_bones:
@@ -55,7 +41,6 @@ def select(obj, names, active=None):
 
 
 def root_names(obj, config):
-    """Declared roots that still resolve to a real bone, de-duplicated, in list order."""
     bones = obj.data.bones
     seen = set()
     names = []
@@ -68,12 +53,6 @@ def root_names(obj, config):
 
 
 def descend(obj, roots, stop=None):
-    """Depth-first bone names under `roots`, roots included, pruned at `stop`.
-
-    `stop` prunes the whole subtree, not just the named bone: a bone that does not belong to this
-    chain cannot have children that do, and a particle whose parent was removed has nothing to hang
-    from.
-    """
     bones = obj.data.bones
     stop = stop or frozenset()
     visited = set()
@@ -97,24 +76,11 @@ def descend(obj, roots, stop=None):
 
 
 def excluded_names(obj, config):
-    """Bones this config explicitly disowns -- attribute override set to IGNORE."""
     return {override.bone for override in config.attribute_overrides
             if override.attribute == 'IGNORE' and override.bone}
 
 
 def boundary_names(obj, config):
-    """Where this config's descent has to stop.
-
-    Two sources, both already declared elsewhere in the data:
-
-    * Another config's ROOT. A bone hierarchy is not carved up by body part -- on this rig
-      ClothA_01_Jnt_L (dress fabric) hangs off Breast_01_Jnt_L, so the breast spring swallowed four
-      cloth bones and simulated skirt fabric as breast tissue. Whoever declares a bone as their root
-      owns it, and the chain above stops there. Without this a bone claimed twice also gets two
-      particles and two write-backs in the same frame, and the last writer silently wins.
-    * An IGNORE attribute override, for fabric that should simply not be simulated at all rather
-      than moved to a config of its own.
-    """
     settings = getattr(obj, "ruri_cloth_physics", None)
     if settings is None:
         return excluded_names(obj, config)
@@ -134,7 +100,6 @@ def config_chain(obj, config):
 
 
 def claimed_twice(obj):
-    """Bones declared as a root by more than one config -- each would get its own particle."""
     settings = getattr(obj, "ruri_cloth_physics", None)
     if settings is None:
         return []
@@ -146,12 +111,6 @@ def claimed_twice(obj):
 
 
 def role_map(obj, config_indices=None):
-    """{bone_name: (config_index, role)}.
-
-    A bone claimed by several configs keeps the first claim, and a root always outranks a child --
-    the same precedence the compiler applies, so the colours cannot say one thing while the solver
-    does another.
-    """
     settings = getattr(obj, "ruri_cloth_physics", None)
     if settings is None:
         return {}
@@ -169,10 +128,6 @@ def role_map(obj, config_indices=None):
     return mapping
 
 
-# Calibrated against the two hubs on this rig, which look identical in shape and behave nothing
-# alike. SleeveC_Jnt sits at 0.016-0.020 of its config's median gap and whips at 67 deg per frame;
-# BowB_Jnt is also a 5 mm stub with two children but sits at 0.16-0.31 and is perfectly calm at
-# 3.3 deg. 0.05 is three times above the broken one and three times below the healthy one.
 DEGENERATE_RATIO = 0.05
 
 
@@ -181,16 +136,6 @@ def _head(bone):
 
 
 def degenerate_links(obj, config):
-    """Child bones that start almost on top of their parent, which the solver cannot handle.
-
-    A constraint whose rest length is a rounding error next to the particle radius fights itself,
-    and a hub solved from near-coincident children has no stable orientation: measured on this rig,
-    SleeveC_Jnt sat 1.0-1.3 mm from both its children against 60-90 mm everywhere else in the same
-    config, and whipped at 67 deg per frame while every other chain stayed under half a degree.
-
-    The test is scale free -- a gap is only suspicious against the OTHER gaps of the same config --
-    so a legitimately dense chain, where every link is short, reports nothing.
-    """
     import statistics
 
     roots, ordered = config_chain(obj, config)
@@ -219,27 +164,12 @@ def degenerate_links(obj, config):
 
 
 def unpinned_roots(obj, config):
-    """Roots whose attribute override drags them off FIXED.
-
-    compile.py fills MOVE for every bone, then FIXED for the roots, then lets overrides REPLACE the
-    result -- so an override saying MOVE on a root removes the only anchor the chain has and it
-    drifts away under gravity. The override is usually harmless when it is written, because the bone
-    is mid-chain and MOVE is what it would have been anyway; it only turns fatal later, when that
-    bone is promoted to a root. Measured: promoting SleeveC_01/03 with their old MOVE overrides
-    still in place sent the chain 2.6 m off the body over 240 frames.
-    """
     declared = set(root_names(obj, config))
     return [(override.bone, override.attribute) for override in config.attribute_overrides
             if override.bone in declared and override.attribute != 'FIXED']
 
 
 def owning_root(obj, bone_name):
-    """Walk up from `bone_name` to the first bone that is a declared root of any config.
-
-    Returns (config_index, root_name) or (None, None). This is what lets "remove" work when the
-    user has a mid-chain bone selected: the thing they mean to delete is the chain they are
-    standing in, and its handle is the root.
-    """
     settings = getattr(obj, "ruri_cloth_physics", None)
     if settings is None:
         return None, None

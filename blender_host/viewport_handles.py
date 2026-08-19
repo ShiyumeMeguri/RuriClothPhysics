@@ -1,23 +1,3 @@
-"""The only gizmo code in the add-on: turn Handle records into draggable Blender gizmos.
-
-Gizmos are created ONCE in setup() as fixed pools and only rebound in refresh(). Creating them in
-refresh() -- clear() then new() when the handle set changes -- looks like it works because the first
-build happens to land in setup(): the group draws correctly until you switch to another collider,
-and from then on the freshly created gizmos never appear again. Measured in a real viewport: after
-switching the active collider the wireframe recoloured but every radius / length / centre handle was
-gone, which is exactly the "no controller even when highlighted" report.
-
-Two consequences of the pool: a slot serves a different Handle each refresh, so the value callbacks
-resolve through the slot rather than closing over a Handle; and the click operator is bound once to
-a generic dispatcher, which reads the operator to run from whatever Handle currently owns the slot.
-That keeps this file free of any knowledge about colliders or bones.
-
-Why the old collider gizmos were invisible before any of this: the group declared bl_options with
-'SCALE' while feeding scale_basis world-space sizes clamped to 0.008..0.06. With 'SCALE' the gizmo
-draws at a fixed screen size and scale_basis is a MULTIPLIER of it, so every handle rendered at
-under a hundredth of its intended size.
-"""
-
 import bpy
 from bpy.props import StringProperty
 
@@ -30,12 +10,6 @@ GIZMO_TYPES = {
     viewport.PICK: "GIZMO_GT_move_3d",
 }
 
-# Pool depth per kind. Gizmos can only be created in setup(), so a pool that is merely "big enough
-# today" silently truncates the moment a layer offers one more handle: at ARROW=4 a capsule wanted
-# seven (radius, length, end radius, three world-axis centre arrows, bone collision radius) and the
-# last three simply never appeared -- the data layer was correct and the viewport showed nothing,
-# which is indistinguishable from "the feature was never implemented". Sized far above any plausible
-# layer set, and test_viewport asserts the live rig still fits.
 POOL_SIZES = {
     viewport.ARROW: 16,
     viewport.MOVE: 4,
@@ -81,8 +55,6 @@ VECTOR_KINDS = {viewport.MOVE, viewport.PICK}
 
 
 def _reader(slot, kind):
-    """Blender polls the getter even for hidden pool slots, so the idle value has to have the right
-    arity: move_3d's offset is a 3-vector and handing it a scalar raises "Gizmo get callback"."""
     idle = (0.0, 0.0, 0.0) if kind in VECTOR_KINDS else 0.0
 
     def read():
@@ -147,12 +119,6 @@ class RCP_GGT_handles(bpy.types.GizmoGroup):
         self._sync(context)
 
     def draw_prepare(self, context):
-        # Both hooks run the same sync because refresh() alone is not enough: Blender calls it on
-        # its own schedule, and switching the active collider is a plain PropertyGroup int write
-        # that tags nothing. Measured in a real viewport -- pick another collider and the wireframe
-        # recolours immediately (the draw handler runs every redraw) while the handles stay bound to
-        # the previous collider, which reads as "no controller even when highlighted".
-        # draw_prepare runs every draw, so the handles cannot go stale.
         self._sync(context)
 
     def _sync(self, context):

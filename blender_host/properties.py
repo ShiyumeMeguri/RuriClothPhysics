@@ -76,6 +76,11 @@ def _enabled_update(self, context):
         runtime.notify_config_enabled_changed(obj, int(match.group(1)))
 
 
+def _backend_update(self, context):
+    from . import runtime
+    runtime.notify_backend_changed()
+
+
 _curve_classes = []
 
 
@@ -236,7 +241,6 @@ def _bone_property(name, update, target=None, uid_attribute="bone_uid"):
 
 
 def _focus_bone(obj, name):
-    """Make `name` the selected + active bone, so the 3D view follows the list row."""
     if obj is None or obj.type != 'ARMATURE' or not name:
         return
     from . import chain
@@ -246,12 +250,6 @@ def _focus_bone(obj, name):
 
 
 def _root_bone_index_update(self, context):
-    """Selecting a root row drives the viewport selection.
-
-    The list and the 3D view are two views of one selection, so picking a row here has to move the
-    armature's own selection -- otherwise every operator that reads selected bones (add, remove,
-    make fixed) silently acts on whatever was highlighted before the user touched the list.
-    """
     obj = _owner_object(self)
     if obj is None or obj.type != 'ARMATURE':
         return
@@ -300,7 +298,6 @@ class RCPAttributeOverride(bpy.types.PropertyGroup):
 
 
 def _collider_rotation(item):
-    """Rotation taking the collider's bone-local space to world, or None if it cannot be resolved."""
     obj = item.id_data
     if obj is None or getattr(obj, "type", None) != 'ARMATURE':
         return None
@@ -312,13 +309,6 @@ def _collider_rotation(item):
 
 
 def _center_world_get(self):
-    """The same offset, expressed on WORLD axes.
-
-    `center` is bone-local because that is what the solver consumes, but a bone's Y is the bone
-    direction, so on this rig the head bone maps local X to world -X and local Z to world +Y --
-    typing into a field labelled Z moved the collider forwards, and left/right came out mirrored.
-    This projection is a pure view of `center`; the stored value stays the single truth.
-    """
     rotation = _collider_rotation(self)
     if rotation is None:
         return tuple(self.center)
@@ -957,7 +947,19 @@ class RCPObjectSettings(bpy.types.PropertyGroup):
     collider_serial: IntProperty(default=0, options={'HIDDEN'})
 
 
+BACKEND_ITEMS = (
+    ('GPU', "GPU (numba.cuda)", "生产路径: 常驻显存的协作式巨核, 整帧一次启动"),
+    ('CPU', "CPU (numpy 参考)", "参考实现: 同一套算法的 numpy 版, 用来对拍 GPU 结果"),
+)
+
+
 class RCPSceneSettings(bpy.types.PropertyGroup):
+    backend: EnumProperty(
+        name="求解后端", items=BACKEND_ITEMS, default='GPU',
+        description="跑物理的引擎。默认 GPU; CPU 是同一套算法的 numpy 参考实现, 只在需要交叉"
+                    "验证 GPU 结果时切过去, 会慢一到两个数量级。"
+                    "【切换是安全的: GPU 常驻显存里的模拟状态会先回读回场景再交接, 不会跳变】",
+        update=_backend_update)
     simulation_frequency: IntProperty(
         name="模拟频率 (步/秒)", default=90, min=30, max=150,
         description="每秒执行多少次物理步。调高 = 更精确、更不容易穿模和抖动, 但线性变慢。"

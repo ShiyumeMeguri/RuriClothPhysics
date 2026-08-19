@@ -1,19 +1,3 @@
-"""Cooperative frame megakernel.
-
-One kernel runs [frame-pre phases][substep loop][frame-post phases] with grid.sync()
-walls at every cross-thread dependency (probe confirmed cooperative launch on sm_75,
-544 max blocks @128). A ``phase_mask`` gates the *work* of each phase (the grid.sync
-barriers are always executed by every thread, so masking work is safe); production
-passes ``ALL_PHASES`` with ``(sub_begin, sub_end) = (0, MAX_SIM_COUNT)`` in a single
-launch, while the dev-harness enables one phase at a time to parity-check it in
-isolation against oracle intermediate state.
-
-Grid discipline: block=128, grid=min(needed, 544), every phase is a grid-stride loop.
-Guard = team enabled & valid & scale_alive (frame phases); substep phases additionally
-require ``update_count > k``. Per-team frame-level phases may use internal f64 (mirrors
-oracle trs / matrix inverse); per-particle / per-pair phases stay strict-f32.
-"""
-
 import math
 
 from numba import cuda, float32, float64, int8, int32, uint8
@@ -21,36 +5,34 @@ from numba.cuda import cg, libdevice
 
 from . import dmath
 
-# phase bits (frame-pre / substep / frame-post)
-PHASE_ADVANCE = int32(1 << 0)        # T1 team_time.advance
-PHASE_BASE_POSE = int32(1 << 1)      # P0/P1 particles.compute_base_pose (skinning)
-PHASE_TETHER = int32(1 << 2)         # S5 tether.run (substep)
-PHASE_TEAM_POST = int32(1 << 3)      # F4 team_time.frame_post
-PHASE_PARTICLES_STEP = int32(1 << 4)  # S3 particles.step_update (substep)
-PHASE_STEP_POST = int32(1 << 5)      # S13 particles.step_post (substep)
-PHASE_DISTANCE_A = int32(1 << 6)     # S6 distance.run (first substep occurrence)
-PHASE_DISTANCE_B = int32(1 << 7)     # S10 distance.run (second substep occurrence)
-PHASE_MOTION = int32(1 << 8)         # S11 motion.run (substep)
-PHASE_BENDING = int32(1 << 9)        # S8 bending.run (substep)
-PHASE_BASELINE = int32(1 << 10)      # S4 baseline.run FK (substep)
-PHASE_TEAM_STEP = int32(1 << 11)     # S1 team_time.step_update (substep, per-team)
-PHASE_COLLIDER_PRE = int32(1 << 12)  # K0 collider.frame_pre
-PHASE_COLLIDER_START = int32(1 << 13)  # S2 collider.start_step (substep)
-PHASE_COLLIDER_SOLVE = int32(1 << 14)  # S9 collider.solve point+edge (substep)
-PHASE_COLLIDER_END = int32(1 << 15)  # S14 collider.end_step (substep)
-PHASE_COLLIDER_POST = int32(1 << 16)  # F3 collider.frame_post
-PHASE_PARTICLES_PRE = int32(1 << 17)  # P2 particles.frame_pre
-PHASE_SYNC = int32(1 << 18)          # T0 team_time.resolve_sync (frame-pre, per-team)
-PHASE_CENTER = int32(1 << 19)        # C0 center.run + select_team_wind (frame-pre, per-team)
-PHASE_ANGLE = int32(1 << 20)         # S7 angle.run (substep; limit + restoration passes)
-PHASE_DISPLAY = int32(1 << 21)       # F2 display.run (frame-post; _display/_postline/_post_triangles/_output)
-PHASE_SELF_BEGIN = int32(1 << 22)    # G3a self_collision.frame_begin intersect broad-phase (frame-pre)
-PHASE_SELF_STEP = int32(1 << 23)     # G3a self_collision.step (substep; update_primitives+detect / update / solve)
-PHASE_SELF_END = int32(1 << 24)      # G3a self_collision.frame_end intersect narrow-phase (frame-post)
+PHASE_ADVANCE = int32(1 << 0)
+PHASE_BASE_POSE = int32(1 << 1)
+PHASE_TETHER = int32(1 << 2)
+PHASE_TEAM_POST = int32(1 << 3)
+PHASE_PARTICLES_STEP = int32(1 << 4)
+PHASE_STEP_POST = int32(1 << 5)
+PHASE_DISTANCE_A = int32(1 << 6)
+PHASE_DISTANCE_B = int32(1 << 7)
+PHASE_MOTION = int32(1 << 8)
+PHASE_BENDING = int32(1 << 9)
+PHASE_BASELINE = int32(1 << 10)
+PHASE_TEAM_STEP = int32(1 << 11)
+PHASE_COLLIDER_PRE = int32(1 << 12)
+PHASE_COLLIDER_START = int32(1 << 13)
+PHASE_COLLIDER_SOLVE = int32(1 << 14)
+PHASE_COLLIDER_END = int32(1 << 15)
+PHASE_COLLIDER_POST = int32(1 << 16)
+PHASE_PARTICLES_PRE = int32(1 << 17)
+PHASE_SYNC = int32(1 << 18)
+PHASE_CENTER = int32(1 << 19)
+PHASE_ANGLE = int32(1 << 20)
+PHASE_DISPLAY = int32(1 << 21)
+PHASE_SELF_BEGIN = int32(1 << 22)
+PHASE_SELF_STEP = int32(1 << 23)
+PHASE_SELF_END = int32(1 << 24)
 
 ALL_PHASES = int32(-1)
 
-# self-collision constants (mirror cloth_kernel.defs); n^2 broad-phase per D1.
 SELF_COLLISION_SCR = float32(2.0)
 SELF_COLLISION_SOLVER_ITERATION = 4
 SELF_COLLISION_INTERSECT_DIV = int32(2)
@@ -59,7 +41,6 @@ SELF_COLLISION_FIXED_MASS = float32(100.0)
 SELF_COLLISION_FRICTION_MASS = float32(10.0)
 SELF_COLLISION_CLOTH_MASS = float32(50.0)
 SELF_COLLISION_POINT_TRIANGLE_ANGLE_COS = float32(math.cos(math.radians(60.0)))
-# scl_counts[] index layout (single i32 array; kernel atomics on [0]/[1]/[2], reads [3]/[4]/[5]).
 SCL_EE_COUNT = 0
 SCL_PT_COUNT = 1
 SCL_IP_COUNT = 2
@@ -69,7 +50,6 @@ SCL_FRAME_INDEX = 5
 
 MAX_SIM_COUNT = 5
 
-# wind-zone mode enum (mirror engine._ZONE_MODE) + slot count
 WIND_ZONE_SLOTS = 4
 ZONE_GLOBAL = int32(0)
 ZONE_BOX = int32(1)
@@ -77,7 +57,6 @@ ZONE_SPHERE_DIR = int32(2)
 ZONE_SPHERE_RADIAL = int32(3)
 TELEPORT_RESET = int32(1)
 
-# defs constants mirrored (device-side literals stay f32-wrapped)
 TETHER_STRETCH_LIMIT = float32(0.03)
 TETHER_STIFFNESS_WIDTH = float32(0.3)
 TETHER_VELOCITY_ATTENUATION = float32(0.7)
@@ -105,8 +84,6 @@ BENDING_FIX_INV_MASS = float32(0.01)
 ONE_SIXTH = float32(1.0 / 6.0)
 TO_FIXED = float32(1e6)
 
-# S7 angle.run (defs.ANGLE_LIMIT_*): 3 iterations, per-iteration restoration ratio 0.1/0.3/0.5,
-# constant limit rotation ratio 0.4 and velocity attenuation 0.9.
 ANGLE_ITERATION = 3
 ANGLE_LIMIT_ROT_RATIO = float32(0.4)
 ANGLE_LIMIT_ATTENUATION = float32(0.9)
@@ -123,7 +100,6 @@ MAX_DISTANCE_RATIO_FUTURE_PREDICTION = float32(1.3)
 
 @cuda.jit(device=True)
 def team_frame_mask(enabled, valid, cws, i):
-    """frame_team_mask[i] = enabled & valid & (min|component_world_scale| >= 1e-6)."""
     if enabled[i] == 0 or valid[i] == 0:
         return False
     ax = abs(cws[i, 0])
@@ -186,7 +162,6 @@ def do_advance(i, fdt, sim_dt, max_sim_count, global_time_scale,
 
 @cuda.jit(device=True)
 def _skin_row(world, bind, t, r, c):
-    # (world[t] @ bind[t])[r, c] in f32 (matches oracle einsum('tij,tjk->tik') rounding)
     return (world[t, r, 0] * bind[t, 0, c] + world[t, r, 1] * bind[t, 1, c]
             + world[t, r, 2] * bind[t, 2, c] + world[t, r, 3] * bind[t, 3, c])
 
@@ -279,7 +254,6 @@ def do_tether(e, tether_particle, p_team, next_positions, velocity_positions,
 @cuda.jit(device=True)
 def do_wind_blend(wind_main, time, dqx, dqy, dqz, dqw, zone_turbulence,
                   blend, turbulence_param, wind_position):
-    """One wind slot's force direction*strength; mirrors wind._wind_force_blend."""
     active = wind_main >= float32(0.01)
     main_ratio = wind_main / WIND_BASE_SPEED
 
@@ -318,8 +292,6 @@ def do_distance_gather(p, p_team, next_positions, base_positions, depth, frictio
                        t_is_spring, t_animation_pose_ratio, t_init_scale, t_scale_ratio,
                        t_distance_lut, power1, csr_offsets, csr_order,
                        distance_target, distance_rest, sc_dcorr):
-    """Jacobi gather for one distance particle: mean correction over its distance entries
-    (f64 accumulation mirrors oracle np.add.reduceat / run_counts, then cast to f32)."""
     mt = p_team[p]
     fix_mass = BONE_SPRING_FIX_MASS if t_is_spring[mt] != 0 else BONE_CLOTH_FIX_MASS
     anime_ratio = t_animation_pose_ratio[mt]
@@ -1474,8 +1446,6 @@ def do_angle_limit(v, p, vt, c_inv, p_inv, p_move,
                    p_next_positions, p_velocity_positions, p_albuf_rotation,
                    p_albuf_local_pos, p_albuf_local_rot, p_albuf_length, p_depth,
                    t_angle_limit_lut, t_angle_limit_stiffness):
-    # mirrors stages/angle.py limit block for one pass entry (v child, p parent). (level,rank)
-    # bucketing makes v and p unique in the pass, so the parent write is race-free (no atomics).
     prx = p_albuf_rotation[p, 0]
     pry = p_albuf_rotation[p, 1]
     prz = p_albuf_rotation[p, 2]
@@ -1610,8 +1580,6 @@ def do_angle_restoration(v, p, vt, c_inv, p_inv, p_move, rot_ratio, power3,
                          p_next_positions, p_velocity_positions, p_albuf_restore, p_depth,
                          t_angle_restoration_lut, t_angle_restoration_attenuation,
                          t_angle_restoration_gravity_falloff, t_gravity_dot):
-    # mirrors stages/angle.py restoration block for one pass entry (runs after the limit block
-    # on the same thread; positions refetched so limit's writes feed restoration).
     stiff = dmath.evaluate_team_lut_clamp01(t_angle_restoration_lut, vt, p_depth[v])
     stiff = dmath.saturate(stiff * power3)
     gfo = dmath.lerp(float32(1.0) - t_angle_restoration_gravity_falloff[vt],
@@ -1700,11 +1668,6 @@ def do_display_particle(p, mt, sim_dt,
                         st_update_move_mask,
                         t_now_update, t_old_time, t_time, t_blend_weight, t_running,
                         t_is_negative_scale, t_negative_scale_direction):
-    # mirrors stages/display._display for one particle. Register snapshot is taken BEFORE any
-    # write so the running-team old_anim capture sees the pre-move / pre-flip pose. move / fixed
-    # are the two halves of the update_move|update_fixed partition (per-particle mask), 4/5/6 hit
-    # all frame particles. No cross-thread hazard: roots are always non-move (never written here),
-    # each thread owns positions[p]/rotations[p]/temp_base[p]/display[p]/old_anim[p].
     snap_px = p_positions[p, 0]
     snap_py = p_positions[p, 1]
     snap_pz = p_positions[p, 2]
@@ -1798,11 +1761,6 @@ def do_postline_entry(entry, et, ch_start, ch_end, postline_child_vertices,
                       t_rotational_interpolation, t_root_rotation, t_blend_weight,
                       t_animation_pose_ratio, t_negative_scale_direction,
                       t_negative_scale_quaternion):
-    # mirrors stages/display._postline for one entry (owner). (level,rank) topology makes each
-    # entry's children a contiguous CSR run and disjoint across entries in a level, so the child
-    # rotation writes are race-free; children (level L+1) become entries at level L+1 with a
-    # grid.sync between levels making this level's writes visible. ctv_sum/cv_sum are f64
-    # (mirrors oracle np.add.reduceat over np.float64 rows), cast to f32 for the zero test / cq.
     rx = p_rotations[entry, 0]
     ry = p_rotations[entry, 1]
     rz = p_rotations[entry, 2]
@@ -1913,10 +1871,6 @@ def do_postline_entry(entry, et, ch_start, ch_end, postline_child_vertices,
 @cuda.jit(device=True)
 def do_triangle_normal_tangent(tri, tt_team, st_triangle_particles, p_positions, p_uv,
                                t_negative_scale_triangle_sign, tri_normal_f64, tri_tangent_f64):
-    # mirrors stages/display._post_triangles per-triangle (dtype asymmetry preserved): the NORMAL
-    # is an f32 cross+normalize cast to f64 then * sign[0]; the TANGENT is computed wholly in f64
-    # (positions + uv promoted first) via _triangle_tangent_runtime then * sign[1]. Stored by global
-    # triangle index so the owner gather (C2) needs no searchsorted.
     i0 = st_triangle_particles[tri, 0]
     i1 = st_triangle_particles[tri, 1]
     i2 = st_triangle_particles[tri, 2]
@@ -1981,8 +1935,6 @@ def do_triangle_normal_tangent(tri, tt_team, st_triangle_particles, p_positions,
 def do_v2t_owner(p, mt, seg0, seg1, csr_v2t_order, st_v2t_triangle,
                  st_v2t_flip_normal, st_v2t_flip_tangent, tri_normal_f64, tri_tangent_f64,
                  p_rotations, p_normal_adjustment_rotations, t_negative_scale_quaternion):
-    # mirrors stages/display._post_triangles owner reduce (f64 gather over the owner's v2t rows via
-    # the owner-keyed CSR), the ok gate, and rotation = look_rotation(binormal, nor) * adjust.
     norx = float64(0.0)
     nory = float64(0.0)
     norz = float64(0.0)
@@ -2047,7 +1999,6 @@ def do_v2t_owner(p, mt, seg0, seg1, csr_v2t_order, st_v2t_triangle,
 @cuda.jit(device=True)
 def do_output_particle(p, mt, p_rotations, p_vertex_to_transform_rotations,
                        t_negative_scale_quaternion, p_out_rotations):
-    # mirrors stages/display._output: out = rotation * (vertex_to_transform * negative_scale_quat)
     vqx = p_vertex_to_transform_rotations[p, 0] * t_negative_scale_quaternion[mt, 0]
     vqy = p_vertex_to_transform_rotations[p, 1] * t_negative_scale_quaternion[mt, 1]
     vqz = p_vertex_to_transform_rotations[p, 2] * t_negative_scale_quaternion[mt, 2]
@@ -2060,18 +2011,12 @@ def do_output_particle(p, mt, p_rotations, p_vertex_to_transform_rotations,
     p_out_rotations[p, 3] = ow
 
 
-# ---------------------------------------------------------------------------
-# G3a self-collision device helpers (mirror cloth_engine_cpu.stages.self_collision). n^2 broad-phase
-# (D1): the exact-AABB-overlap predicate + filters reproduce the oracle grid+_filter_pairs pair set.
-# ---------------------------------------------------------------------------
-
 @cuda.jit(device=True)
 def do_self_update_primitive(prim, axes, a_team, a_particles, a_fix, a_ignore, a_prim_depth,
                              a_inv_mass, a_thickness, a_aabb_min, a_aabb_max, a_intersect, a_use,
                              t_use_flag, t_thickness_lut, t_cloth_mass, t_scale_ratio,
                              t_enabled, t_valid, t_cws, t_update_count,
                              p_next, p_old, p_friction, p_iflag, scl_counts, scl_max_fixed, k):
-    # mirrors self_collision._update_primitives for one primitive of `axes` particles (1/2/3).
     team = a_team[prim]
     if not (team_frame_mask(t_enabled, t_valid, t_cws, team) and t_update_count[team] > k
             and t_use_flag[team] != 0):
@@ -2141,7 +2086,6 @@ def self_aabb_overlap(a_min, a_max, i, b_min, b_max, j):
 
 @cuda.jit(device=True)
 def self_connection_shared(a_particles, i, b_particles, j):
-    # mirrors _filter_pairs connection_check: any shared valid (>=0) particle index.
     for x in range(3):
         pa = a_particles[i, x]
         if pa >= 0:
@@ -2154,7 +2098,6 @@ def self_connection_shared(a_particles, i, b_particles, j):
 
 @cuda.jit(device=True)
 def self_ee_geometry(my_edge, tgt_edge, thickness, sfe_particles, p_next, p_old):
-    # mirrors _update_contacts EE block -> (s, t, nx, ny, nz, enable).
     scr = thickness * SELF_COLLISION_SCR
     a0 = sfe_particles[my_edge, 0]; a1 = sfe_particles[my_edge, 1]
     b0 = sfe_particles[tgt_edge, 0]; b1 = sfe_particles[tgt_edge, 1]
@@ -2180,7 +2123,6 @@ def self_ee_geometry(my_edge, tgt_edge, thickness, sfe_particles, p_next, p_old)
 @cuda.jit(device=True)
 def self_pt_geometry(point_prim, tri_prim, thickness, first, sfp_particles, sft_particles,
                      p_next, p_old):
-    # mirrors _update_contacts PT block -> (enable, sign). sign is only meaningful when first.
     scr = thickness * SELF_COLLISION_SCR
     pp = sfp_particles[point_prim, 0]
     t0 = sft_particles[tri_prim, 0]; t1 = sft_particles[tri_prim, 1]; t2 = sft_particles[tri_prim, 2]
@@ -2230,16 +2172,9 @@ def frame_kernel(phase_mask, sub_begin, sub_end,
     grid = cg.this_grid()
     tid = cuda.grid(1)
     stride = cuda.gridsize(1)
-    # Block-local coordinates for the single-block small-serial phases (S4 FK levels, S7 angle
-    # passes, F2 postline levels, T0 sync passes): only block 0 walks those loops, using
-    # __syncthreads() between iterations instead of a full grid.sync (two orders cheaper on this
-    # 7-block grid). tid == threadIdx.x for block 0, so it doubles as the block lane index there.
     bid = cuda.blockIdx.x
     bdim = cuda.blockDim.x
 
-    # ---- view reconstruction: each field is an axis-0 slice of its (family,per_row) blob
-    # (reshape-free so cache=True pickles). RESIDENT_BLOB_LAYOUT[k]=(param,group,per_row);
-    # offs[k]=row base, lens[k]=row count into blob_<group>. ----
     t_enabled = blob_u8_s[offs[0]:offs[0] + lens[0]]
     t_valid = blob_u8_s[offs[1]:offs[1] + lens[1]]
     t_cws = blob_f32_v3[offs[2]:offs[2] + lens[2]]
@@ -2622,9 +2557,6 @@ def frame_kernel(phase_mask, sub_begin, sub_end,
     num_self_edges = sfe_team.shape[0]
     num_self_triangles = sft_team.shape[0]
 
-    # ----- FRAME-PRE -----
-    # T0 team_time.resolve_sync (per ENABLED team; gate = enabled only, not the
-    # frame mask). Pass a: resolve sync_top by climbing sync_target (<=8 hops).
     if bid == 0 and (phase_mask & PHASE_SYNC) != 0:
         i = tid
         while i < num_teams:
@@ -2642,8 +2574,6 @@ def frame_kernel(phase_mask, sub_begin, sub_end,
                     t_sync_top[i] = top
             i += bdim
     cuda.syncthreads()
-    # Pass b: snapshot each child's sync_top row (the gather RHS) into sc_sync so
-    # the write pass reads pre-gather values (mutual-sync A<->B swap is race-safe).
     if bid == 0 and (phase_mask & PHASE_SYNC) != 0:
         i = tid
         while i < num_teams:
@@ -2673,7 +2603,6 @@ def frame_kernel(phase_mask, sub_begin, sub_end,
                 sc_sync[i, 21] = t_component_world_rotation[top, 3]
             i += bdim
     cuda.syncthreads()
-    # Pass c: write children from the snapshot.
     if bid == 0 and (phase_mask & PHASE_SYNC) != 0:
         i = tid
         while i < num_teams:
@@ -2724,9 +2653,6 @@ def frame_kernel(phase_mask, sub_begin, sub_end,
             p += stride
     grid.sync()
 
-    # C0 center.run + select_team_wind (per-team; authorised internal f64 for the
-    # trs/analytic-inverse matrix path and the fixed-centre gather; mirrors
-    # stages/center.py + stages/wind.select_team_wind, f32 elsewhere).
     if phase_mask & PHASE_CENTER:
         mat_a = cuda.local.array((4, 4), float64)
         mat_b = cuda.local.array((4, 4), float64)
@@ -2754,7 +2680,6 @@ def frame_kernel(phase_mask, sub_begin, sub_end,
                 csy = t_cws[i, 1]
                 csz = t_cws[i, 2]
 
-                # --- negative scale ---
                 init_scale_len = float64(dmath.length3(
                     t_init_scale[i, 0], t_init_scale[i, 1], t_init_scale[i, 2]))
                 if init_scale_len < float64(1e-30):
@@ -2798,7 +2723,6 @@ def frame_kernel(phase_mask, sub_begin, sub_end,
                 teleport = (old_dx != dir_x) or (old_dy != dir_y) or (old_dz != dir_z)
                 t_negative_scale_teleport[i] = int32(1) if teleport else int32(0)
 
-                # --- teleport: negative_component applied to old_* and smoothing ---
                 if teleport:
                     dmath.trs_build_f64(mat_a, cpx, cpy, cpz, crx, cry, crz, crw, csx, csy, csz)
                     ocpx = t_old_component_world_position[i, 0]
@@ -2842,7 +2766,6 @@ def frame_kernel(phase_mask, sub_begin, sub_end,
                 ocr_z = t_old_component_world_rotation[i, 2]
                 ocr_w = t_old_component_world_rotation[i, 3]
 
-                # --- fixed-centre gather (f64 accumulate over center_fixed CSR) ---
                 cwpx = cpx
                 cwpy = cpy
                 cwpz = cpz
@@ -2901,7 +2824,6 @@ def frame_kernel(phase_mask, sub_begin, sub_end,
                             float32(nor_sx / nl), float32(nor_sy / nl), float32(nor_sz / nl),
                             float32(tan_sx / tl), float32(tan_sy / tl), float32(tan_sz / tl))
 
-                # --- teleport negative_scale_matrix (uses centre pose) ---
                 if teleport:
                     dmath.trs_build_f64(mat_a, cwpx, cwpy, cwpz, cwrx, cwry, cwrz, cwrw, csx, csy, csz)
                     dmath.trs_inverse_f64(
@@ -2912,7 +2834,6 @@ def frame_kernel(phase_mask, sub_begin, sub_end,
                         t_old_frame_world_scale[i, 1], t_old_frame_world_scale[i, 2])
                     dmath.mat4_mul_f64(t_negative_scale_matrix[i], mat_a, mat_b)
 
-                # --- anchor ---
                 adv_x = float32(0.0)
                 adv_y = float32(0.0)
                 adv_z = float32(0.0)
@@ -2968,7 +2889,6 @@ def frame_kernel(phase_mask, sub_begin, sub_end,
                         adr_x, adr_y, adr_z, adr_w, ocr_x, ocr_y, ocr_z, ocr_w)
                     t_inertia_shift[i] = int32(1)
 
-                # --- frame delta + teleport distance/angle check ---
                 fdvx = cpx - ocp_x
                 fdvy = cpy - ocp_y
                 fdvz = cpz - ocp_z
@@ -2986,7 +2906,6 @@ def frame_kernel(phase_mask, sub_begin, sub_end,
                 reset = t_reset_pending[i] != 0
                 keep = t_keep_teleport_pending[i] != 0
 
-                # --- smoothing ---
                 sdv_x = float32(0.0)
                 sdv_y = float32(0.0)
                 sdv_z = float32(0.0)
@@ -3035,7 +2954,6 @@ def frame_kernel(phase_mask, sub_begin, sub_end,
                     ocp_z = spz
                     t_inertia_shift[i] = int32(1)
 
-                # --- frame_world store + reset / neg_only snapshots ---
                 t_frame_world_position[i, 0] = cwpx
                 t_frame_world_position[i, 1] = cwpy
                 t_frame_world_position[i, 2] = cwpz
@@ -3090,7 +3008,6 @@ def frame_kernel(phase_mask, sub_begin, sub_end,
                     t_old_world_rotation[i, 2] = cwrz
                     t_old_world_rotation[i, 3] = cwrw
 
-                # --- work vars + shift setup ---
                 wpx = ocp_x
                 wpy = ocp_y
                 wpz = ocp_z
@@ -3113,7 +3030,6 @@ def frame_kernel(phase_mask, sub_begin, sub_end,
                     sdv_y = float32(0.0)
                     sdv_z = float32(0.0)
 
-                # --- world inertia shift (live teams) ---
                 if not reset:
                     shv_x = cpx - ocp_x
                     shv_y = cpy - ocp_y
@@ -3265,7 +3181,6 @@ def frame_kernel(phase_mask, sub_begin, sub_end,
                     t_frame_component_shift_rotation[i, 2] = float32(0.0)
                     t_frame_component_shift_rotation[i, 3] = float32(1.0)
 
-                # --- moving speed / direction ---
                 mvx = cpx - wpx
                 mvy = cpy - wpy
                 mvz = cpz - wpz
@@ -3290,7 +3205,6 @@ def frame_kernel(phase_mask, sub_begin, sub_end,
                     t_frame_moving_direction[i, 1] = float32(0.0)
                     t_frame_moving_direction[i, 2] = float32(0.0)
 
-                # --- stabilize ---
                 if (t_reset_pending[i] != 0) or (t_time_reset[i] != 0):
                     if t_stablization_time[i] > float32(1e-6):
                         wgt = float32(0.0)
@@ -3299,7 +3213,6 @@ def frame_kernel(phase_mask, sub_begin, sub_end,
                     t_velocity_weight[i] = wgt
                     t_blend_weight[i] = wgt
 
-                # --- select_team_wind ---
                 old_count = t_wind_count[i]
                 for oc in range(WIND_ZONE_SLOTS):
                     if oc < old_count:
@@ -3418,7 +3331,6 @@ def frame_kernel(phase_mask, sub_begin, sub_end,
             i += stride
     grid.sync()
 
-    # P2 particles.frame_pre (per-particle; reset snapshot / negative-scale / inertia shift)
     if phase_mask & PHASE_PARTICLES_PRE:
         p = tid
         while p < num_particles:
@@ -3436,7 +3348,6 @@ def frame_kernel(phase_mask, sub_begin, sub_end,
             p += stride
     grid.sync()
 
-    # K0 collider.frame_pre (per-collider; frame_team_mask gate, enable rising-edge reset)
     if phase_mask & PHASE_COLLIDER_PRE:
         ci = tid
         while ci < num_colliders:
@@ -3454,10 +3365,6 @@ def frame_kernel(phase_mask, sub_begin, sub_end,
             ci += stride
     grid.sync()
 
-    # --- SELF_BEGIN self_collision.frame_begin intersect broad-phase (frame-pre; STALE AABB) ---
-    # n^2 edge x triangle per intersect task using last frame's resident AABB / grid sizes (frame 0 =
-    # all zero -> skipped, matching the oracle). Gated behind a grid-uniform total-pair count, so a
-    # -noself frame (no intersect tasks) executes ZERO of these barriers (zero overhead).
     num_it_slots = it_pair_off.shape[0] - 1
     total_it = it_pair_off[num_it_slots]
     if total_it > 0:
@@ -3470,8 +3377,6 @@ def frame_kernel(phase_mask, sub_begin, sub_end,
             ip_cap = ip_edge.shape[0]
             g = tid
             while g < total_it:
-                # binary search the sorted pair-offset prefix (first kk with it_pair_off[kk+1] > g),
-                # same task the old O(capacity) linear scan found (tail slots are a zero-width plateau).
                 lo = int32(0)
                 hi = num_it_slots
                 while lo < hi:
@@ -3482,7 +3387,6 @@ def frame_kernel(phase_mask, sub_begin, sub_end,
                         hi = mid
                 task = lo
                 tgt_team = it_tri_team[task]
-                # broad_phase + _detect_intersect skip: target grid_size / max primitive size > eps.
                 if t_self_grid_size[tgt_team] > EPSILON and t_self_max_primitive_size[tgt_team] > EPSILON:
                     tri_count = it_tri_count[task]
                     local = g - it_pair_off[task]
@@ -3491,7 +3395,6 @@ def frame_kernel(phase_mask, sub_begin, sub_end,
                     my_edge = it_edge_start[task] + i
                     tgt_tri = it_tri_start[task] + j
                     same = it_same[task]
-                    # my edge ~ignore; 分帧 by local edge index; target = (stale use) & ~ignore.
                     if (sfe_ignore[my_edge] == 0 and (i % SELF_COLLISION_INTERSECT_DIV) == frame_index
                             and sft_use[tgt_tri] != 0 and sft_ignore[tgt_tri] == 0
                             and self_aabb_overlap(sfe_aabb_min, sfe_aabb_max, my_edge,
@@ -3509,7 +3412,6 @@ def frame_kernel(phase_mask, sub_begin, sub_end,
                 g += stride
         grid.sync()
 
-    # ----- SUBSTEP LOOP (phases added in dependency order as ported) -----
     n_tether = st_tether_particle.shape[0]
     n_move = st_move_particle.shape[0]
     n_fixed = st_fixed_particle.shape[0]
@@ -3521,7 +3423,6 @@ def frame_kernel(phase_mask, sub_begin, sub_end,
     n_angle_buffered = st_angle_buffered_particle.shape[0]
     num_angle_passes = angle_pass_offsets.shape[0] - 1
     for _k in range(sub_begin, sub_end):
-        # --- S1 team_time.step_update (per-team, first substep stage) ---
         if phase_mask & PHASE_TEAM_STEP:
             i = tid
             while i < num_teams:
@@ -3553,7 +3454,6 @@ def frame_kernel(phase_mask, sub_begin, sub_end,
                 i += stride
         grid.sync()
 
-        # --- S2 collider.start_step (per-collider; build sphere/capsule/plane work + AABB) ---
         if phase_mask & PHASE_COLLIDER_START:
             ci = tid
             while ci < num_colliders:
@@ -3571,7 +3471,6 @@ def frame_kernel(phase_mask, sub_begin, sub_end,
                 ci += stride
         grid.sync()
 
-        # --- S3 particles.step_update PASS 1: base interpolation (all sp) + move set ---
         if phase_mask & PHASE_PARTICLES_STEP:
             p = tid
             while p < num_particles:
@@ -3676,7 +3575,6 @@ def frame_kernel(phase_mask, sub_begin, sub_end,
                         fy = fy + t_impact_force[mt, 1]
                         fz = fz + t_impact_force[mt, 2]
 
-                    # wind force (inline; do_wind_blend per slot + moving)
                     root = float32(p_vertex_root_local[pmi])
                     seed = float32(t_wind_seed[mt])
                     sync = t_wind_synchronization[mt]
@@ -3739,7 +3637,6 @@ def frame_kernel(phase_mask, sub_begin, sub_end,
                 e += stride
         grid.sync()
 
-        # --- S3 PASS 2: fixed set (next=base) + spring set (limit/elliptic/noise) ---
         if phase_mask & PHASE_PARTICLES_STEP:
             e = tid
             while e < n_fixed:
@@ -3822,11 +3719,6 @@ def frame_kernel(phase_mask, sub_begin, sub_end,
                 e += stride
         grid.sync()
 
-        # --- S4 baseline.run FK: block-0 walks all levels (yes then no per level) with
-        # __syncthreads() between them instead of a grid.sync (parent step_basic of level L was
-        # written at level < L; the intra-block barrier keeps that read-before-write order). Each
-        # vertex's write is unique, so the 7-block-stride -> block-0-stride move is bit-exact; max
-        # level = 92 < blockDim. Blocks != 0 skip the work and wait at the single exit wall. ---
         for lvl in range(num_fk_levels):
             if bid == 0 and (phase_mask & PHASE_BASELINE) != 0:
                 ys = fk_yes_offsets[lvl]
@@ -3864,9 +3756,6 @@ def frame_kernel(phase_mask, sub_begin, sub_end,
                         p_step_basic_rotations[v, 3] = qw
                     i += bdim
             cuda.syncthreads()
-            # oracle applies each level's yes (skin from parent) BEFORE its no (negative-
-            # scale root flip); a root can be both a parent here and a no-entry, so the
-            # yes reads must complete before the no writes.
             if bid == 0 and (phase_mask & PHASE_BASELINE) != 0:
                 ns = fk_no_offsets[lvl]
                 ne = fk_no_offsets[lvl + 1]
@@ -3899,8 +3788,6 @@ def frame_kernel(phase_mask, sub_begin, sub_end,
                     i += bdim
             cuda.syncthreads()
         grid.sync()
-        # baseline apply (animation_pose_ratio blend) stays a multi-block grid-stride pass over
-        # all entries; the grid.sync above made block 0's FK writes globally visible first.
         if phase_mask & PHASE_BASELINE:
             i = tid
             while i < n_baseline:
@@ -3938,7 +3825,6 @@ def frame_kernel(phase_mask, sub_begin, sub_end,
                 e += stride
         grid.sync()
 
-        # --- S6 distance.run (first occurrence): Jacobi gather -> apply ---
         if phase_mask & PHASE_DISTANCE_A:
             p = tid
             while p < num_particles:
@@ -3965,11 +3851,6 @@ def frame_kernel(phase_mask, sub_begin, sub_end,
                 p += stride
         grid.sync()
 
-        # --- S7 angle.run: buffer segment -> 3 iterations x P (level,rank) passes ---
-        # Buffer a: for baseline entries whose team needs angle, snapshot step_basic_rotations
-        # into albuf_rotation (oracle does ALL baseline entries incl. fixed roots). Buffer b:
-        # for angle_buffered vertices (parent always >=0) build the limit local frame and the
-        # restoration target vector. a/b touch disjoint fields so they need no barrier between.
         if phase_mask & PHASE_ANGLE:
             i = tid
             while i < n_baseline:
@@ -4034,11 +3915,6 @@ def frame_kernel(phase_mask, sub_begin, sub_end,
                         p_albuf_restore[v, 2] = bvz
                 i += stride
         grid.sync()
-        # Single-block the 3xP (level,rank) passes: only block 0 walks every pass, using
-        # __syncthreads() between passes (two orders of magnitude cheaper than grid.sync on this
-        # small 7-block grid). Each pass fits one block-wave (max pass entries 92 < blockDim) and
-        # the per-entry writes are disjoint (v-set at level L, p-set at level L-1), so moving the
-        # work from a 7-block grid-stride to a block-0 stride is order-independent -> bit-exact.
         if bid == 0:
             for _ai in range(ANGLE_ITERATION):
                 angle_rot_ratio = float32(0.1) + (float32(0.5) - float32(0.1)) \
@@ -4079,7 +3955,6 @@ def frame_kernel(phase_mask, sub_begin, sub_end,
                     cuda.syncthreads()
         grid.sync()
 
-        # --- S8 bending.run: clear -> per-pair scatter (int32 fixed-point) -> apply ---
         if phase_mask & PHASE_BENDING:
             p = tid
             while p < num_particles:
@@ -4278,7 +4153,6 @@ def frame_kernel(phase_mask, sub_begin, sub_end,
                 p += stride
         grid.sync()
 
-        # --- S9 collider.solve: point (per-particle gather, in-place) ---
         if phase_mask & PHASE_COLLIDER_SOLVE:
             p = tid
             while p < num_particles:
@@ -4294,7 +4168,6 @@ def frame_kernel(phase_mask, sub_begin, sub_end,
                                    st_point_pair_collider)
                 p += stride
         grid.sync()
-        # S9 edge: clear endpoint scatter scratch
         if phase_mask & PHASE_COLLIDER_SOLVE:
             p = tid
             while p < num_particles:
@@ -4308,7 +4181,6 @@ def frame_kernel(phase_mask, sub_begin, sub_end,
                 sc_col_normal_fixed[p, 2] = int32(0)
                 p += stride
         grid.sync()
-        # S9 edge: per-edge compute + fixed-point endpoint scatter (EDGE-mode teams only)
         if phase_mask & PHASE_COLLIDER_SOLVE:
             ee = tid
             while ee < st_collision_edge.shape[0]:
@@ -4323,7 +4195,6 @@ def frame_kernel(phase_mask, sub_begin, sub_end,
                                   sc_col_friction_fixed, sc_col_normal_fixed)
                 ee += stride
         grid.sync()
-        # S9 edge: per-particle apply of endpoint accumulation
         if phase_mask & PHASE_COLLIDER_SOLVE:
             p = tid
             while p < num_particles:
@@ -4350,7 +4221,6 @@ def frame_kernel(phase_mask, sub_begin, sub_end,
                 p += stride
         grid.sync()
 
-        # --- S10 distance.run (second occurrence): same Jacobi gather -> apply ---
         if phase_mask & PHASE_DISTANCE_B:
             p = tid
             while p < num_particles:
@@ -4377,7 +4247,6 @@ def frame_kernel(phase_mask, sub_begin, sub_end,
                 p += stride
         grid.sync()
 
-        # --- S11 motion.run (per-entry independent) ---
         if phase_mask & PHASE_MOTION:
             e = tid
             while e < n_motion:
@@ -4443,11 +4312,6 @@ def frame_kernel(phase_mask, sub_begin, sub_end,
                 e += stride
         grid.sync()
 
-        # --- SELF_STEP self_collision.step (S12; between S11 motion and S13 step_post) ---
-        # first substep: update_primitives + n^2 detect_contacts (append only enabled -> free compaction);
-        # later substeps: update_contacts. Then a 4-iteration PBD solve using int32 fixed-point atomic
-        # scatter (reuses sc_dcorr_fixed / sc_dcount). The whole block is gated behind a grid-uniform
-        # contact-pair count, so a -noself frame executes ZERO of these barriers.
         num_ct_slots = ct_pair_off.shape[0] - 1
         total_ct = ct_pair_off[num_ct_slots]
         if total_ct > 0:
@@ -4507,9 +4371,6 @@ def frame_kernel(phase_mask, sub_begin, sub_end,
                 if phase_mask & PHASE_SELF_STEP:
                     g = tid
                     while g < total_ct:
-                        # binary search the sorted pair-offset prefix for the task owning global pair g
-                        # (first kk with ct_pair_off[kk+1] > g). Same task the old O(capacity) linear scan
-                        # found -- inactive tail slots are a zero-width plateau at total, and g < total.
                         lo = int32(0)
                         hi = num_ct_slots
                         while lo < hi:
@@ -4770,7 +4631,6 @@ def frame_kernel(phase_mask, sub_begin, sub_end,
                         p += stride
                 grid.sync()
 
-        # --- S13 particles.step_post PASS 1: friction / limit / centrifugal (move set) ---
         if phase_mask & PHASE_STEP_POST:
             e = tid
             while e < n_move:
@@ -4796,7 +4656,6 @@ def frame_kernel(phase_mask, sub_begin, sub_end,
                     static_param = t_static_friction[mt] * t_scale_ratio[mt]
                     dynamic_param = t_dynamic_friction[mt]
 
-                    # static friction
                     sfp = p_static_friction[pmi]
                     static_on = static_param > float32(0.0)
                     vx = n0 - o0
@@ -4832,7 +4691,6 @@ def frame_kernel(phase_mask, sub_begin, sub_end,
                     vo2 = vo2 - rbz
                     p_static_friction[pmi] = sfp_new
 
-                    # dynamic friction
                     velx = (n0 - vo0) / sim_dt
                     vely = (n1 - vo1) / sim_dt
                     velz = (n2 - vo2) / sim_dt
@@ -4854,7 +4712,6 @@ def frame_kernel(phase_mask, sub_begin, sub_end,
                         velz = velz - velz * damp
                     p_friction[pmi] = friction * float32(0.6)
 
-                    # speed limit
                     speed_limit = t_particle_speed_limit[mt]
                     max_len = speed_limit * t_scale_ratio[mt]
                     if max_len < float32(0.0):
@@ -4862,7 +4719,6 @@ def frame_kernel(phase_mask, sub_begin, sub_end,
                     if speed_limit >= float32(0.0):
                         velx, vely, velz = dmath.clamp_vector(velx, vely, velz, max_len)
 
-                    # centrifugal
                     angular = t_angular_velocity[mt]
                     centrifugal = t_centrifugal_acceleration[mt]
                     if (angular > EPSILON) and (centrifugal > EPSILON):
@@ -4899,7 +4755,6 @@ def frame_kernel(phase_mask, sub_begin, sub_end,
                 e += stride
         grid.sync()
 
-        # --- S13 PASS 2: real_velocities + old_positions for all substep particles ---
         if phase_mask & PHASE_STEP_POST:
             p = tid
             while p < num_particles:
@@ -4914,7 +4769,6 @@ def frame_kernel(phase_mask, sub_begin, sub_end,
                 p += stride
         grid.sync()
 
-        # --- S14 collider.end_step (per-collider; old = now) ---
         if phase_mask & PHASE_COLLIDER_END:
             ci = tid
             while ci < num_colliders:
@@ -4925,13 +4779,8 @@ def frame_kernel(phase_mask, sub_begin, sub_end,
                 ci += stride
         grid.sync()
 
-    # ----- FRAME-POST -----
     grid.sync()
 
-    # --- SELF_END self_collision.frame_end intersect narrow-phase (frame-post; FRESH next_pos) ---
-    # segment-triangle test over the intersect-pair table SELF_BEGIN filled (with THIS frame's final
-    # next_positions); clears then sets intersect_flag, consumed by next frame's update_primitives.
-    # Gated behind the same grid-uniform intersect-pair total, so -noself pays zero barriers here.
     if total_it > 0:
         if phase_mask & PHASE_SELF_END:
             p = tid
@@ -4984,12 +4833,6 @@ def frame_kernel(phase_mask, sub_begin, sub_end,
                 e += stride
         grid.sync()
 
-    # F2 display.run: segment A _display (per-particle) -> B _postline (per level, per entry) ->
-    # C _post_triangles (C1 per-triangle normal/tangent, C2 per-owner v2t reduce) -> D _output.
-    # Sits at the frame-post head after the self-collision F1 slot (SELF_END), before F3; F3/F4
-    # are gated by their own bits so isolated PHASE_DISPLAY launches leave them untouched. Zero
-    # atomics: postline children walk the entry CSR serially, v2t rows walk the owner CSR serially,
-    # grid.sync between the four segments (and per postline level) orders every cross-thread write.
     num_postline_levels = postline_entry_offsets.shape[0] - 1
     num_triangles = st_triangle_team.shape[0]
     if phase_mask & PHASE_DISPLAY:
@@ -5006,9 +4849,6 @@ def frame_kernel(phase_mask, sub_begin, sub_end,
                                     t_negative_scale_direction)
             p += stride
     grid.sync()
-    # Block-0 walks the postline levels with __syncthreads(): children sit one level below the
-    # entry, so the level barrier keeps child-writes visible to the parent-entry read; each
-    # entry's write is unique (owner-grouped CSR), so block-0-stride is bit-exact (max level 28).
     for lvl in range(num_postline_levels):
         if bid == 0 and (phase_mask & PHASE_DISPLAY) != 0:
             pl_start = postline_entry_offsets[lvl]
@@ -5061,7 +4901,6 @@ def frame_kernel(phase_mask, sub_begin, sub_end,
                                    t_negative_scale_quaternion, p_out_rotations)
             p += stride
     grid.sync()
-    # F3 collider.frame_post (per-collider; running teams: old_frame = frame)
     if phase_mask & PHASE_COLLIDER_POST:
         ci = tid
         while ci < num_colliders:
@@ -5071,7 +4910,6 @@ def frame_kernel(phase_mask, sub_begin, sub_end,
                 do_collider_frame_post(ci, c_frame_pos, c_frame_rot, c_old_frame_pos, c_old_frame_rot)
             ci += stride
     grid.sync()
-    # F4 team_time.frame_post (per-team bookkeeping, no cross-team dependency)
     if phase_mask & PHASE_TEAM_POST:
         i = tid
         while i < num_teams:
@@ -5137,8 +4975,6 @@ def frame_kernel(phase_mask, sub_begin, sub_end,
     grid.sync()
 
 
-# ordered team-field names the frame_kernel consumes, in signature order after the
-# four scalars; the engine builds the launch arg list from this single source of truth.
 TEAM_KERNEL_FIELDS = (
     "enabled", "valid", "component_world_scale", "time_reset_pending",
     "time", "old_time", "now_update_time", "old_update_time", "frame_update_time",
@@ -5210,7 +5046,6 @@ PARTICLE_KERNEL_FIELDS = (
 
 TRANSFORM_KERNEL_FIELDS = ("world", "bind_pose")
 
-# collider arena fields the frame_kernel consumes, in signature order after transforms
 COLLIDER_KERNEL_FIELDS = (
     "team", "kind", "center", "size", "axis", "aligned", "enabled",
     "enabled_prev", "active", "input_positions", "input_rotations", "input_scales",
@@ -5221,7 +5056,6 @@ COLLIDER_KERNEL_FIELDS = (
     "work_aabb_min", "work_aabb_max",
 )
 
-# static Program arrays, uploaded once; engine reads program.<attr>[<field>]
 STATIC_KERNEL_FIELDS = (
     ("tether_particle", "tether", "particle"),
     ("tether_team", "tether", "team"),
@@ -5251,7 +5085,6 @@ STATIC_KERNEL_FIELDS = (
     ("v2t_flip_tangent", "v2t", "flip_tangent"),
 )
 
-# CSR gather tables (offsets + order uploaded from a program CsrTable attribute)
 STATIC_CSR_FIELDS = (
     ("distance_csr_offsets", "distance_csr_order", "distance_csr"),
     ("point_pair_csr_offsets", "point_pair_csr_order", "point_pair_csr"),
@@ -5260,7 +5093,6 @@ STATIC_CSR_FIELDS = (
     ("v2t_csr_offsets", "v2t_csr_order", "v2t_csr"),
 )
 
-# direct program arrays uploaded verbatim (level tables + flat index sets)
 STATIC_DIRECT_FIELDS = (
     "fk_yes_offsets", "fk_yes", "fk_yes_parent", "fk_no_offsets", "fk_no",
     "baseline_entries",
@@ -5269,26 +5101,16 @@ STATIC_DIRECT_FIELDS = (
     "postline_child_offsets", "postline_child_vertices", "display_update_move_mask",
 )
 
-# ---- G3a self-collision registration (appended to the ordered field list AFTER scratch, so every
-# new slot takes a fresh tail index and no existing preamble slice / layout row moves) ------------
-# Primitive arena fields the kernel consumes (self_points / self_edges / self_triangles share this
-# layout). cell_key is NOT registered (D1: n^2 AABB pair test, no uniform grid). fix / intersect are
-# packed host-side into a u8 bitmask (bit0/1/2) so no new (u8, (3,)) blob group is introduced.
 PRIMITIVE_KERNEL_FIELDS = (
     "team", "particles", "fix", "all_fix", "ignore", "prim_depth",
     "inv_mass", "thickness", "aabb_min", "aabb_max", "intersect", "use",
 )
-# team self-collision fields (kernel-read config / structure + kernel-written grid sizes).
 SELF_TEAM_KERNEL_FIELDS = (
     "use_point", "use_edge", "use_triangle", "self_grid_size", "self_max_primitive_size",
     "self_mode", "sync_mode", "self_thickness_lut", "self_cloth_mass",
     "sp_start", "sp_count", "se_start", "se_count", "st_start", "st_count",
 )
-# particle self-collision fields (intersect flag set by frame_end, read by update_primitives).
 SELF_PARTICLE_KERNEL_FIELDS = ("intersect_flag",)
-# self-collision device state buffers (host-sized capacities): EE/PT contact tables, atomic counters,
-# host-built contact/intersect task tables (uploaded each frame), the intersect-pair table, and the
-# per-team fixed-point max-primitive-size accumulator. Order == engine._self_state_ordered().
 SELF_STATE_KERNEL_FIELDS = (
     "ee_my", "ee_target", "ee_thickness", "ee_s", "ee_t", "ee_n", "ee_enable",
     "pt_my", "pt_target", "pt_thickness", "pt_sign", "pt_enable",
@@ -5302,15 +5124,6 @@ SELF_STATE_KERNEL_FIELDS = (
 )
 
 
-# ---- G2e-7 blob aggregation registry (cache-preserving group-by-shape) ---------------------
-# The megakernel takes one contiguous device blob per (dtype-family, per-row-shape) group, so
-# each field is a plain AXIS-0 SLICE of a shaped blob -- no device-code reshape (numba-cuda links
-# reshape_funcs.cu, which cache=True cannot pickle). offs[k]/lens[k] are the row base/count of
-# slot k into blob_<group>; the slot index matches the reconstruction preamble atop frame_kernel.
-# engine.build_blobs() assembles the group blobs from the same ordered field list and asserts
-# group/per_row against this table. Adding a field for G3 = append its *_KERNEL_FIELDS entry + one
-# layout row + one preamble slice (+ a new group blob only if its (family,shape) is new); the
-# SIGNATURE changes only when a brand-new (family,shape) group appears.
 RESIDENT_BLOB_GROUPS = (
     "u8_s",
     "f32_v3",

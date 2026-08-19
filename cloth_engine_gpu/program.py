@@ -1,33 +1,9 @@
-"""Build the static device Program from a CPU ``World``.
-
-The oracle's numpy stages are the CPU projection of a data-parallel job graph
-(mirroring the MC2 HLSL decomposition). This module turns a ``World`` into the
-static tables that job graph needs, once, at ``engine.load`` time:
-
-* CSR groupings that preserve the oracle's *summation order* per accumulator, so a
-  per-particle gather reproduces the oracle's ``np.add.reduceat`` result bit-for-bit
-  (distance / collider-point / collider-edge / postline / v2t / center-fixed).
-* the level / pass tables (FK levels, angle (level,rank) passes, postline levels,
-  baseline entries) harvested straight from ``world.ensure_buckets()`` -- single
-  source of truth, no re-derivation.
-* the static per-team index sets already materialised in the arenas.
-
-Field flattening (struct-of-arrays -> flat contiguous device arrays) is provided by
-``flatten_fields`` / ``scatter_fields``; the kernels declare exactly which fields
-they touch and the engine flattens only those (see ``engine.py``).
-
-Nothing here is GPU-specific: it produces numpy arrays. ``device.py`` uploads them.
-All index arrays are ``int32`` C-contiguous; offsets are ``int32``.
-"""
-
 import numpy as np
 
 I4 = np.int32
 
 
 class CsrTable:
-    """Compressed grouping: rows of ``order`` in ``[offsets[k], offsets[k+1])`` are the
-    original row indices whose key == k, in stable (original) order."""
 
     __slots__ = ("offsets", "order", "num_keys")
 
@@ -42,13 +18,6 @@ class CsrTable:
 
 
 def build_csr(keys, num_keys):
-    """Group row indices by integer key, preserving original order within a key.
-
-    Reproduces the oracle's ``run_starts`` / ``reduceat`` grouping: the oracle relies
-    on rows for one accumulator being *consecutive* in arena order; a stable sort by
-    key yields exactly that ordering (identical for the already-consecutive case and
-    well-defined when a scatter needs a global regroup).
-    """
     keys = np.ascontiguousarray(keys, dtype=np.int64)
     n = int(keys.shape[0])
     offsets = np.zeros(num_keys + 1, dtype=I4)
@@ -61,12 +30,6 @@ def build_csr(keys, num_keys):
 
 
 def flatten_fields(arena_arrays, field_names, count):
-    """Flatten selected struct fields of an arena into C-contiguous arrays.
-
-    ``arena_arrays`` maps field name -> ndarray of shape ``(capacity, *shape)``. Only
-    the first ``count`` rows (the live prefix the kernels address by absolute index)
-    are taken. Returns ``{name: contiguous ndarray}`` with the field dtype preserved
-    (bool -> uint8 for device friendliness)."""
     out = {}
     for name in field_names:
         source = arena_arrays[name][:count]
@@ -77,7 +40,6 @@ def flatten_fields(arena_arrays, field_names, count):
 
 
 def scatter_fields(arena_arrays, flat, count):
-    """Write flat arrays back into the arena struct fields (readback path)."""
     for name, values in flat.items():
         target = arena_arrays[name]
         if target.dtype == np.bool_:
@@ -87,7 +49,6 @@ def scatter_fields(arena_arrays, flat, count):
 
 
 class Program:
-    """Static tables for one ``World`` instance (built once at engine.load)."""
 
     def __init__(self):
         self.num_teams = 0
@@ -96,11 +57,6 @@ class Program:
         self.num_colliders = 0
         self.num_triangle_entries = 0
 
-        # G3a self-collision: live primitive-arena extents + worst-case device table capacities
-        # (sized from the structural primitive counts, INDEPENDENT of the runtime self_mode/sync
-        # config so a config change -- config is not in the reload signature -- never overflows a
-        # too-small table). Bounds assume every team could run FULL_MESH self AND sync to the team
-        # with the most primitives.
         self.num_self_points = 0
         self.num_self_edges = 0
         self.num_self_triangles = 0
@@ -110,17 +66,15 @@ class Program:
         self.self_max_contact_tasks = 1
         self.self_max_intersect_tasks = 1
 
-        # per-accumulator CSR groupings (summation-order preserving)
-        self.distance_csr = None          # key = distance particle (global)
-        self.point_pair_csr = None        # key = point-pair particle (global)
-        self.edge_pair_csr = None         # key = edge-pair edge entry index
-        self.postline_level_csr = []      # per level: CSR keyed by owner slot
-        self.v2t_csr = None               # key = v2t owner (global particle)
-        self.center_fixed_csr = None      # key = center_fixed team
+        self.distance_csr = None
+        self.point_pair_csr = None
+        self.edge_pair_csr = None
+        self.postline_level_csr = []
+        self.v2t_csr = None
+        self.center_fixed_csr = None
 
-        # flat static index / topology arrays (arena order)
-        self.distance = {}                # particle/target/rest/team
-        self.bending = {}                 # pair(4)/rest/sign/team
+        self.distance = {}
+        self.bending = {}
         self.tether = {}
         self.motion = {}
         self.update_move = {}
@@ -137,34 +91,21 @@ class Program:
         self.angle_buffered = {}
         self.baseline_entries = None
 
-        # level / pass tables (from ensure_buckets)
-        self.fk_levels = []               # list of (yes, yes_parent, no)
-        self.angle_passes = []            # list of (vertices, parents)
-        self.postline_levels = []         # list of (entry_vertex, child_owner, child_vertex)
+        self.fk_levels = []
+        self.angle_passes = []
+        self.postline_levels = []
 
-        # flattened postline (display._postline): a device loop over range(entry_offsets-1) walks
-        # levels with a grid.sync wall between them; per-entry children are a global CSR keyed by the
-        # flat entry index (child_offsets[i]:child_offsets[i+1] into child_vertices, owner-grouped).
         self.postline_entry_offsets = None
         self.postline_entry_vertices = None
         self.postline_child_offsets = None
         self.postline_child_vertices = None
 
-        # per-particle update_move mask (materialised from the update_move table): the display
-        # _display split is move (mask=1) vs fixed (mask=0), which partition all particles.
         self.display_update_move_mask = None
 
-        # flattened angle (level,rank) passes (offsets[P+1] + concatenated vertices/parents),
-        # so a device loop over ``range(offsets.shape[0]-1)`` walks passes in sorted (level,rank)
-        # order with a grid.sync wall between them (Gauss-Seidel: parent albuf_rotation of a
-        # level-L vertex was finalised in an earlier pass at level < L this iteration).
         self.angle_pass_offsets = None
         self.angle_pass_vertices = None
         self.angle_pass_parents = None
 
-        # flattened FK level tables (offsets[num_levels+1] + concatenated values), so a
-        # device loop over ``range(offsets.shape[0]-1)`` walks levels with a grid.sync
-        # wall between them (parent step_basic of level L was written at level < L).
         self.fk_yes_offsets = None
         self.fk_yes = None
         self.fk_yes_parent = None
@@ -173,11 +114,6 @@ class Program:
 
 
 def _arena_dump(arena, fields):
-    """Dump only live rows (team != 0). Free/unallocated arena rows carry team slot 0
-    (the permanent sentinel team, never registered) and would otherwise pollute the
-    per-particle CSR gathers with zero-valued rows aliased to particle 0. Live rows are
-    a contiguous prefix in a sequentially-built world; the boolean mask preserves their
-    order regardless, and an explicit prefix assertion guards the absolute-index contract."""
     team = arena["team"]
     live = np.flatnonzero(team != 0)
     if live.shape[0]:
@@ -192,7 +128,6 @@ def _live_extent(team_rows, start_field, count_field):
 
 
 def build_program(world):
-    """Construct the static Program from a fully-registered World."""
     world.ensure_buckets()
     program = Program()
     program.num_teams = int(len(world.team))
@@ -216,8 +151,6 @@ def build_program(world):
     program.edges = _arena_dump(world.edges, ("team", "edge"))
     program.triangles = _arena_dump(world.triangles, ("team", "triangle"))
     program.v2t = _arena_dump(world.v2t, ("team", "owner", "triangle", "flip_normal", "flip_tangent"))
-    # display._post_triangles indexes tri_normal/tangent scratch by GLOBAL triangle-arena row; the
-    # dumped live rows form a contiguous prefix [0, num) that v2t['triangle'] addresses directly.
     program.num_triangle_entries = int(program.triangles["team"].shape[0])
     program.point_pairs = _arena_dump(world.point_pairs, ("team", "particle", "collider"))
     program.edge_pairs = _arena_dump(world.edge_pairs, ("team", "edge", "collider"))
@@ -255,11 +188,6 @@ def build_program(world):
 
 
 def _compute_self_capacities(program, world):
-    """Worst-case device table capacities for self-collision (D3). Sized from structural per-team
-    primitive counts, assuming every team could run FULL_MESH self collision AND sync to the team
-    with the most primitives -- a safe upper bound independent of the runtime self_mode/sync_target
-    (which are per-frame/config, not in the reload signature). The exact per-frame candidate-pair
-    count (and the >3e7 FAIL guard, D1) is computed host-side each frame from the actual task set."""
     tt = world.team
     nt = program.num_teams
     se = tt["se_count"][:nt].astype(np.int64)
@@ -268,26 +196,17 @@ def _compute_self_capacities(program, world):
     max_se = int(se.max()) if nt else 0
     max_sp = int(sp.max()) if nt else 0
     max_st = int(st.max()) if nt else 0
-    # EE: self se^2 + sync se*max_partner_se. PT: self sp*st + sync PT (sp*max_st) + sync TP (st*max_sp).
-    # IP (intersect edge-triangle): self se*st + sync se*max_st + sync max_se*st.
     cap_ee = int((se * se).sum() + (se * max_se).sum())
     cap_pt = int((sp * st).sum() + (sp * max_st).sum() + (st * max_sp).sum())
     cap_ip = int((se * st).sum() + (se * max_st).sum() + (st * max_se).sum())
     program.self_cap_ee = max(cap_ee, 1)
     program.self_cap_pt = max(cap_pt, 1)
     program.self_cap_ip = max(cap_ip, 1)
-    # task-slot bounds: per team up to 2 self tasks (EE + PT) + 3 sync tasks (EE + TP + PT);
-    # intersect up to 1 self + 2 sync per team.
     program.self_max_contact_tasks = max(nt * 5, 1)
     program.self_max_intersect_tasks = max(nt * 3, 1)
 
 
 def _flatten_postline(levels, level_csr):
-    """Flatten per-level postline into (entry_offsets[L+1], entry_vertices, child_offsets[E+1],
-    child_vertices). ``entry_offsets`` slices each level's entries out of the concatenated
-    ``entry_vertices``; ``child_offsets`` is a GLOBAL per-entry CSR (indexed by flat entry row)
-    into ``child_vertices``, which is owner-grouped (csr.order) so each entry's children are the
-    contiguous run the oracle iterates."""
     num_levels = len(levels)
     entry_offsets = np.zeros(num_levels + 1, dtype=I4)
     entry_parts = []
@@ -300,7 +219,6 @@ def _flatten_postline(levels, level_csr):
         entry_offsets[lvl + 1] = entry_offsets[lvl] + entries
         order = csr.order
         child_parts.append(cv[order] if order.shape[0] else np.zeros(0, dtype=I4))
-        # csr.offsets has length entries+1; global per-entry offsets = per-level offsets + base.
         child_offset_parts.append((csr.offsets[1:entries + 1].astype(I4) + I4(base)))
         base += int(csr.offsets[entries]) if entries else 0
     entry_vertices = np.concatenate(entry_parts).astype(I4) if entry_parts else np.zeros(0, dtype=I4)
@@ -311,8 +229,6 @@ def _flatten_postline(levels, level_csr):
 
 
 def _build_update_move_mask(move_particles, num_particles):
-    """Per-particle uint8 mask: 1 where the particle is an update_move entry, 0 otherwise
-    (update_move / update_fixed partition all particles, so the complement is update_fixed)."""
     mask = np.zeros(max(num_particles, 0), dtype=np.uint8)
     if move_particles.shape[0]:
         mask[move_particles] = 1
@@ -320,8 +236,6 @@ def _build_update_move_mask(move_particles, num_particles):
 
 
 def _flatten_levels(levels):
-    """Concatenate a list of per-level int32 index arrays into (offsets, values), where
-    ``offsets[i]:offsets[i+1]`` selects level i's rows in ``values``."""
     offsets = np.zeros(len(levels) + 1, dtype=I4)
     parts = []
     for i, arr in enumerate(levels):
@@ -333,8 +247,6 @@ def _flatten_levels(levels):
 
 
 def _build_edge_pair_csr(program):
-    # collision_edges live rows form a contiguous prefix, so edge-pair 'edge' values are
-    # absolute indices in [0, num_edge_entries); group edge-pair rows by their edge entry.
     edge_key = program.edge_pairs["edge"]
     num_edge_entries = int(program.collision_edges["edge"].shape[0])
     return build_csr(edge_key, num_edge_entries)

@@ -21,11 +21,6 @@ def bone_matrix(obj, bone_name):
 
 
 def solve(item, matrix):
-    """World-space geometry of one collider, matching the solver's own construction.
-
-    Returns (kind, first, second, radius_first, radius_second) where for a capsule the
-    two points are the segment ends carrying their respective radii.
-    """
     rotation = matrix[:3, :3]
     scale = np.linalg.norm(rotation, axis=0)
     basis = rotation / np.where(scale > 1e-12, scale, 1.0)

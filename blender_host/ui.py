@@ -55,12 +55,6 @@ def draw_curve(layout, owner, prop_name, label):
 
 
 def draw_collider_references(layout, config):
-    """Which colliders this config tests against.
-
-    Drawn in the main panel beside the root bones: those two lists are what you actually edit while
-    building a chain, and they used to sit two panels apart -- roots in 主设置, references buried in
-    碰撞体 > 本配置的碰撞, with the whole 物理参数 tree in between.
-    """
     collision = config.collider_collision
     layout.label(text="碰撞体引用")
     row = layout.row()
@@ -184,6 +178,11 @@ class RCP_PT_scene_settings(bpy.types.Panel):
         layout = self.layout
         _setup_layout(layout)
         scene_settings = context.scene.ruri_cloth_physics
+        layout.prop(scene_settings, "backend")
+        if scene_settings.backend != 'GPU':
+            row = layout.row()
+            row.alert = True
+            row.label(text="参考后端: 比 GPU 慢一到两个数量级", icon='INFO')
         layout.prop(scene_settings, "simulation_frequency")
         layout.prop(scene_settings, "max_simulation_count")
         layout.prop(scene_settings, "global_time_scale")
@@ -419,11 +418,6 @@ class RCP_PT_spring(_SpringPanel, bpy.types.Panel):
         spring = config.spring
         obj = context.object
 
-        # The spring block only ever touches the FIXED particles, and compile.py makes exactly the
-        # config's root bones fixed. Everything below a root is an ordinary cloth particle answering
-        # to 角度复原 / 角度制限 / 空气阻尼 instead. Without this said out loud the panel reads as if
-        # it governed the whole chain, and zeroing it looks like "the spring does nothing" when what
-        # you are watching move is the children.
         roots = chain.root_names(obj, config)
         _, ordered = chain.config_chain(obj, config)
         others = [name for name in ordered if name not in roots]

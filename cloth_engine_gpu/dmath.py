@@ -1,26 +1,9 @@
-"""Device math for the GPU cloth engine.
-
-Every function mirrors the same-named routine in ``cloth_kernel/math.py`` with
-identical semantics and branch structure, ported to per-thread scalar / tuple form
-for numba.cuda. Vectors are ``(x, y, z)`` tuples, quaternions ``(x, y, z, w)``.
-
-f32 discipline (red line): every floating literal is wrapped in ``float32(...)`` so
-sm_75 never silently promotes an f32 expression to f64 (1/32 throughput + drift).
-Transcendentals go through ``libdevice`` f32 variants (sinf/cosf/...), matching the
-oracle's numpy float32 transcendentals to within a few ULP.
-"""
-
 from numba import cuda, float32, float64, int32
 from numba.cuda import libdevice
 
 
-# ---------------------------------------------------------------------------
-# scalar helpers
-# ---------------------------------------------------------------------------
-
 @cuda.jit(device=True)
 def fsign(x):
-    # numpy np.sign: 0 -> 0, positive -> 1, negative -> -1
     if x > float32(0.0):
         return float32(1.0)
     if x < float32(0.0):
@@ -61,10 +44,6 @@ def fmax2(a, b):
     return a if a > b else b
 
 
-# ---------------------------------------------------------------------------
-# vec3
-# ---------------------------------------------------------------------------
-
 @cuda.jit(device=True)
 def dot3(ax, ay, az, bx, by, bz):
     return ax * bx + ay * by + az * bz
@@ -84,7 +63,6 @@ def length3(x, y, z):
 
 @cuda.jit(device=True)
 def normalize3(x, y, z):
-    # math.normalize without fallback: v / max(len, 1) -> unchanged when len<=1e-30
     l = length3(x, y, z)
     safe = l if l > float32(1e-30) else float32(1.0)
     return (x / safe, y / safe, z / safe)
@@ -97,10 +75,6 @@ def normalize3_fb(x, y, z, fx, fy, fz):
         return (x / l, y / l, z / l)
     return (fx, fy, fz)
 
-
-# ---------------------------------------------------------------------------
-# quaternion (x, y, z, w)
-# ---------------------------------------------------------------------------
 
 @cuda.jit(device=True)
 def quat_mul(ax, ay, az, aw, bx, by, bz, bw):
@@ -135,13 +109,11 @@ def quat_rotate(qx, qy, qz, qw, vx, vy, vz):
 
 @cuda.jit(device=True)
 def quat_to_normal(x, y, z, w):
-    # rotate VEC_UP (0,1,0)
     return quat_rotate(x, y, z, w, float32(0.0), float32(1.0), float32(0.0))
 
 
 @cuda.jit(device=True)
 def quat_to_tangent(x, y, z, w):
-    # rotate VEC_FORWARD (0,0,1)
     return quat_rotate(x, y, z, w, float32(0.0), float32(0.0), float32(1.0))
 
 
@@ -232,7 +204,6 @@ def matrix3_to_quat(m00, m10, m20, m01, m11, m21, m02, m12, m22):
 
 @cuda.jit(device=True)
 def look_rotation(fx, fy, fz, ux, uy, uz):
-    # z = normalize(forward, fallback FORWARD)
     zx, zy, zz = normalize3_fb(fx, fy, fz, float32(0.0), float32(0.0), float32(1.0))
     xx, xy, xz = cross3(ux, uy, uz, zx, zy, zz)
     xx, xy, xz = normalize3_fb(xx, xy, xz, float32(1.0), float32(0.0), float32(0.0))
@@ -242,13 +213,11 @@ def look_rotation(fx, fy, fz, ux, uy, uz):
 
 @cuda.jit(device=True)
 def to_rotation(nx, ny, nz, tx, ty, tz):
-    # to_rotation(normal, tangent) = look_rotation(tangent, normal)
     return look_rotation(tx, ty, tz, nx, ny, nz)
 
 
 @cuda.jit(device=True)
 def transform_point(m, px, py, pz):
-    # (m[:3,:3] @ p + m[:3,3]); m is a f64 (>=3x4) matrix view (mirrors math.transform_points f64 path)
     x = m[0, 0] * px + m[0, 1] * py + m[0, 2] * pz + m[0, 3]
     y = m[1, 0] * px + m[1, 1] * py + m[1, 2] * pz + m[1, 3]
     z = m[2, 0] * px + m[2, 1] * py + m[2, 2] * pz + m[2, 3]
@@ -265,7 +234,6 @@ def transform_vector(m, vx, vy, vz):
 
 @cuda.jit(device=True)
 def transform_rotation(m, qx, qy, qz, qw, flip_normal, flip_tangent):
-    # mirrors math.transform_rotations(rot, matrix, flip): rotate normal/tangent, flip, look_rotation
     nx, ny, nz = quat_to_normal(qx, qy, qz, qw)
     tx, ty, tz = quat_to_tangent(qx, qy, qz, qw)
     nx, ny, nz = transform_vector(m, nx, ny, nz)
@@ -281,9 +249,7 @@ def transform_rotation(m, qx, qy, qz, qw, flip_normal, flip_tangent):
 
 @cuda.jit(device=True)
 def _alt_axis_anti(v1x, v1y, v1z):
-    # anti-parallel alternate axis, mirrors math.from_to_rotation
     if v1x > v1y and v1x > v1z:
-        # alt_up = cross-ish (0,0,1)-based branch: (-v1z, 0, v1x)
         return (-v1z, float32(0.0), v1x)
     return (float32(0.0), v1z, -v1y)
 
@@ -329,7 +295,6 @@ def from_to_rotation(fx, fy, fz, tx, ty, tz, t, pre_normalized):
 
 @cuda.jit(device=True)
 def clamp_angle_vector(dx, dy, dz, bx, by, bz, max_angle):
-    # returns (ox, oy, oz, need)
     v1x, v1y, v1z = normalize3(dx, dy, dz)
     v2x, v2y, v2z = normalize3(bx, by, bz)
     c = clamp1(v1x * v2x + v1y * v2y + v1z * v2z)
@@ -396,10 +361,6 @@ def triangle_normal(p0x, p0y, p0z, p1x, p1y, p1z, p2x, p2y, p2z):
     return normalize3_fb(cx, cy, cz, float32(0.0), float32(1.0), float32(0.0))
 
 
-# ---------------------------------------------------------------------------
-# clamp / project helpers
-# ---------------------------------------------------------------------------
-
 @cuda.jit(device=True)
 def clamp_vector(vx, vy, vz, max_length):
     l = length3(vx, vy, vz)
@@ -442,7 +403,6 @@ def angle_between(v1x, v1y, v1z, v2x, v2y, v2z):
 
 @cuda.jit(device=True)
 def intersect_point_plane_dist(px, py, pz, dx, dy, dz, qx, qy, qz):
-    # plane_pos p, plane_dir d, pos q -> (dist, ox, oy, oz)
     vx = qx - px
     vy = qy - py
     vz = qz - pz
@@ -473,12 +433,6 @@ def closest_pt_point_segment_ratio(cx, cy, cz, ax, ay, az, bx, by, bz):
 @cuda.jit(device=True)
 def closest_pt_segment_segment(p1x, p1y, p1z, q1x, q1y, q1z,
                                p2x, p2y, p2z, q2x, q2y, q2z):
-    # G3a: parallel/collinear segments give denom = a*e - b*b ~ 0 (catastrophic cancellation), so `s`
-    # saturates to 0 or 1 on a sign that flips if the dot products round even 1 ULP differently. numpy
-    # (the oracle) never contracts a*b into an FMA; NVVM does by default, which flips that sign and
-    # diverges s/t by ~1.0. Force IEEE round-to-nearest multiplies (fmul_rn, no contraction) so a/e/b/
-    # f/c/denom/numerator are bit-identical to numpy -> s/t match. (Non-degenerate cases are unchanged
-    # to ~1 ULP.) The closest points themselves (c1/c2) stay invariant under the parallel s/t ambiguity.
     fm = libdevice.fmul_rn
     d1x = q1x - p1x
     d1y = q1y - p1y
@@ -537,10 +491,6 @@ def closest_pt_segment_segment(p1x, p1y, p1z, q1x, q1y, q1z,
     return (s, t, c1x, c1y, c1z, c2x, c2y, c2z)
 
 
-# ---------------------------------------------------------------------------
-# classic perlin noise (cnoise2) - matches math.cnoise2
-# ---------------------------------------------------------------------------
-
 @cuda.jit(device=True)
 def _mod289(x):
     return x - libdevice.floorf(x * (float32(1.0) / float32(289.0))) * float32(289.0)
@@ -589,10 +539,6 @@ def cnoise2(px, py):
     return float32(2.3) * nxy
 
 
-# ---------------------------------------------------------------------------
-# mass / LUT
-# ---------------------------------------------------------------------------
-
 DEPTH_MASS = float32(5.0)
 FRICTION_MASS = float32(3.0)
 
@@ -619,7 +565,6 @@ def calc_inverse_mass_fixed(friction, depth, fixed_mask, fix_mass):
 
 @cuda.jit(device=True)
 def evaluate_lut(lut, base, time):
-    # lut is a flat device array; row starts at `base`, 16 samples
     t = saturate(time)
     f = t * float32(15.0)
     index = int32(f)
@@ -639,7 +584,6 @@ def evaluate_lut_clamp01(lut, base, time):
 
 @cuda.jit(device=True)
 def evaluate_team_lut(luts, team, time):
-    # luts is a (num_teams, 16) device array; mirrors math.evaluate_team_lut
     t = saturate(time)
     f = t * float32(15.0)
     index = int32(f)
@@ -657,16 +601,8 @@ def evaluate_team_lut_clamp01(luts, team, time):
     return saturate(evaluate_team_lut(luts, team, time))
 
 
-# ---------------------------------------------------------------------------
-# f64 TRS matrix helpers (authorised per-team f64 path; mirror math.trs and the
-# oracle's np.linalg.inv of a full-rank TRS via the analytic component inverse
-# M = T*R*S -> M^-1 = S^-1 * R^T * T^-1). Callers pass cuda.local.array((4,4), f64).
-# ---------------------------------------------------------------------------
-
 @cuda.jit(device=True)
 def quat_to_matrix3_f32(x, y, z, w):
-    # mirrors math.quat_to_matrix3 (row-major 3x3), f32 throughout so the f32->f64
-    # promotion point matches the oracle (quat_to_matrix3(quat).astype(np.float64)).
     xx = x * x
     yy = y * y
     zz = z * z
@@ -690,7 +626,6 @@ def quat_to_matrix3_f32(x, y, z, w):
 
 @cuda.jit(device=True)
 def trs_build_f64(out, px, py, pz, qx, qy, qz, qw, sx, sy, sz):
-    # r = quat_to_matrix3(quat).astype(f64) * scale[..., None, :]; m[:3,3] = position
     m00, m01, m02, m10, m11, m12, m20, m21, m22 = quat_to_matrix3_f32(qx, qy, qz, qw)
     s0 = float64(sx)
     s1 = float64(sy)
@@ -715,7 +650,6 @@ def trs_build_f64(out, px, py, pz, qx, qy, qz, qw, sx, sy, sz):
 
 @cuda.jit(device=True)
 def trs_inverse_f64(out, px, py, pz, qx, qy, qz, qw, sx, sy, sz):
-    # analytic inverse: M^-1[:3,:3] = diag(1/s) @ R^T ; M^-1[:3,3] = -diag(1/s) @ R^T @ t
     m00, m01, m02, m10, m11, m12, m20, m21, m22 = quat_to_matrix3_f32(qx, qy, qz, qw)
     inv0 = float64(1.0) / float64(sx)
     inv1 = float64(1.0) / float64(sy)
@@ -760,12 +694,6 @@ def mat4_mul_f64(out, a, b):
             out[i, j] = acc
 
 
-# ---------------------------------------------------------------------------
-# self-collision geometry (G3a). All f32 (the coordinator authorises f64 only for the
-# distance / collider gathers and per-team matrix paths; self-collision geometry is strict
-# f32). closest_pt_segment_segment / triangle_normal already exist above and are reused.
-# ---------------------------------------------------------------------------
-
 SELF_COLLISION_FIXED_MASS = float32(100.0)
 SELF_COLLISION_FRICTION_MASS = float32(10.0)
 SELF_COLLISION_CLOTH_MASS = float32(50.0)
@@ -773,7 +701,6 @@ SELF_COLLISION_CLOTH_MASS = float32(50.0)
 
 @cuda.jit(device=True)
 def calc_self_collision_inverse_mass(friction, fixed_mask, cloth_mass):
-    # mirrors math.calc_self_collision_inverse_mass
     if fixed_mask:
         mass = SELF_COLLISION_FIXED_MASS
     else:
@@ -784,9 +711,6 @@ def calc_self_collision_inverse_mass(friction, fixed_mask, cloth_mass):
 
 @cuda.jit(device=True)
 def closest_pt_point_triangle(px, py, pz, ax, ay, az, bx, by, bz, cx, cy, cz):
-    # mirrors math.closest_pt_point_triangle: returns (cpx, cpy, cpz, u, v, w). The oracle's
-    # priority-ordered np.where chain becomes an if/elif ladder (in_a > in_b > in_ab > in_c >
-    # in_ac > in_bc > in_face); every denom guard is where(|d|>0, d, 1) verbatim.
     abx = bx - ax
     aby = by - ay
     abz = bz - az

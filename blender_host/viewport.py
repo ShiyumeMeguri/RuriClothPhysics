@@ -1,15 +1,3 @@
-"""Viewport kernel: the record types and the layer registry.
-
-The kernel knows nothing about colliders, bones or particles. A layer is one registered data row
-that answers three questions -- should I draw, what lines/points, what draggable handles -- and both
-the GPU pass and the gizmo group iterate the registry. Adding a visualisation is a new layer file
-plus one register_layer call; nothing here changes.
-
-That is the whole point of the split: the previous design hard-coded colliders and particles inside
-the draw callback and had a second, entirely separate hand-written gizmo group that knew only about
-colliders, so a third thing to show meant editing both and a draggable bone was not expressible.
-"""
-
 import numpy as np
 
 ARROW = 'ARROW'
@@ -21,19 +9,11 @@ _layers = []
 
 
 def rgba(color):
-    """Accept RGB or RGBA and always return RGBA.
-
-    Gizmo colours are RGB while the shader wants RGBA, and a bare `colors[:] = color` turns that
-    mismatch into a ValueError inside the draw handler -- which does not just drop one shape, it
-    aborts the whole pass and blanks every overlay for that frame. Normalising here means no caller
-    can reintroduce it.
-    """
     values = tuple(color)
     return values if len(values) == 4 else (values[0], values[1], values[2], 1.0)
 
 
 class Canvas:
-    """Accumulates wireframe for one frame, split by whether it is depth tested."""
 
     def __init__(self):
         self._buckets = {False: ([], [], [], []), True: ([], [], [], [])}
@@ -83,12 +63,6 @@ class Canvas:
 
 
 class Handle:
-    """One viewport control, expressed as data.
-
-    `matrix` is a 4x4 whose +Z is the drag axis for ARROW. A value handle carries `read`/`write`
-    callables over the underlying property; a PICK carries an operator to run instead, so the kernel
-    never learns what is being edited or selected.
-    """
 
     __slots__ = ("identifier", "kind", "matrix", "scale", "color", "read", "write", "minimum",
                  "operator", "properties")
@@ -119,7 +93,6 @@ class Layer:
 
 
 def axis_frame(origin, direction):
-    """4x4 at `origin` whose +Z is `direction`. ARROW handles slide along their own +Z."""
     import mathutils
     forward = mathutils.Vector(direction).normalized()
     reference = mathutils.Vector((0.0, 0.0, 1.0))
@@ -135,12 +108,6 @@ def axis_frame(origin, direction):
 
 
 def tag_redraw():
-    """Ask every 3D view to redraw.
-
-    Editing an add-on PropertyGroup tags nothing on its own, so the viewport keeps showing the old
-    wireframe until something unrelated forces a redraw -- which is why re-binding a collider's bone
-    only appeared to take effect after toggling the collider display off and on again.
-    """
     import bpy
     manager = bpy.context.window_manager
     if manager is None:

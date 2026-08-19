@@ -12,18 +12,9 @@ from . import curve_host
 from ..cloth_kernel import compile as kernel_compile
 from ..cloth_kernel import defs
 from ..cloth_kernel import io as kernel_io
-# G4 production wiring: drive the GPU backend (cloth_engine_gpu) through the same
-# run_frame(world, frame_globals) boundary the oracle used. The GPU engine package was
-# authored against the bare-python harness contract, where the repo root is on sys.path and
-# `cloth_kernel` is importable top-level (`from cloth_kernel import io`). Under Blender the
-# add-on loads as the `RuriClothPhysics` package, so `cloth_kernel` is NOT top-level and those
-# absolute imports raise ModuleNotFoundError. Alias the already-loaded oracle package to the
-# top-level name the engine expects (single module identity -- io/defs stay the same objects
-# runtime uses; no fallback, no duplicate state). Engine and oracle code are untouched.
 import sys as _sys
 from .. import cloth_kernel as _cloth_kernel_pkg
 _sys.modules.setdefault("cloth_kernel", _cloth_kernel_pkg)
-from ..cloth_engine_gpu import pipeline
 from ..cloth_kernel import world as kernel_world
 
 _world = kernel_world.World()
@@ -31,6 +22,33 @@ _registry = {}
 _batch_registry = {}
 _last_frame = None
 _last_display = None
+
+DEFAULT_BACKEND = 'GPU'
+_backends = {}
+
+
+def _backend_module(name):
+    backend = _backends.get(name)
+    if backend is not None:
+        return backend
+    if name == 'CPU':
+        from ..cloth_engine_cpu import pipeline as backend
+    else:
+        from ..cloth_engine_gpu import pipeline as backend
+    _backends[name] = backend
+    return backend
+
+
+def scene_backend(scene):
+    settings = getattr(scene, "ruri_cloth_physics", None)
+    if settings is None:
+        return DEFAULT_BACKEND
+    return getattr(settings, "backend", DEFAULT_BACKEND)
+
+
+def notify_backend_changed():
+    for backend in _backends.values():
+        backend.release(_world)
 
 NORMAL_AXIS_VECTORS = {
     'RIGHT': (1.0, 0.0, 0.0),
@@ -341,13 +359,6 @@ def ensure_entry(obj, config_index, config):
         entry = RuntimeEntry()
         _registry[key] = entry
 
-    # Signature fast path: skip the rebuild and the collider/params reconciliation while every config
-    # input is byte-identical to last frame. The signature is DERIVED from the tokens themselves, never
-    # from a hand-maintained revision counter standing in for them. The depth-modulation curves live in a
-    # standalone fake-user node tree that the depsgraph never evaluates -- it is not among depsgraph.ids
-    # and editing a control point raises zero depsgraph updates -- so no handler can observe that edit and
-    # any counter gated on one freezes the curve out permanently (measured on this rig: the oracle applies
-    # the edit on the next frame, a revision-gated signature never applies it at all).
     settings = obj.ruri_cloth_physics
     topology_token = _topology_token(config)
     params_token = _params_token(obj, config)
@@ -545,12 +556,6 @@ def _active_armatures(scene):
 
 
 def _ensure_batch(obj, entries):
-    # One BatchedKinematics per armature aggregates every active entry's kinematics so the per-frame
-    # gather / forward-kinematics / world / collider / write-back run as a single vectorized pass instead
-    # of a per-entry, per-bone Python loop. It is cached and rebuilt only when the active set or any
-    # entry's signature changes -- the same A2 signature_rev revision that gates ensure_entry (no separate
-    # invalidation mechanism). Inherits A2's boundary: an outliner bone rename mid-playback without a mode
-    # switch is a pathological case that is not defended.
     key = obj.session_uid
     token = tuple((id(entry), id(entry.setup), entry.signature_rev) for entry in entries)
     cached = _batch_registry.get(key)
@@ -561,13 +566,6 @@ def _ensure_batch(obj, entries):
 
 
 def sync_params(obj, config_index):
-    """Push a config's parameters into its live team right now.
-
-    Editing a parameter normally only reaches the solver on the next simulated frame, which is fine
-    while playing but leaves a viewport drag looking dead when paused: the base radius changes and
-    the drawn collision sphere keeps the old size until something steps a frame. Handles call this
-    so what you drag is what you see immediately.
-    """
     entry = _registry.get((obj.session_uid, config_index))
     if entry is None or entry.team is None or config_index >= len(obj.ruri_cloth_physics.configs):
         return False
@@ -674,7 +672,7 @@ def run_frame(scene, frame_delta_time):
 
     if frame_globals.zones is None:
         frame_globals.zones = []
-    pipeline.run_frame(_world, frame_globals)
+    _backend_module(scene_backend(scene)).run_frame(_world, frame_globals)
 
     global _last_display
     _last_display = collected
@@ -682,13 +680,6 @@ def run_frame(scene, frame_delta_time):
 
 
 def _emit_display(collected):
-    """Project the solver's current state onto matrix_basis. Pure output, no solver state touched.
-
-    Separating this from the solve is what lets the save guard put the viewport back after clearing
-    the channel for the file: it re-projects the state the solver already holds instead of stepping
-    a zero-length frame, which was measured to move the pose by 1.1e-5 rather than being the no-op
-    it looked like.
-    """
     index_in = 0
     while index_in < len(collected):
         batch = collected[index_in][3]
@@ -711,14 +702,6 @@ def _emit_display(collected):
         basis = batch.write_basis(batch._frame_matrix_world_inverse, batch._frame_all_matrix,
                                   out_positions, out_rotations, batch._frame_anim_world)
 
-        # Scatter every written bone's row-major basis into the pose.bones matrix_basis array and
-        # foreach_set once. matrix_basis storage is COLUMN-major (read_pose_matrices transposes it back to
-        # row-major), so the row-major basis must be TRANSPOSED before it lands in the storage slot. Without
-        # the transpose the bone is displayed with matrix_basis = basis^T -- a 3x3 transpose that drops the
-        # translation, a pure DISPLAY divergence up to ~1.0 on strongly-posed bones (skirt/sleeve/bow),
-        # measured 2026-08-18. This write is pure output: frame_change_pre clears the channel before
-        # Blender re-evaluates animation into it, so nothing here is ever read back as input.
-        # Read transposes, write transposes.
         pose_bones = obj.pose.bones
         count = len(pose_bones)
         flat = np.empty(count * 16, dtype=np.float64)
@@ -727,14 +710,6 @@ def _emit_display(collected):
         selected = np.flatnonzero(write_select & (batch.pose_index >= 0))
         stored[batch.pose_index[selected]] = basis[selected].transpose(0, 2, 1)
         pose_bones.foreach_set("matrix_basis", flat)
-        # foreach_set is a raw-array write: unlike the per-bone `pose_bone.matrix_basis = ...` assignment it
-        # replaces, it never runs the property's RNA update callback, so nothing tags the depsgraph. The
-        # solver then keeps stepping every frame while Blender re-evaluates the armature only when something
-        # ELSE dirties it -- during an interactive drag the object transform does that, so the cloth appears
-        # to work; the instant the drag stops the evaluated pose (and every mesh skinned to it) freezes on the
-        # last evaluated frame, which is exactly the settle-to-rest the oracle shows. The batched write owns
-        # the invalidation it suppressed: refresh={'DATA'} is ID_RECALC_GEOMETRY, the same flag rna_Pose_update
-        # raises for a matrix_basis assignment.
         obj.update_tag(refresh={'DATA'})
 
 
@@ -769,7 +744,6 @@ def _on_load_post(*args):
 
 
 def _solver_driven_bones(scene):
-    """Every bone the solver writes, per armature. This is the add-on's whole output surface."""
     for obj in scene.objects if scene is not None else ():
         if obj.type != 'ARMATURE':
             continue
@@ -787,35 +761,17 @@ def _solver_driven_bones(scene):
 
 @persistent
 def _on_frame_change_pre(scene, depsgraph=None):
-    # THE input contract. matrix_basis is where the solver writes its result, so it cannot also be
-    # where the solver reads its kinematic input -- that is a read-modify-write on a channel with no
-    # independent source, and it is what silently ate this rig: 233 solver-driven bones had drifted
-    # off their authored pose (worst 118 deg) while all 264 bones the solver never touches stayed
-    # exact, and every open/frame/save cycle baked another layer on top.
-    #
-    # Clearing the channel here, BEFORE Blender evaluates animation for the new frame, makes the
-    # input independent again: Blender refills exactly the channels the animation owns (per channel
-    # -- a bone keyed only on location comes back with its keyed location and a default rotation),
-    # and everything else is the channel default. No shadow copy, no capture heuristic, no
-    # animated/frozen bookkeeping, and no way for yesterday's output to become today's input.
     for obj, names in _solver_driven_bones(scene):
         armature.clear_pose_basis(obj, names)
 
 
 @persistent
 def _on_save_pre(*args):
-    # Same clear, for the same reason: the file must store the authored pose, not a frame of
-    # simulation. This is now cosmetic rather than load-bearing -- with the input re-derived every
-    # frame a stale value could no longer corrupt anything -- but a .blend whose stored pose means
-    # "what the artist posed" is worth keeping true.
     _on_frame_change_pre(bpy.context.scene)
 
 
 @persistent
 def _on_save_post(*args):
-    # Put the simulated pose back on screen by re-projecting the state the solver already holds.
-    # Not a zero-delta frame: that re-derives the inputs and was measured to shift the pose by
-    # 1.1e-5 instead of being the no-op it looks like. Re-projection is exact and touches nothing.
     if _last_display is None:
         return
     try:

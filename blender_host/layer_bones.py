@@ -1,9 +1,3 @@
-"""Bone layer: show which bones a config drives, roots in one colour and driven children in another.
-
-Reads the rest/pose hierarchy, not the solver, so it draws with the simulation switched off -- which
-is when you are actually building the chain.
-"""
-
 import numpy as np
 
 from . import chain
@@ -73,9 +67,6 @@ def collect(context, canvas):
                 canvas.points(head[None, :], np.array([color], dtype=np.float32),
                               depth_test=depth_test)
 
-        # Excluded bones are pruned out of the role map, so draw them from the override list. They
-        # are exactly the bones the user needs to see to trust that the boundary landed where they
-        # meant it to -- invisible exclusions are how you end up re-excluding the wrong branch.
         for index, config in enumerate(settings.configs):
             if scope is not None and index not in scope:
                 continue

@@ -1,11 +1,3 @@
-"""Bootstraps third-party packages this add-on needs but Blender does not ship.
-
-Blender's bundled Python only carries numpy; ``cloth_engine_gpu`` needs numba and its
-CUDA target (numba-cuda). Both are installed straight into Blender's own site-packages
-via pip -- the same interpreter that will import them next -- so a fresh Blender
-install with this add-on enabled works with no manual setup step.
-"""
-
 import importlib
 import pathlib
 import subprocess
@@ -16,12 +8,6 @@ _REQUIRED_MODULES = (
     ("numba_cuda", "numba-cuda"),
 )
 
-# numba's on-disk cache for cloth_engine_gpu.kernels.frame_kernel (cache=True) pickles
-# references into the numba/numba-cuda build that compiled it. A cache written by one
-# install is not guaranteed loadable by a different install of the same version numbers
-# (cloudpickle's module references shift with the underlying build), and a stale entry
-# fails hard (ModuleNotFoundError) instead of silently recompiling. Whenever this module
-# just installed the dependencies fresh, the cache predates that install and must go.
 _KERNEL_CACHE_DIR = pathlib.Path(__file__).resolve().parent / "cloth_engine_gpu" / "__pycache__"
 
 

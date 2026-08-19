@@ -1,15 +1,3 @@
-"""JSON save/load for the whole add-on state.
-
-The schema is DERIVED from the RNA declarations, never hand-listed. The previous preset system kept
-a literal list of ~70 property paths, which is the "remember to also edit this or it silently stops
-round-tripping" failure mode: it already missed root bones, attribute overrides, collider references
-and the entire collider pool, so a "preset" restored numbers onto a config that had no bones.
-
-Walking bl_rna means a new property is saved the day it is declared, and the file is human-readable
-and diffable. Bone links are written as NAMES, not the internal uids, so a preset carries across rigs
-that share a naming convention -- the uid only identifies a bone inside one .blend.
-"""
-
 import json
 import os
 
@@ -23,9 +11,6 @@ SCOPE_CONFIG = 'CONFIG'
 MODE_REPLACE = 'REPLACE'
 MODE_APPEND = 'APPEND'
 
-# Runtime bookkeeping, not settings: uids identify a bone inside one file, the serials are change
-# counters, node_name points at a curve node that is rebuilt from points_serialized, and the active_*
-# indices are cursor positions.
 SKIP_EXACT = frozenset({
     "rna_type", "node_name", "param_serial", "collider_serial", "rebuild_pending",
 })
@@ -92,8 +77,6 @@ def _write_value(owner, prop, value, report):
 
 def write_group(group, data, report):
     properties = {prop.identifier: prop for prop in group.bl_rna.properties}
-    # points_serialized needs its curve node, which only exists once use_curve has been switched on,
-    # so the flag has to land first. Everything else is order independent.
     ordered = [key for key in data if key != "points_serialized"]
     if "points_serialized" in data:
         ordered.append("points_serialized")
@@ -102,9 +85,6 @@ def write_group(group, data, report):
         if prop is None or _skip(key):
             report.setdefault("unknown_properties", []).append(key)
             continue
-        # A CollectionProperty and a PointerProperty to a sub-group both report is_readonly -- you
-        # cannot ASSIGN them, but they are exactly the ones we mutate in place. Only a plain value
-        # being read-only means "do not write".
         if prop.is_readonly and not (prop.type == 'COLLECTION'
                                      or (prop.type == 'POINTER' and not _is_id_pointer(prop))):
             continue
@@ -133,7 +113,6 @@ def _bone_names(settings):
 
 
 def deserialize(settings, payload, mode):
-    """Returns a report dict describing anything that did not land cleanly."""
     report = {}
     if payload.get("addon") != "RuriClothPhysics":
         report["error"] = "不是本插件的配置文件"
@@ -157,7 +136,6 @@ def deserialize(settings, payload, mode):
     else:
         data = dict(payload["settings"])
         if mode == MODE_APPEND:
-            # Keep what is already on the rig and stack the incoming configs and colliders after it.
             configs = data.pop("configs", [])
             colliders = data.pop("colliders", [])
             for entry in configs:
@@ -188,8 +166,6 @@ PRESET_FOLDER = "RuriClothPhysics"
 
 
 def preset_directory(create=False):
-    # Matches the add-on's own name and the neighbours in scripts/presets (AnimationRetarget,
-    # RuriFaceTable, RuriRipperImporter, RuriShaders) -- that folder is PascalCase, not snake_case.
     path = bpy.utils.user_resource('SCRIPTS', path="presets/" + PRESET_FOLDER, create=create)
     return path or os.path.join(os.path.dirname(__file__), "presets")
 

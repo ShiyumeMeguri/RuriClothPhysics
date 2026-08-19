@@ -1,5 +1,3 @@
-"""The only GPU code in the add-on: batch whatever the registered layers drew."""
-
 import bpy
 import gpu
 from gpu_extras.batch import batch_for_shader
@@ -7,9 +5,6 @@ from gpu_extras.batch import batch_for_shader
 from . import shapes
 from . import viewport
 
-# A ghost marks WHERE a handle is, not how big it is: sized straight off the glyph scale the end
-# radius marker came out as wide as the collider itself. Tie it loosely to the rig scale and bound
-# it hard at both ends.
 GHOST_FACTOR = 0.02
 GHOST_MINIMUM = 0.005
 GHOST_MAXIMUM = 0.02
@@ -18,13 +13,6 @@ _handle = None
 
 
 def _ghosts(context, canvas):
-    """Outline every handle while the animation plays.
-
-    Blender draws no gizmos at all during playback -- verified against Blender's OWN object
-    translate gizmo, which vanishes too -- so the handles cannot be shown, let alone grabbed, by
-    the gizmo system. This overlay pass does still run, so the handles at least stay visible and
-    keep their colours while playing, and become grabbable again the moment playback stops.
-    """
     for handle in viewport.collect_handles(context):
         origin = handle.matrix.translation
         radius = min(max(handle.scale * GHOST_FACTOR, GHOST_MINIMUM), GHOST_MAXIMUM)

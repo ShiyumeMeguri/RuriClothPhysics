@@ -1,10 +1,3 @@
-"""Wireframe geometry builders.
-
-Pure numpy in, numpy out: no bpy, no gpu, no knowledge of colliders or bones. Every builder returns
-(starts, ends) float32 arrays of matched length, which is the only vertex form the draw kernel
-consumes. Keeping this file free of Blender is what makes the shapes checkable without a viewport.
-"""
-
 import math
 
 import numpy as np
@@ -57,7 +50,6 @@ def sphere(center, radius, segments=24):
 
 
 def capsule(first, second, first_radius, second_radius, segments=24):
-    """Wire hull of the solver's swept segment: a ball at each end plus four tangent rails."""
     starts, ends = [], []
     for center, radius in ((first, first_radius), (second, second_radius)):
         a, b = sphere(center, radius, segments)
@@ -93,11 +85,6 @@ def cross(center, size=0.02):
 
 
 def octahedron(head, tail, width=None):
-    """Blender's own bone silhouette: a diamond one tenth along the head->tail axis.
-
-    Bones are drawn as their own shape rather than a bare segment so that a highlighted chain reads
-    at a glance against the armature underneath it, which a coincident line never can.
-    """
     head = np.asarray(head, dtype=np.float64)
     tail = np.asarray(tail, dtype=np.float64)
     axis = tail - head
@@ -117,7 +104,6 @@ def octahedron(head, tail, width=None):
 
 
 def spheres(centers, radii, segments=12):
-    """Many wire spheres at once. One canvas call for 236 particles instead of 236."""
     centers = np.asarray(centers, dtype=np.float32)
     radii = np.asarray(radii, dtype=np.float32)
     if centers.size == 0:
@@ -135,11 +121,6 @@ def spheres(centers, radii, segments=12):
 
 
 def swept_rails(first, second, first_radius, second_radius):
-    """The four tangent rails of a swept sphere pair, batched.
-
-    Together with a sphere at each end this outlines the volume an edge sweeps, which is what the
-    solver tests against colliders in EDGE mode.
-    """
     first = np.asarray(first, dtype=np.float64)
     second = np.asarray(second, dtype=np.float64)
     if first.size == 0:
