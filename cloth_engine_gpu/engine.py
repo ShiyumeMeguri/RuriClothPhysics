@@ -1,3 +1,4 @@
+import cuda.core as cuda_core
 import numpy as np
 from numba import cuda, int32
 
@@ -5,8 +6,51 @@ from cloth_kernel import defs as _defs
 
 from . import device
 from . import kernels
+from . import phases
 from . import staging
 from .program import build_program
+
+
+def _phase_tree(entries, depth):
+    out = []
+    i = 0
+    while i < len(entries):
+        name, ctx = entries[i]
+        if len(ctx) == depth:
+            out.append((None, name, None))
+            i += 1
+            continue
+        head = ctx[depth]
+        j = i
+        while (j < len(entries) and len(entries[j][1]) > depth
+               and entries[j][1][depth] == head):
+            j += 1
+        out.append((head, None, _phase_tree(entries[i:j], depth + 1)))
+        i = j
+    return out
+
+
+PHASE_TREE = _phase_tree([(n, c) for n, c, _ in phases.PHASE_TABLE], 0)
+
+
+def _flatten_plan(tree, k, sit, sub_end, has_ct, has_it, out):
+    for head, name, sub in tree:
+        if name is not None:
+            out.append((getattr(phases, name), k, sit))
+            continue
+        kind, expr = head
+        if kind == "loop":
+            span = range(sub_end) if expr == "_k" else range(kernels.SELF_COLLISION_SOLVER_ITERATION)
+            for value in span:
+                nk = value if expr == "_k" else k
+                ns = value if expr == "_sit" else sit
+                _flatten_plan(sub, nk, ns, sub_end, has_ct, has_it, out)
+            continue
+        taken = {"total_it > 0": has_it, "total_ct > 0": has_ct, "_k == 0": k == 0}[expr]
+        if kind == "else":
+            taken = not taken
+        if taken:
+            _flatten_plan(sub, k, sit, sub_end, has_ct, has_it, out)
 
 _MAX_COOP_BLOCKS = 544
 _THREADS = 128
@@ -89,6 +133,7 @@ class GpuEngine:
         self._self_upload_shadow = None
         self._self_upload_totals = (0, 0)
         self._coop_max_blocks = None
+        self._plan_cache = {}
         self.load(world)
 
     @staticmethod
@@ -258,7 +303,11 @@ class GpuEngine:
         self._zone_shadow = None
         self.config_staging._repack_in(world.team)
         self._config_shadow = self.config_staging._host.tobytes()
-        self.stream = cuda.stream()
+        self.device = cuda_core.Device()
+        self.device.set_current()
+        self.stream = self.device.create_stream()
+        self._graph = None
+        self._graph_key = None
         self._scal_f_host = cuda.pinned_array(kernels.SCAL_F_LEN, dtype=np.float32)
         self._scal_i_host = cuda.pinned_array(kernels.SCAL_I_LEN, dtype=np.int32)
         self._scal_f_host[:] = 0
@@ -339,8 +388,8 @@ class GpuEngine:
     def _cooperative_max_blocks(self):
         if self._coop_max_blocks is None:
             try:
-                sig = kernels.frame_kernel.signatures[0]
-                defn = kernels.frame_kernel.overloads[sig]
+                sig = phases.phase_37.signatures[0]
+                defn = phases.phase_37.overloads[sig]
                 cap = int(defn.max_cooperative_grid_blocks(_THREADS))
                 self._coop_max_blocks = max(1, min(cap, _MAX_COOP_BLOCKS))
             except Exception:
@@ -398,15 +447,41 @@ class GpuEngine:
         self.scal_f.copy_to_device(f, stream=stream)
         self.scal_i.copy_to_device(i, stream=stream)
 
+    def _plan(self, sub_end):
+        total_ct, total_it = self._self_upload_totals
+        key = (sub_end, total_ct > 0, total_it > 0)
+        plan = self._plan_cache.get(key)
+        if plan is None:
+            plan = []
+            _flatten_plan(PHASE_TREE, 0, 0, key[0], key[1], key[2], plan)
+            self._plan_cache[key] = plan
+        return plan
+
+    def _phase_args(self):
+        return ([self.scal_f, self.scal_i]
+                + [self.blobs[group] for group in kernels.RESIDENT_BLOB_GROUPS]
+                + [self.offs, self.lens]
+                + [self.zone_blobs[group] for group in kernels.ZONE_BLOB_GROUPS]
+                + [self.zone_offs, self.zone_lens])
+
+    def _ensure_graph(self, sub_end, blocks):
+        total_ct, total_it = self._self_upload_totals
+        key = (sub_end, total_ct > 0, total_it > 0, blocks)
+        if self._graph is not None and self._graph_key == key:
+            return self._graph
+        builder = self.device.create_graph_builder()
+        builder.begin_building()
+        args = self._phase_args()
+        for kernel, k, sit in self._plan(sub_end):
+            kernel[blocks, _THREADS, builder](*args, int32(k), int32(sit))
+        builder.end_building()
+        self._graph = builder.complete()
+        self._graph_key = key
+        return self._graph
+
     def launch(self, sub_end, frame_globals, stream=0):
         self._upload_scalars(sub_end, frame_globals, stream)
-        blocks = self._blocks()
-        kernels.frame_kernel[blocks, _THREADS, stream](
-            self.scal_f, self.scal_i,
-            *[self.blobs[group] for group in kernels.RESIDENT_BLOB_GROUPS],
-            self.offs, self.lens,
-            *[self.zone_blobs[group] for group in kernels.ZONE_BLOB_GROUPS],
-            self.zone_offs, self.zone_lens)
+        self._ensure_graph(sub_end, self._blocks()).launch(stream)
 
     @staticmethod
     def _sub_end(frame_globals):
@@ -432,7 +507,7 @@ class GpuEngine:
         pblocks, pthreads = self._particle_bridge_grid()
         self.particle_out_staging.download_issue(self.particles, pblocks, pthreads, stream)
         self.feedback_staging.download_issue(self.team, tblocks, tthreads, stream)
-        stream.synchronize()
+        stream.sync()
         self.particle_out_staging.download_finish(world.particles.arrays)
         self.feedback_staging.download_finish(world.team)
 
