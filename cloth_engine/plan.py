@@ -5,6 +5,13 @@ import warp as wp
 from . import state as _state
 
 
+LAUNCH_BLOCK_DIMENSION = 256
+
+LEVEL_STRATEGY_SPLIT = "split"
+LEVEL_STRATEGY_BLOCK = "block"
+LEVEL_STRATEGIES = (LEVEL_STRATEGY_SPLIT, LEVEL_STRATEGY_BLOCK)
+
+
 def _normalize_dimension(dimension):
     if isinstance(dimension, int):
         return (int(dimension),)
@@ -48,6 +55,25 @@ class Plan:
             raise RuntimeError("plan is bound to a captured graph, call reset before recording")
         self.entries.append(LaunchEntry(kernel, _normalize_dimension(dimension), list(inputs)))
 
+    def record_level_pass(self, split_kernel, block_kernel, level_launches, block_launch,
+                          strategy):
+        if strategy == LEVEL_STRATEGY_SPLIT:
+            for dimension, inputs in level_launches:
+                self.record(split_kernel, dimension, inputs)
+            return
+        if strategy == LEVEL_STRATEGY_BLOCK:
+            dimension, inputs = block_launch
+            normalized = _normalize_dimension(dimension)
+            if normalized != (LAUNCH_BLOCK_DIMENSION,):
+                raise ValueError(
+                    "block level strategy requires a single block launch of exactly %d threads, "
+                    "kernel %r was given dimension %r"
+                    % (LAUNCH_BLOCK_DIMENSION, block_kernel.key, normalized))
+            self.record(block_kernel, normalized, inputs)
+            return
+        raise ValueError("unknown level strategy %r, expected one of %r"
+                         % (strategy, LEVEL_STRATEGIES))
+
     def node_count(self):
         return len(self.entries)
 
@@ -67,7 +93,7 @@ class Plan:
         with wp.ScopedCapture(device=_state.DEVICE) as capture:
             for entry in self.entries:
                 wp.launch(entry.kernel, dim=entry.dimension, inputs=entry.inputs,
-                          device=_state.DEVICE)
+                          device=_state.DEVICE, block_dim=LAUNCH_BLOCK_DIMENSION)
         self.graph = capture.graph
         self.captured_structure_key = requested_structure_key
         self.captured_state = state
