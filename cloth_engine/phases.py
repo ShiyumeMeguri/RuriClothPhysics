@@ -4,21 +4,29 @@ from ..cloth_kernel import defs as _defs
 from . import dmath
 from . import kernels
 from . import policy
+from .dmath import FRICTION_MASS
+from .kernels import ANGLE_LIMIT_ITERATION
+from .kernels import BENDING_FIXED_INVERSE_MASS
 from .kernels import DISTANCE_VELOCITY_ATTENUATION
 from .kernels import EPSILON
 from .kernels import FORCE_VELOCITY_ADD
 from .kernels import FORCE_VELOCITY_ADD_WITHOUT_DEPTH
 from .kernels import FORCE_VELOCITY_CHANGE
 from .kernels import FORCE_VELOCITY_CHANGE_WITHOUT_DEPTH
+from .kernels import ONE_SIXTH
 from .kernels import RAD2DEG
 from .kernels import SCAL_FRAME_DT
 from .kernels import SCAL_MAX_SIM
 from .kernels import SCAL_N_ZONES
 from .kernels import SCAL_POWER1
 from .kernels import SCAL_POWER2
+from .kernels import SCAL_POWER3
 from .kernels import SCAL_SIM_DT
 from .kernels import SCAL_TIME_SCALE
 from .kernels import TELEPORT_RESET
+from .kernels import TO_FIXED
+from .kernels import VOLUME_SCALE
+from .kernels import VOLUME_SIGN
 from .kernels import WIND_MAX_TIME
 from .kernels import WIND_MIN_SPEED
 from .kernels import WIND_ZONE_MIN_MAIN
@@ -1957,35 +1965,334 @@ def phase_19_buffered(k: int,
             p_albuf_restore[v, 2] = bvz
 
 
-PHASE_LAUNCH_ONCE = "once"
-PHASE_LAUNCH_PER_LEVEL = "per_level"
+@wp.kernel
+def phase_20(iteration: int,
+             level: int,
+             k: int,
+             angle_pass_offsets: wp.array(dtype=int),
+             angle_pass_parents: wp.array(dtype=int),
+             angle_pass_vertices: wp.array(dtype=int),
+             p_albuf_length: wp.array(dtype=float),
+             p_albuf_local_pos: wp.array2d(dtype=float),
+             p_albuf_local_rot: wp.array2d(dtype=float),
+             p_albuf_restore: wp.array2d(dtype=float),
+             p_albuf_rotation: wp.array2d(dtype=float),
+             p_attr_move: wp.array(dtype=int),
+             p_depth: wp.array(dtype=float),
+             p_friction: wp.array(dtype=float),
+             p_next_positions: wp.array2d(dtype=float),
+             p_team: wp.array(dtype=int),
+             p_velocity_positions: wp.array2d(dtype=float),
+             scal_f: wp.array(dtype=float),
+             t_angle_limit_lut: wp.array2d(dtype=float),
+             t_angle_limit_stiffness: wp.array(dtype=float),
+             t_angle_restoration_attenuation: wp.array(dtype=float),
+             t_angle_restoration_gravity_falloff: wp.array(dtype=float),
+             t_angle_restoration_lut: wp.array2d(dtype=float),
+             t_angle_use_limit: wp.array(dtype=int),
+             t_angle_use_restoration: wp.array(dtype=int),
+             t_cws: wp.array2d(dtype=float),
+             t_enabled: wp.array(dtype=int),
+             t_gravity_dot: wp.array(dtype=float),
+             t_update_count: wp.array(dtype=int),
+             t_valid: wp.array(dtype=int)):
+    power3 = scal_f[SCAL_POWER3]
+    angle_rot_ratio = 0.1 + (0.5 - 0.1) * (float(iteration) / 2.0)
+    aps = angle_pass_offsets[level]
+    ape = angle_pass_offsets[level + 1]
+    e = aps + wp.tid()
+    if e < ape:
+        v = angle_pass_vertices[e]
+        p = angle_pass_parents[e]
+        vt = p_team[v]
+        if kernels.team_frame_mask(t_enabled, t_valid, t_cws, vt) and t_update_count[vt] > k:
+            ul = t_angle_use_limit[vt] != 0
+            ur = t_angle_use_restoration[vt] != 0
+            if ul or ur:
+                c_inv = 1.0 / (1.0 + p_friction[v] * FRICTION_MASS)
+                p_inv = 1.0 / (1.0 + p_friction[p] * FRICTION_MASS)
+                p_mv = p_attr_move[p] != 0
+                if ul:
+                    kernels.do_angle_limit(v, p, vt, c_inv, p_inv, p_mv,
+                                           p_next_positions, p_velocity_positions,
+                                           p_albuf_rotation, p_albuf_local_pos,
+                                           p_albuf_local_rot, p_albuf_length, p_depth,
+                                           t_angle_limit_lut, t_angle_limit_stiffness)
+                if ur:
+                    kernels.do_angle_restoration(v, p, vt, c_inv, p_inv, p_mv,
+                                                 angle_rot_ratio, power3,
+                                                 p_next_positions, p_velocity_positions,
+                                                 p_albuf_restore, p_depth,
+                                                 t_angle_restoration_lut,
+                                                 t_angle_restoration_attenuation,
+                                                 t_angle_restoration_gravity_falloff,
+                                                 t_gravity_dot)
 
-PHASE_LAUNCH_RULES = (PHASE_LAUNCH_ONCE, PHASE_LAUNCH_PER_LEVEL)
 
-LEVEL_SCALAR_NAME = "level"
+@wp.kernel
+def phase_21(p_team: wp.array(dtype=int),
+             sc_dcorr_fixed: wp.array2d(dtype=int),
+             sc_dcount: wp.array(dtype=int)):
+    p = wp.tid()
+    sc_dcorr_fixed[p, 0] = 0
+    sc_dcorr_fixed[p, 1] = 0
+    sc_dcorr_fixed[p, 2] = 0
+    sc_dcount[p] = 0
+
+
+@wp.kernel
+def phase_22(k: int,
+             p_attr_move: wp.array(dtype=int),
+             p_depth: wp.array(dtype=float),
+             p_friction: wp.array(dtype=float),
+             p_next_positions: wp.array2d(dtype=float),
+             sc_dcorr_fixed: wp.array2d(dtype=int),
+             sc_dcount: wp.array(dtype=int),
+             scal_f: wp.array(dtype=float),
+             st_bending_pair: wp.array2d(dtype=int),
+             st_bending_rest: wp.array(dtype=float),
+             st_bending_sign: wp.array(dtype=int),
+             st_bending_team: wp.array(dtype=int),
+             t_bending_stiffness: wp.array(dtype=float),
+             t_cws: wp.array2d(dtype=float),
+             t_enabled: wp.array(dtype=int),
+             t_negative_scale_sign: wp.array(dtype=float),
+             t_scale_ratio: wp.array(dtype=float),
+             t_update_count: wp.array(dtype=int),
+             t_valid: wp.array(dtype=int)):
+    power1 = scal_f[SCAL_POWER1]
+    e = wp.tid()
+    team = st_bending_team[e]
+    if kernels.team_frame_mask(t_enabled, t_valid, t_cws, team) and t_update_count[team] > k \
+            and t_bending_stiffness[team] >= 1.0e-6:
+        stiffness = dmath.saturate(t_bending_stiffness[team] * power1)
+        pp0 = st_bending_pair[e, 0]
+        pp1 = st_bending_pair[e, 1]
+        pp2 = st_bending_pair[e, 2]
+        pp3 = st_bending_pair[e, 3]
+        rest = st_bending_rest[e]
+        sgn = st_bending_sign[e]
+        a0x = p_next_positions[pp0, 0]
+        a0y = p_next_positions[pp0, 1]
+        a0z = p_next_positions[pp0, 2]
+        a1x = p_next_positions[pp1, 0]
+        a1y = p_next_positions[pp1, 1]
+        a1z = p_next_positions[pp1, 2]
+        a2x = p_next_positions[pp2, 0]
+        a2y = p_next_positions[pp2, 1]
+        a2z = p_next_positions[pp2, 2]
+        a3x = p_next_positions[pp3, 0]
+        a3y = p_next_positions[pp3, 1]
+        a3z = p_next_positions[pp3, 2]
+        if p_attr_move[pp0] == 0:
+            inv0 = BENDING_FIXED_INVERSE_MASS
+        else:
+            inv0 = dmath.calc_inverse_mass(p_friction[pp0], p_depth[pp0])
+        if p_attr_move[pp1] == 0:
+            inv1 = BENDING_FIXED_INVERSE_MASS
+        else:
+            inv1 = dmath.calc_inverse_mass(p_friction[pp1], p_depth[pp1])
+        if p_attr_move[pp2] == 0:
+            inv2 = BENDING_FIXED_INVERSE_MASS
+        else:
+            inv2 = dmath.calc_inverse_mass(p_friction[pp2], p_depth[pp2])
+        if p_attr_move[pp3] == 0:
+            inv3 = BENDING_FIXED_INVERSE_MASS
+        else:
+            inv3 = dmath.calc_inverse_mass(p_friction[pp3], p_depth[pp3])
+        scale_ratio = t_scale_ratio[team]
+        negative_sign = t_negative_scale_sign[team]
+        result = wp.bool(False)
+        a0dx = float(0.0)
+        a0dy = float(0.0)
+        a0dz = float(0.0)
+        a1dx = float(0.0)
+        a1dy = float(0.0)
+        a1dz = float(0.0)
+        a2dx = float(0.0)
+        a2dy = float(0.0)
+        a2dz = float(0.0)
+        a3dx = float(0.0)
+        a3dy = float(0.0)
+        a3dz = float(0.0)
+        if sgn == VOLUME_SIGN:
+            volume_rest = rest * scale_ratio * negative_sign
+            cx, cy, cz = dmath.cross3(a1x - a0x, a1y - a0y, a1z - a0z,
+                                      a2x - a0x, a2y - a0y, a2z - a0z)
+            volume = ONE_SIXTH * (cx * (a3x - a0x) + cy * (a3y - a0y)
+                                  + cz * (a3z - a0z)) * VOLUME_SCALE
+            g0x, g0y, g0z = dmath.cross3(a1x - a2x, a1y - a2y, a1z - a2z,
+                                         a3x - a2x, a3y - a2y, a3z - a2z)
+            g1x, g1y, g1z = dmath.cross3(a2x - a0x, a2y - a0y, a2z - a0z,
+                                         a3x - a0x, a3y - a0y, a3z - a0z)
+            g2x, g2y, g2z = dmath.cross3(a0x - a1x, a0y - a1y, a0z - a1z,
+                                         a3x - a1x, a3y - a1y, a3z - a1z)
+            g3x, g3y, g3z = dmath.cross3(a1x - a0x, a1y - a0y, a1z - a0z,
+                                         a2x - a0x, a2y - a0y, a2z - a0z)
+            lam = (inv0 * (g0x * g0x + g0y * g0y + g0z * g0z)
+                   + inv1 * (g1x * g1x + g1y * g1y + g1z * g1z)
+                   + inv2 * (g2x * g2x + g2y * g2y + g2z * g2z)
+                   + inv3 * (g3x * g3x + g3y * g3y + g3z * g3z))
+            lam = lam * VOLUME_SCALE
+            if wp.abs(lam) >= 1.0e-6:
+                lam = stiffness * (volume_rest - volume) / lam
+                a0dx = lam * inv0 * g0x
+                a0dy = lam * inv0 * g0y
+                a0dz = lam * inv0 * g0z
+                a1dx = lam * inv1 * g1x
+                a1dy = lam * inv1 * g1y
+                a1dz = lam * inv1 * g1z
+                a2dx = lam * inv2 * g2x
+                a2dy = lam * inv2 * g2y
+                a2dz = lam * inv2 * g2z
+                a3dx = lam * inv3 * g3x
+                a3dy = lam * inv3 * g3y
+                a3dz = lam * inv3 * g3z
+                result = True
+        else:
+            rest_angle = rest * float(sgn) * negative_sign
+            ex = a3x - a2x
+            ey = a3y - a2y
+            ez = a3z - a2z
+            elen = dmath.length3(ex, ey, ez)
+            ok = elen >= 1.0e-8
+            safe_elen = elen if elen > 1.0e-30 else 1.0
+            inv_elen = 1.0 / safe_elen
+            nn1x, nn1y, nn1z = dmath.cross3(a2x - a0x, a2y - a0y, a2z - a0z,
+                                            a3x - a0x, a3y - a0y, a3z - a0z)
+            nn2x, nn2y, nn2z = dmath.cross3(a3x - a1x, a3y - a1y, a3z - a1z,
+                                            a2x - a1x, a2y - a1y, a2z - a1z)
+            sq1 = nn1x * nn1x + nn1y * nn1y + nn1z * nn1z
+            sq2 = nn2x * nn2x + nn2y * nn2y + nn2z * nn2z
+            ok = ok and (sq1 != 0.0) and (sq2 != 0.0)
+            safe_sq1 = sq1 if sq1 > 1.0e-30 else 1.0
+            safe_sq2 = sq2 if sq2 > 1.0e-30 else 1.0
+            nn1x = nn1x / safe_sq1
+            nn1y = nn1y / safe_sq1
+            nn1z = nn1z / safe_sq1
+            nn2x = nn2x / safe_sq2
+            nn2y = nn2y / safe_sq2
+            nn2z = nn2z / safe_sq2
+            d0x = nn1x * elen
+            d0y = nn1y * elen
+            d0z = nn1z * elen
+            d1x = nn2x * elen
+            d1y = nn2y * elen
+            d1z = nn2z * elen
+            dot03 = (a0x - a3x) * ex + (a0y - a3y) * ey + (a0z - a3z) * ez
+            dot13 = (a1x - a3x) * ex + (a1y - a3y) * ey + (a1z - a3z) * ez
+            d2x = dot03 * inv_elen * nn1x + dot13 * inv_elen * nn2x
+            d2y = dot03 * inv_elen * nn1y + dot13 * inv_elen * nn2y
+            d2z = dot03 * inv_elen * nn1z + dot13 * inv_elen * nn2z
+            dot20 = (a2x - a0x) * ex + (a2y - a0y) * ey + (a2z - a0z) * ez
+            dot21 = (a2x - a1x) * ex + (a2y - a1y) * ey + (a2z - a1z) * ez
+            d3x = dot20 * inv_elen * nn1x + dot21 * inv_elen * nn2x
+            d3y = dot20 * inv_elen * nn1y + dot21 * inv_elen * nn2y
+            d3z = dot20 * inv_elen * nn1z + dot21 * inv_elen * nn2z
+            un1x, un1y, un1z = dmath.normalize3(nn1x, nn1y, nn1z)
+            un2x, un2y, un2z = dmath.normalize3(nn2x, nn2y, nn2z)
+            dotu = dmath.clamp1(un1x * un2x + un1y * un2y + un1z * un2z)
+            phi = wp.acos(dotu)
+            lam = (inv0 * (d0x * d0x + d0y * d0y + d0z * d0z)
+                   + inv1 * (d1x * d1x + d1y * d1y + d1z * d1z)
+                   + inv2 * (d2x * d2x + d2y * d2y + d2z * d2z)
+                   + inv3 * (d3x * d3x + d3y * d3y + d3z * d3z))
+            ok = ok and (lam != 0.0)
+            crx, cry, crz = dmath.cross3(un1x, un1y, un1z, un2x, un2y, un2z)
+            dir_sign = dmath.fsign(crx * ex + cry * ey + crz * ez)
+            phi = phi * dir_sign
+            if ok:
+                lam = (rest_angle - phi) / lam * stiffness
+                a0dx = dmath.negate(inv0) * lam * d0x
+                a0dy = dmath.negate(inv0) * lam * d0y
+                a0dz = dmath.negate(inv0) * lam * d0z
+                a1dx = dmath.negate(inv1) * lam * d1x
+                a1dy = dmath.negate(inv1) * lam * d1y
+                a1dz = dmath.negate(inv1) * lam * d1z
+                a2dx = dmath.negate(inv2) * lam * d2x
+                a2dy = dmath.negate(inv2) * lam * d2y
+                a2dz = dmath.negate(inv2) * lam * d2z
+                a3dx = dmath.negate(inv3) * lam * d3x
+                a3dy = dmath.negate(inv3) * lam * d3y
+                a3dz = dmath.negate(inv3) * lam * d3z
+                result = True
+        if result:
+            wp.atomic_add(sc_dcorr_fixed, pp0, 0, int(a0dx * TO_FIXED))
+            wp.atomic_add(sc_dcorr_fixed, pp0, 1, int(a0dy * TO_FIXED))
+            wp.atomic_add(sc_dcorr_fixed, pp0, 2, int(a0dz * TO_FIXED))
+            wp.atomic_add(sc_dcount, pp0, 1)
+            wp.atomic_add(sc_dcorr_fixed, pp1, 0, int(a1dx * TO_FIXED))
+            wp.atomic_add(sc_dcorr_fixed, pp1, 1, int(a1dy * TO_FIXED))
+            wp.atomic_add(sc_dcorr_fixed, pp1, 2, int(a1dz * TO_FIXED))
+            wp.atomic_add(sc_dcount, pp1, 1)
+            wp.atomic_add(sc_dcorr_fixed, pp2, 0, int(a2dx * TO_FIXED))
+            wp.atomic_add(sc_dcorr_fixed, pp2, 1, int(a2dy * TO_FIXED))
+            wp.atomic_add(sc_dcorr_fixed, pp2, 2, int(a2dz * TO_FIXED))
+            wp.atomic_add(sc_dcount, pp2, 1)
+            wp.atomic_add(sc_dcorr_fixed, pp3, 0, int(a3dx * TO_FIXED))
+            wp.atomic_add(sc_dcorr_fixed, pp3, 1, int(a3dy * TO_FIXED))
+            wp.atomic_add(sc_dcorr_fixed, pp3, 2, int(a3dz * TO_FIXED))
+            wp.atomic_add(sc_dcount, pp3, 1)
+
+
+@wp.kernel
+def phase_23(k: int,
+             p_attr_move: wp.array(dtype=int),
+             p_next_positions: wp.array2d(dtype=float),
+             p_team: wp.array(dtype=int),
+             sc_dcorr_fixed: wp.array2d(dtype=int),
+             sc_dcount: wp.array(dtype=int),
+             t_cws: wp.array2d(dtype=float),
+             t_enabled: wp.array(dtype=int),
+             t_update_count: wp.array(dtype=int),
+             t_valid: wp.array(dtype=int)):
+    p = wp.tid()
+    mt = p_team[p]
+    if kernels.team_frame_mask(t_enabled, t_valid, t_cws, mt) and t_update_count[mt] > k \
+            and p_attr_move[p] != 0 and sc_dcount[p] > 0:
+        inv_c = 1.0 / float(sc_dcount[p])
+        p_next_positions[p, 0] = (p_next_positions[p, 0]
+                                  + float(sc_dcorr_fixed[p, 0]) / TO_FIXED * inv_c)
+        p_next_positions[p, 1] = (p_next_positions[p, 1]
+                                  + float(sc_dcorr_fixed[p, 1]) / TO_FIXED * inv_c)
+        p_next_positions[p, 2] = (p_next_positions[p, 2]
+                                  + float(sc_dcorr_fixed[p, 2]) / TO_FIXED * inv_c)
+
+
+REPEAT_COUNT_FROM_OFFSET_PLANES = "offset_planes"
+REPEAT_COUNT_FROM_MODULE_CONSTANT = "module_constant"
+
+REPEAT_COUNT_RULES = (REPEAT_COUNT_FROM_OFFSET_PLANES, REPEAT_COUNT_FROM_MODULE_CONSTANT)
 
 PHASE_TABLE = (
-    ("phase_00", PHASE_LAUNCH_ONCE, ((phase_00_resolve_top, "t_enabled"),
-                                     (phase_00_snapshot, "t_enabled"),
-                                     (phase_00_apply, "t_enabled"))),
-    ("phase_01", PHASE_LAUNCH_ONCE, ((phase_01, "t_enabled"),)),
-    ("phase_02", PHASE_LAUNCH_ONCE, ((phase_02, "p_team"),)),
-    ("phase_03", PHASE_LAUNCH_ONCE, ((phase_03, "t_enabled"),)),
-    ("phase_03b", PHASE_LAUNCH_ONCE, ((phase_03b, "t_enabled"),)),
-    ("phase_04", PHASE_LAUNCH_ONCE, ((phase_04, "p_team"),)),
-    ("phase_05", PHASE_LAUNCH_ONCE, ((phase_05, "c_team"),)),
-    ("phase_10", PHASE_LAUNCH_ONCE, ((phase_10, "t_enabled"),)),
-    ("phase_11", PHASE_LAUNCH_ONCE, ((phase_11, "c_team"),)),
-    ("phase_12", PHASE_LAUNCH_ONCE, ((phase_12_animate, "p_team"),
-                                     (phase_12_force, "st_move_particle"))),
-    ("phase_13", PHASE_LAUNCH_ONCE, ((phase_13_fixed, "st_fixed_particle"),
-                                     (phase_13_spring, "st_spring_particle"))),
-    ("phase_14", PHASE_LAUNCH_PER_LEVEL, ((phase_14_yes, "fk_yes", "fk_yes_offsets"),
-                                          (phase_14_no, "fk_no", "fk_no_offsets"))),
-    ("phase_15", PHASE_LAUNCH_ONCE, ((phase_15, "baseline_entries"),)),
-    ("phase_16", PHASE_LAUNCH_ONCE, ((phase_16, "st_tether_particle"),)),
-    ("phase_17", PHASE_LAUNCH_ONCE, ((phase_17, "p_team"),)),
-    ("phase_18", PHASE_LAUNCH_ONCE, ((phase_18, "p_team"),)),
-    ("phase_19", PHASE_LAUNCH_ONCE, ((phase_19_baseline, "baseline_entries"),
-                                     (phase_19_buffered, "st_angle_buffered_particle"))),
+    ("phase_00", (), ((phase_00_resolve_top, "t_enabled"),
+                      (phase_00_snapshot, "t_enabled"),
+                      (phase_00_apply, "t_enabled"))),
+    ("phase_01", (), ((phase_01, "t_enabled"),)),
+    ("phase_02", (), ((phase_02, "p_team"),)),
+    ("phase_03", (), ((phase_03, "t_enabled"),)),
+    ("phase_03b", (), ((phase_03b, "t_enabled"),)),
+    ("phase_04", (), ((phase_04, "p_team"),)),
+    ("phase_05", (), ((phase_05, "c_team"),)),
+    ("phase_10", (), ((phase_10, "t_enabled"),)),
+    ("phase_11", (), ((phase_11, "c_team"),)),
+    ("phase_12", (), ((phase_12_animate, "p_team"),
+                      (phase_12_force, "st_move_particle"))),
+    ("phase_13", (), ((phase_13_fixed, "st_fixed_particle"),
+                      (phase_13_spring, "st_spring_particle"))),
+    ("phase_14", (("level", REPEAT_COUNT_FROM_OFFSET_PLANES,
+                   ("fk_yes_offsets", "fk_no_offsets")),),
+     ((phase_14_yes, "fk_yes"), (phase_14_no, "fk_no"))),
+    ("phase_15", (), ((phase_15, "baseline_entries"),)),
+    ("phase_16", (), ((phase_16, "st_tether_particle"),)),
+    ("phase_17", (), ((phase_17, "p_team"),)),
+    ("phase_18", (), ((phase_18, "p_team"),)),
+    ("phase_19", (), ((phase_19_baseline, "baseline_entries"),
+                      (phase_19_buffered, "st_angle_buffered_particle"))),
+    ("phase_20", (("iteration", REPEAT_COUNT_FROM_MODULE_CONSTANT, ANGLE_LIMIT_ITERATION),
+                  ("level", REPEAT_COUNT_FROM_OFFSET_PLANES, ("angle_pass_offsets",))),
+     ((phase_20, "angle_pass_vertices"),)),
+    ("phase_21", (), ((phase_21, "p_team"),)),
+    ("phase_22", (), ((phase_22, "st_bending_team"),)),
+    ("phase_23", (), ((phase_23, "p_team"),)),
 )

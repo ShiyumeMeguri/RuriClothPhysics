@@ -1,8 +1,13 @@
+import itertools
+
 from . import phases as _phases
 from . import plan as _plan
 from . import state as _state
 
 SLOT_BINDINGS = (
+    ("angle_pass_offsets", "derived", "angle_pass_offsets"),
+    ("angle_pass_parents", "derived", "angle_pass_parents"),
+    ("angle_pass_vertices", "derived", "angle_pass_vertices"),
     ("baseline_entries", "derived", "baseline_entries"),
     ("c_active", "collider", "active"),
     ("c_enabled", "collider", "enabled"),
@@ -80,10 +85,16 @@ SLOT_BINDINGS = (
     ("p_vertex_root", "particle", "vertex_root"),
     ("p_vertex_root_local", "particle", "vertex_root_local"),
     ("sc_dcorr", "derived", "distance_correction"),
+    ("sc_dcorr_fixed", "derived", "distance_correction_fixed"),
+    ("sc_dcount", "derived", "distance_count"),
     ("sc_sync", "derived", "synchronization_snapshot"),
     ("scal_f", "frame_scalar", "frame_float"),
     ("scal_i", "frame_scalar", "frame_int"),
     ("st_angle_buffered_particle", "angle_buffered", "particle"),
+    ("st_bending_pair", "bending", "pair"),
+    ("st_bending_rest", "bending", "rest"),
+    ("st_bending_sign", "bending", "sign"),
+    ("st_bending_team", "bending", "team"),
     ("st_center_fixed_particle", "center_fixed", "particle"),
     ("st_distance_rest", "distance", "rest"),
     ("st_distance_target", "distance", "target"),
@@ -99,10 +110,16 @@ SLOT_BINDINGS = (
     ("t_anchor_inertia", "team", "anchor_inertia"),
     ("t_anchor_position", "team", "anchor_position"),
     ("t_anchor_rotation", "team", "anchor_rotation"),
+    ("t_angle_limit_lut", "team", "angle_limit_lut"),
+    ("t_angle_limit_stiffness", "team", "angle_limit_stiffness"),
+    ("t_angle_restoration_attenuation", "team", "angle_restoration_attenuation"),
+    ("t_angle_restoration_gravity_falloff", "team", "angle_restoration_gravity_falloff"),
+    ("t_angle_restoration_lut", "team", "angle_restoration_lut"),
     ("t_angle_use_limit", "team", "angle_use_limit"),
     ("t_angle_use_restoration", "team", "angle_use_restoration"),
     ("t_angular_velocity", "team", "angular_velocity"),
     ("t_animation_pose_ratio", "team", "animation_pose_ratio"),
+    ("t_bending_stiffness", "team", "bending_stiffness"),
     ("t_blend_weight", "team", "blend_weight"),
     ("t_blend_weight_param", "team", "blend_weight_param"),
     ("t_component_world_position", "team", "component_world_position"),
@@ -236,7 +253,9 @@ SLOT_BINDINGS = (
 
 SCALAR_NAMES = ("k",)
 
-LAUNCH_SCALAR_NAMES = (_phases.LEVEL_SCALAR_NAME,)
+PASS_WIDTH = 2
+
+REPEAT_DIMENSION_WIDTH = 3
 
 
 def _validate_bindings():
@@ -263,12 +282,13 @@ _validate_bindings()
 SLOT_SOURCE = {slot_name: (storage_name, field_name)
                for slot_name, storage_name, field_name in SLOT_BINDINGS}
 
-PHASE_NAMES = tuple(phase_name for phase_name, _rule, _passes in _phases.PHASE_TABLE)
+PHASE_NAMES = tuple(phase_name for phase_name, _dimensions, _passes in _phases.PHASE_TABLE)
 
-PHASE_LAUNCH_RULE = {phase_name: rule
-                     for phase_name, rule, _passes in _phases.PHASE_TABLE}
+PHASE_REPEAT_DIMENSIONS = {phase_name: dimensions
+                           for phase_name, dimensions, _passes in _phases.PHASE_TABLE}
 
-PHASE_PASSES = {phase_name: passes for phase_name, _rule, passes in _phases.PHASE_TABLE}
+PHASE_PASSES = {phase_name: passes
+                for phase_name, _dimensions, passes in _phases.PHASE_TABLE}
 
 PHASE_KERNELS = {phase_name: tuple(row[0] for row in passes)
                  for phase_name, passes in PHASE_PASSES.items()}
@@ -276,11 +296,11 @@ PHASE_KERNELS = {phase_name: tuple(row[0] for row in passes)
 PHASE_LAUNCH_SLOTS = {phase_name: tuple(row[1] for row in passes)
                       for phase_name, passes in PHASE_PASSES.items()}
 
-PHASE_LEVEL_SLOTS = {phase_name: tuple(row[2] for row in passes)
-                     for phase_name, passes in PHASE_PASSES.items()
-                     if PHASE_LAUNCH_RULE[phase_name] == _phases.PHASE_LAUNCH_PER_LEVEL}
+PHASE_REPEAT_NAMES = {phase_name: tuple(dimension[0] for dimension in dimensions)
+                      for phase_name, dimensions in PHASE_REPEAT_DIMENSIONS.items()}
 
-PASS_WIDTH = {_phases.PHASE_LAUNCH_ONCE: 2, _phases.PHASE_LAUNCH_PER_LEVEL: 3}
+LAUNCH_SCALAR_NAMES = tuple(sorted({name for names in PHASE_REPEAT_NAMES.values()
+                                    for name in names}))
 
 
 def argument_names(kernel):
@@ -302,42 +322,88 @@ def _validate_pass_name(phase_name, kernel_key, pass_count):
         "row carries %s" % (phase_name, phase_name, kernel_key)
 
 
-def _validate_pass_slots(phase_name, rule, row, names):
-    for slot_name in row[1:]:
-        assert slot_name in SLOT_SOURCE, \
-            "phase %s launches a pass over %r which is not a bound slot" \
-            % (phase_name, slot_name)
-        assert slot_name in names, \
-            "phase %s launches a pass over %r but the kernel %s does not take that slot, a " \
-            "launch extent comes from an array the pass itself reads" \
-            % (phase_name, slot_name, row[0].key)
-    if rule == _phases.PHASE_LAUNCH_PER_LEVEL:
-        assert names[0] == _phases.LEVEL_SCALAR_NAME, \
-            "phase %s runs one launch per level so the kernel %s has to take %s as its first " \
-            "argument, it takes %s" \
-            % (phase_name, row[0].key, _phases.LEVEL_SCALAR_NAME, names[0])
+def _validate_repeat_dimension(phase_name, dimension, names, pass_count, seen_names):
+    assert len(dimension) == REPEAT_DIMENSION_WIDTH, \
+        "phase %s declares a repeat dimension as name, count rule and count source, got %r" \
+        % (phase_name, (dimension,))
+    dimension_name, count_rule, count_source = dimension
+    assert dimension_name not in seen_names, \
+        "phase %s declares the repeat dimension %s twice" % (phase_name, dimension_name)
+    seen_names.add(dimension_name)
+    assert dimension_name not in SLOT_SOURCE and dimension_name not in SCALAR_NAMES, \
+        "phase %s declares the repeat dimension %s which already names a bound slot or a " \
+        "call scalar" % (phase_name, dimension_name)
+    assert count_rule in _phases.REPEAT_COUNT_RULES, \
+        "phase %s declares the count rule %r for the repeat dimension %s, only %r are defined" \
+        % (phase_name, count_rule, dimension_name, _phases.REPEAT_COUNT_RULES)
+    if count_rule == _phases.REPEAT_COUNT_FROM_MODULE_CONSTANT:
+        assert isinstance(count_source, int) and not isinstance(count_source, bool) \
+            and count_source > 0, \
+            "phase %s counts the repeat dimension %s from a module constant so the count " \
+            "source is a positive integer, it declares %r" \
+            % (phase_name, dimension_name, count_source)
         return
-    assert _phases.LEVEL_SCALAR_NAME not in names, \
-        "phase %s runs one launch per pass so the kernel %s must not take %s" \
-        % (phase_name, row[0].key, _phases.LEVEL_SCALAR_NAME)
+    assert isinstance(count_source, tuple) and count_source, \
+        "phase %s counts the repeat dimension %s from offset planes so the count source is a " \
+        "non empty tuple of slot names, it declares %r" \
+        % (phase_name, dimension_name, count_source)
+    assert len(count_source) == pass_count, \
+        "phase %s runs %d passes and every pass opens its own window on its own offset plane, " \
+        "the repeat dimension %s names %d planes" \
+        % (phase_name, pass_count, dimension_name, len(count_source))
+    for slot_name in count_source:
+        assert slot_name in SLOT_SOURCE, \
+            "phase %s counts the repeat dimension %s from %r which is not a bound slot" \
+            % (phase_name, dimension_name, slot_name)
+        assert slot_name in names, \
+            "phase %s counts the repeat dimension %s from %r but its kernels do not take that " \
+            "slot, a repeat count comes from a plane the phase itself reads" \
+            % (phase_name, dimension_name, slot_name)
+
+
+def _validate_pass_slots(phase_name, row, names):
+    slot_name = row[1]
+    assert slot_name in SLOT_SOURCE, \
+        "phase %s launches a pass over %r which is not a bound slot" % (phase_name, slot_name)
+    assert slot_name in names, \
+        "phase %s launches a pass over %r but the kernel %s does not take that slot, a " \
+        "launch extent comes from an array the pass itself reads" \
+        % (phase_name, slot_name, row[0].key)
+
+
+def _validate_signature(phase_name, kernel, names, dimension_names):
+    leading = names[:len(dimension_names)]
+    assert leading == dimension_names, \
+        "phase %s repeats over %r so the kernel %s has to take those names as its first " \
+        "arguments in that order, it takes %r" \
+        % (phase_name, list(dimension_names), kernel.key, list(leading))
+    for name in names[len(dimension_names):]:
+        assert name not in LAUNCH_SCALAR_NAMES, \
+            "phase %s does not repeat over %s so the kernel %s must not take it" \
+            % (phase_name, name, kernel.key)
+        assert name in SLOT_SOURCE or name in SCALAR_NAMES, \
+            "phase %s takes the argument %s which is neither a bound slot nor a declared " \
+            "scalar" % (phase_name, name)
 
 
 def _validate_phase_table():
     seen = set()
     seen_kernels = set()
-    for phase_name, rule, passes in _phases.PHASE_TABLE:
+    for phase_name, dimensions, passes in _phases.PHASE_TABLE:
         assert phase_name not in seen, "phase %s is declared twice" % phase_name
         seen.add(phase_name)
-        assert rule in _phases.PHASE_LAUNCH_RULES, \
-            "phase %s declares the launch rule %r, only %r are defined" \
-            % (phase_name, rule, _phases.PHASE_LAUNCH_RULES)
         assert passes, \
             "phase %s declares no pass, a phase is at least one kernel launch" % phase_name
         signature = argument_names(passes[0][0])
+        dimension_names = PHASE_REPEAT_NAMES[phase_name]
+        seen_dimension_names = set()
+        for dimension in dimensions:
+            _validate_repeat_dimension(phase_name, dimension, signature, len(passes),
+                                       seen_dimension_names)
         for row in passes:
-            assert len(row) == PASS_WIDTH[rule], \
-                "phase %s runs under the launch rule %r so every pass row carries %d entries, " \
-                "the row carries %d" % (phase_name, rule, PASS_WIDTH[rule], len(row))
+            assert len(row) == PASS_WIDTH, \
+                "phase %s declares every pass row as kernel and launch slot, the row carries " \
+                "%d entries" % (phase_name, len(row))
             kernel = row[0]
             assert kernel.key not in seen_kernels, \
                 "the kernel %s appears in more than one phase pass" % kernel.key
@@ -348,12 +414,8 @@ def _validate_phase_table():
                 "phase %s pass %s takes %r while its first pass takes %r, every pass of a " \
                 "phase carries the signature of the reference phase" \
                 % (phase_name, kernel.key, list(names), list(signature))
-            for name in names:
-                assert (name in SLOT_SOURCE or name in SCALAR_NAMES
-                        or name in LAUNCH_SCALAR_NAMES), \
-                    "phase %s takes the argument %s which is neither a bound slot nor a " \
-                    "declared scalar" % (phase_name, name)
-            _validate_pass_slots(phase_name, rule, row, names)
+            _validate_signature(phase_name, kernel, names, dimension_names)
+            _validate_pass_slots(phase_name, row, names)
 
 
 _validate_phase_table()
@@ -364,31 +426,38 @@ def slot_extent(state, slot_name):
     return state.plane_element_count(storage_name, field_name)
 
 
-def phase_level_count(state, phase_name):
-    declared = set()
-    for _kernel, _entries_slot, offsets_slot in PHASE_PASSES[phase_name]:
-        declared.add(slot_extent(state, offsets_slot) - 1)
+def repeat_dimension_extent(state, phase_name, dimension):
+    dimension_name, count_rule, count_source = dimension
+    if count_rule == _phases.REPEAT_COUNT_FROM_MODULE_CONSTANT:
+        return int(count_source)
+    declared = {slot_extent(state, slot_name) - 1 for slot_name in count_source}
     assert len(declared) == 1, \
-        "phase %s runs its passes over the same levels so every offset plane holds the same " \
-        "number of levels, the state holds %r" % (phase_name, sorted(declared))
-    level_count = declared.pop()
-    assert level_count >= 0, \
-        "phase %s reads a level offset plane of %d elements, a level offset plane holds one " \
-        "element more than the number of levels" % (phase_name, level_count + 1)
-    return level_count
+        "phase %s repeats the dimension %s over every one of its offset planes so they all " \
+        "hold the same number of levels, the state holds %r" \
+        % (phase_name, dimension_name, sorted(declared))
+    extent = declared.pop()
+    assert extent >= 0, \
+        "phase %s reads an offset plane of %d elements for the dimension %s, an offset plane " \
+        "holds one element more than the number of levels" \
+        % (phase_name, extent + 1, dimension_name)
+    return extent
+
+
+def phase_repeat_extents(state, phase_name):
+    return tuple(repeat_dimension_extent(state, phase_name, dimension)
+                 for dimension in PHASE_REPEAT_DIMENSIONS[phase_name])
 
 
 def phase_launches(state, phase_name):
     passes = PHASE_PASSES[phase_name]
-    if PHASE_LAUNCH_RULE[phase_name] == _phases.PHASE_LAUNCH_ONCE:
-        return tuple((kernel, _plan.launch_dimension(slot_extent(state, slot_name)), {})
-                     for kernel, slot_name in passes)
+    dimension_names = PHASE_REPEAT_NAMES[phase_name]
+    extents = phase_repeat_extents(state, phase_name)
     launches = []
-    for level in range(phase_level_count(state, phase_name)):
-        for kernel, entries_slot, _offsets_slot in passes:
+    for indices in itertools.product(*(range(extent) for extent in extents)):
+        for kernel, slot_name in passes:
             launches.append((kernel,
-                             _plan.launch_dimension(slot_extent(state, entries_slot)),
-                             {_phases.LEVEL_SCALAR_NAME: level}))
+                             _plan.launch_dimension(slot_extent(state, slot_name)),
+                             dict(zip(dimension_names, indices))))
     return tuple(launches)
 
 
