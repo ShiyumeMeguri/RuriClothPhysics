@@ -23,7 +23,13 @@ DISTANCE_HORIZONTAL_STIFFNESS = wp.constant(float(_defs.DISTANCE_HORIZONTAL_STIF
 WIND_BASE_SPEED = wp.constant(float(_defs.WIND_BASE_SPEED))
 WIND_TURBULENCE_ANGLE = wp.constant(float(_defs.WIND_TURBULENCE_ANGLE))
 WIND_MIN_SPEED = wp.constant(float(_defs.WIND_MIN_SPEED))
+WIND_MAX_TIME = wp.constant(float(_defs.WIND_MAX_TIME))
+SELF_COLLISION_SCR = wp.constant(float(_defs.SELF_COLLISION_SCR))
+SELF_COLLISION_POINT_TRIANGLE_ANGLE_COS = wp.constant(
+    float(_defs.SELF_COLLISION_POINT_TRIANGLE_ANGLE_COS))
+SCL_USE_INTERSECT = wp.constant(int(4))
 DEG2RAD = wp.constant(float(math.pi / 180.0))
+RAD2DEG = wp.constant(float(180.0 / math.pi))
 ANGLE_LIMIT_ROT_RATIO = wp.constant(float(_defs.ANGLE_LIMIT_ROTATION_RATIO))
 ANGLE_LIMIT_ATTENUATION = wp.constant(float(_defs.ANGLE_LIMIT_ATTENUATION))
 COLLIDER_SPHERE = wp.constant(int(_defs.COLLIDER_SPHERE))
@@ -408,6 +414,245 @@ def do_distance_gather(p: int, p_team: wp.array(dtype=int),
         sc_dcorr[p, 0] = 0.0
         sc_dcorr[p, 1] = 0.0
         sc_dcorr[p, 2] = 0.0
+
+
+@wp.func
+def do_step_update(i: int, sim_dt: float,
+                   t_now_update: wp.array(dtype=float),
+                   t_time: wp.array(dtype=float),
+                   t_frame_old: wp.array(dtype=float),
+                   t_frame_interp: wp.array(dtype=float),
+                   t_now_wp: wp.array2d(dtype=float),
+                   t_now_wr: wp.array2d(dtype=float),
+                   t_old_wp: wp.array2d(dtype=float),
+                   t_old_wr: wp.array2d(dtype=float),
+                   t_ofwp: wp.array2d(dtype=float),
+                   t_ofwr: wp.array2d(dtype=float),
+                   t_ofws: wp.array2d(dtype=float),
+                   t_fwp: wp.array2d(dtype=float),
+                   t_fwr: wp.array2d(dtype=float),
+                   t_fws: wp.array2d(dtype=float),
+                   t_step_vector: wp.array2d(dtype=float),
+                   t_step_rotation: wp.array2d(dtype=float),
+                   t_step_mir: wp.array(dtype=float),
+                   t_step_rir: wp.array(dtype=float),
+                   t_local_inertia: wp.array(dtype=float),
+                   t_lmsl: wp.array(dtype=float),
+                   t_lrsl: wp.array(dtype=float),
+                   t_inertia_vector: wp.array2d(dtype=float),
+                   t_inertia_rotation: wp.array2d(dtype=float),
+                   t_angular_velocity: wp.array(dtype=float),
+                   t_rotation_axis: wp.array2d(dtype=float),
+                   t_init_scale: wp.array2d(dtype=float),
+                   t_scale_ratio: wp.array(dtype=float),
+                   t_gravity_direction: wp.array2d(dtype=float),
+                   t_gravity_dot: wp.array(dtype=float),
+                   t_ilgd: wp.array2d(dtype=float),
+                   t_neg_dir: wp.array2d(dtype=float),
+                   t_gravity: wp.array(dtype=float),
+                   t_gravity_falloff: wp.array(dtype=float),
+                   t_gravity_ratio: wp.array(dtype=float),
+                   t_velocity_weight: wp.array(dtype=float),
+                   t_stab_time: wp.array(dtype=float),
+                   t_blend_weight: wp.array(dtype=float),
+                   t_bwp: wp.array(dtype=float),
+                   t_distance_weight: wp.array(dtype=float),
+                   t_wind_moving: wp.array(dtype=float),
+                   t_frame_moving_speed: wp.array(dtype=float),
+                   t_moving_wind_main: wp.array(dtype=float),
+                   t_frame_moving_dir: wp.array2d(dtype=float),
+                   t_moving_wind_dir: wp.array2d(dtype=float),
+                   t_moving_wind_dirq: wp.array2d(dtype=float),
+                   t_wind_main: wp.array2d(dtype=float),
+                   t_wind_frequency: wp.array(dtype=float),
+                   t_wind_count: wp.array(dtype=int),
+                   t_wind_time: wp.array2d(dtype=float),
+                   t_moving_wind_time: wp.array(dtype=float)):
+    nu = t_now_update[i] + sim_dt
+    t_now_update[i] = nu
+    span = t_time[i] - t_frame_old[i]
+    if span > 0.0:
+        interp = dmath.saturate((nu - t_frame_old[i]) / span)
+    else:
+        interp = 1.0
+    t_frame_interp[i] = interp
+
+    owpx = t_now_wp[i, 0]
+    owpy = t_now_wp[i, 1]
+    owpz = t_now_wp[i, 2]
+    owrx = t_now_wr[i, 0]
+    owry = t_now_wr[i, 1]
+    owrz = t_now_wr[i, 2]
+    owrw = t_now_wr[i, 3]
+    t_old_wp[i, 0] = owpx
+    t_old_wp[i, 1] = owpy
+    t_old_wp[i, 2] = owpz
+    t_old_wr[i, 0] = owrx
+    t_old_wr[i, 1] = owry
+    t_old_wr[i, 2] = owrz
+    t_old_wr[i, 3] = owrw
+
+    t = interp
+    nwpx = dmath.lerp(t_ofwp[i, 0], t_fwp[i, 0], t)
+    nwpy = dmath.lerp(t_ofwp[i, 1], t_fwp[i, 1], t)
+    nwpz = dmath.lerp(t_ofwp[i, 2], t_fwp[i, 2], t)
+    nwrx, nwry, nwrz, nwrw = dmath.quat_slerp(
+        t_ofwr[i, 0], t_ofwr[i, 1], t_ofwr[i, 2], t_ofwr[i, 3],
+        t_fwr[i, 0], t_fwr[i, 1], t_fwr[i, 2], t_fwr[i, 3], t)
+    wsx = dmath.lerp(t_ofws[i, 0], t_fws[i, 0], t)
+    wsy = dmath.lerp(t_ofws[i, 1], t_fws[i, 1], t)
+    wsz = dmath.lerp(t_ofws[i, 2], t_fws[i, 2], t)
+    t_now_wp[i, 0] = nwpx
+    t_now_wp[i, 1] = nwpy
+    t_now_wp[i, 2] = nwpz
+    t_now_wr[i, 0] = nwrx
+    t_now_wr[i, 1] = nwry
+    t_now_wr[i, 2] = nwrz
+    t_now_wr[i, 3] = nwrw
+
+    svx = nwpx - owpx
+    svy = nwpy - owpy
+    svz = nwpz - owpz
+    iowrx, iowry, iowrz, iowrw = dmath.quat_inverse(owrx, owry, owrz, owrw)
+    srx, sry, srz, srw = dmath.quat_mul(nwrx, nwry, nwrz, nwrw,
+                                        iowrx, iowry, iowrz, iowrw)
+    step_angle = dmath.quat_angle(owrx, owry, owrz, owrw, nwrx, nwry, nwrz, nwrw)
+    t_step_vector[i, 0] = svx
+    t_step_vector[i, 1] = svy
+    t_step_vector[i, 2] = svz
+    t_step_rotation[i, 0] = srx
+    t_step_rotation[i, 1] = sry
+    t_step_rotation[i, 2] = srz
+    t_step_rotation[i, 3] = srw
+
+    li = t_local_inertia[i]
+    lmi = 1.0 - li
+    lri = 1.0 - li
+    lvx = svx * (1.0 - lmi)
+    lvy = svy * (1.0 - lmi)
+    lvz = svz * (1.0 - lmi)
+    local_speed = dmath.length3(lvx, lvy, lvz) / sim_dt
+    limit = t_lmsl[i]
+    if (local_speed > limit) and (limit >= 0.0):
+        denom = local_speed if local_speed > 0.0 else 1.0
+        ratio = limit / denom
+        lmi = 1.0 + (lmi - 1.0) * ratio
+    local_angle = step_angle * (1.0 - lri)
+    local_angle_speed = (local_angle / sim_dt) * RAD2DEG
+    limit = t_lrsl[i]
+    if (local_angle_speed > limit) and (limit >= 0.0):
+        denom = local_angle_speed if local_angle_speed > 0.0 else 1.0
+        ratio = limit / denom
+        lri = 1.0 + (lri - 1.0) * ratio
+    t_step_mir[i] = lmi
+    t_step_rir[i] = lri
+
+    t_inertia_vector[i, 0] = svx * lmi
+    t_inertia_vector[i, 1] = svy * lmi
+    t_inertia_vector[i, 2] = svz * lmi
+    irx, iry, irz, irw = dmath.quat_slerp(0.0, 0.0, 0.0, 1.0,
+                                          srx, sry, srz, srw, lri)
+    t_inertia_rotation[i, 0] = irx
+    t_inertia_rotation[i, 1] = iry
+    t_inertia_rotation[i, 2] = irz
+    t_inertia_rotation[i, 3] = irw
+
+    angular_velocity = step_angle / sim_dt
+    t_angular_velocity[i] = angular_velocity
+    _ang, axx, axy, axz = dmath.quat_to_angle_axis(srx, sry, srz, srw)
+    if angular_velocity > EPSILON:
+        t_rotation_axis[i, 0] = axx
+        t_rotation_axis[i, 1] = axy
+        t_rotation_axis[i, 2] = axz
+    else:
+        t_rotation_axis[i, 0] = 0.0
+        t_rotation_axis[i, 1] = 0.0
+        t_rotation_axis[i, 2] = 0.0
+
+    isl = dmath.length3(t_init_scale[i, 0], t_init_scale[i, 1], t_init_scale[i, 2])
+    if isl < 1.0e-30:
+        isl = 1.0e-30
+    wsl = dmath.length3(wsx, wsy, wsz)
+    sr = wsl / isl
+    if sr < 1.0e-6:
+        sr = 1.0e-6
+    t_scale_ratio[i] = sr
+
+    gdx = t_gravity_direction[i, 0]
+    gdy = t_gravity_direction[i, 1]
+    gdz = t_gravity_direction[i, 2]
+    gravity_dot = float(1.0)
+    if (gdx * gdx + gdy * gdy + gdz * gdz) > EPSILON:
+        ilx = t_ilgd[i, 0]
+        ily = t_ilgd[i, 1] * t_neg_dir[i, 1]
+        ilz = t_ilgd[i, 2]
+        wfx, wfy, wfz = dmath.quat_rotate(nwrx, nwry, nwrz, nwrw, ilx, ily, ilz)
+        gdot = wfx * gdx + wfy * gdy + wfz * gdz
+        gravity_dot = dmath.saturate(gdot * 0.5 + 0.5)
+    t_gravity_dot[i] = gravity_dot
+
+    gravity_ratio = float(1.0)
+    if (t_gravity[i] > 1.0e-6) and (t_gravity_falloff[i] > 1.0e-6):
+        low = dmath.saturate(1.0 - t_gravity_falloff[i])
+        gravity_ratio = low + (1.0 - low) * dmath.saturate(1.0 - gravity_dot)
+    t_gravity_ratio[i] = gravity_ratio
+
+    vw = t_velocity_weight[i]
+    if vw < 1.0:
+        stab = t_stab_time[i]
+        if stab > 1.0e-6:
+            add = sim_dt / stab
+        else:
+            add = 1.0
+        vw = vw + add
+        if vw > 1.0:
+            vw = 1.0
+        t_velocity_weight[i] = vw
+    t_blend_weight[i] = dmath.saturate(vw * t_bwp[i] * t_distance_weight[i])
+
+    moving_active = t_wind_moving[i] > 0.01
+    if moving_active:
+        denom = sr if sr > 0.0 else 1.0
+        mwm = (t_frame_moving_speed[i] * t_wind_moving[i]) / denom
+    else:
+        mwm = 0.0
+    t_moving_wind_main[i] = mwm
+    if moving_active:
+        mdx = dmath.negate(t_frame_moving_dir[i, 0])
+        mdy = dmath.negate(t_frame_moving_dir[i, 1])
+        mdz = dmath.negate(t_frame_moving_dir[i, 2])
+        t_moving_wind_dir[i, 0] = mdx
+        t_moving_wind_dir[i, 1] = mdy
+        t_moving_wind_dir[i, 2] = mdz
+        mqx, mqy, mqz, mqw = dmath.axis_quaternion(mdx, mdy, mdz)
+        t_moving_wind_dirq[i, 0] = mqx
+        t_moving_wind_dirq[i, 1] = mqy
+        t_moving_wind_dirq[i, 2] = mqz
+        t_moving_wind_dirq[i, 3] = mqw
+
+    wf = t_wind_frequency[i]
+    wc = t_wind_count[i]
+    for s in range(4):
+        main_ratio = t_wind_main[i, s] / WIND_BASE_SPEED
+        frequency = (0.2 + main_ratio * 0.5) * wf
+        if frequency > 1.5:
+            frequency = 1.5
+        frequency = frequency * sim_dt
+        if s < wc:
+            nt = t_wind_time[i, s] + frequency
+            if nt > WIND_MAX_TIME:
+                nt = nt - WIND_MAX_TIME * 2.0
+            t_wind_time[i, s] = nt
+    move_ratio = mwm / WIND_BASE_SPEED
+    mf = (0.2 + move_ratio * 0.5) * wf
+    if mf > 1.5:
+        mf = 1.5
+    mf = mf * sim_dt
+    if moving_active:
+        mt2 = t_moving_wind_time[i] + mf
+        if mt2 > WIND_MAX_TIME:
+            mt2 = mt2 - WIND_MAX_TIME * 2.0
+        t_moving_wind_time[i] = mt2
 
 
 @wp.func
@@ -1325,6 +1570,103 @@ def do_solve_edge(ee: int, p_team: wp.array(dtype=int),
 
 
 @wp.func
+def do_self_update_primitive(prim: int, axes: int,
+                             a_team: wp.array(dtype=int),
+                             a_particles: wp.array2d(dtype=int),
+                             a_fix: wp.array(dtype=int),
+                             a_ignore: wp.array(dtype=int),
+                             a_prim_depth: wp.array(dtype=float),
+                             a_inv_mass: wp.array2d(dtype=float),
+                             a_thickness: wp.array(dtype=float),
+                             a_aabb_min: wp.array2d(dtype=float),
+                             a_aabb_max: wp.array2d(dtype=float),
+                             a_intersect: wp.array(dtype=int),
+                             a_use: wp.array(dtype=int),
+                             t_use_flag: wp.array(dtype=int),
+                             t_thickness_lut: wp.array2d(dtype=float),
+                             t_cloth_mass: wp.array(dtype=float),
+                             t_scale_ratio: wp.array(dtype=float),
+                             t_enabled: wp.array(dtype=int),
+                             t_valid: wp.array(dtype=int),
+                             t_cws: wp.array2d(dtype=float),
+                             t_update_count: wp.array(dtype=int),
+                             p_next: wp.array2d(dtype=float),
+                             p_old: wp.array2d(dtype=float),
+                             p_friction: wp.array(dtype=float),
+                             p_iflag: wp.array(dtype=int),
+                             scl_counts: wp.array(dtype=int),
+                             scl_max_fixed: wp.array(dtype=int),
+                             k: int):
+    team = a_team[prim]
+    if not (team_frame_mask(t_enabled, t_valid, t_cws, team) and t_update_count[team] > k
+            and t_use_flag[team] != 0):
+        a_use[prim] = 0
+        return
+    a_use[prim] = 1
+    fix_mask = a_fix[prim]
+    thickness = dmath.evaluate_team_lut(t_thickness_lut, team,
+                                        a_prim_depth[prim]) * t_scale_ratio[team]
+    a_thickness[prim] = thickness
+    cloth_mass = t_cloth_mass[team]
+    use_intersect = scl_counts[SCL_USE_INTERSECT] != 0
+    imask = int(0)
+    lowx = float(1.0e30)
+    lowy = float(1.0e30)
+    lowz = float(1.0e30)
+    highx = float(-1.0e30)
+    highy = float(-1.0e30)
+    highz = float(-1.0e30)
+    for slot in range(axes):
+        raw = a_particles[prim, slot]
+        pp = raw if raw >= 0 else int(0)
+        fixed = ((fix_mask >> slot) & int(1)) != 0
+        a_inv_mass[prim, slot] = dmath.calc_self_collision_inverse_mass(
+            p_friction[pp], fixed, cloth_mass)
+        nx = p_next[pp, 0]
+        ny = p_next[pp, 1]
+        nz = p_next[pp, 2]
+        ox = p_old[pp, 0]
+        oy = p_old[pp, 1]
+        oz = p_old[pp, 2]
+        slx = nx if nx < ox else ox
+        shx = nx if nx > ox else ox
+        sly = ny if ny < oy else oy
+        shy = ny if ny > oy else oy
+        slz = nz if nz < oz else oz
+        shz = nz if nz > oz else oz
+        if slx < lowx:
+            lowx = slx
+        if shx > highx:
+            highx = shx
+        if sly < lowy:
+            lowy = sly
+        if shy > highy:
+            highy = shy
+        if slz < lowz:
+            lowz = slz
+        if shz > highz:
+            highz = shz
+        if use_intersect and p_iflag[pp] != 0:
+            imask = imask | (int(1) << slot)
+    a_intersect[prim] = imask
+    a_aabb_min[prim, 0] = lowx - thickness
+    a_aabb_min[prim, 1] = lowy - thickness
+    a_aabb_min[prim, 2] = lowz - thickness
+    a_aabb_max[prim, 0] = highx + thickness
+    a_aabb_max[prim, 1] = highy + thickness
+    a_aabb_max[prim, 2] = highz + thickness
+    size = highx - lowx
+    ey = highy - lowy
+    ez = highz - lowz
+    if ey > size:
+        size = ey
+    if ez > size:
+        size = ez
+    if a_ignore[prim] == 0:
+        wp.atomic_max(scl_max_fixed, team, int(size * TO_FIXED))
+
+
+@wp.func
 def self_aabb_overlap(a_min: wp.array2d(dtype=float), a_max: wp.array2d(dtype=float), i: int,
                       b_min: wp.array2d(dtype=float), b_max: wp.array2d(dtype=float), j: int):
     return (a_min[i, 0] <= b_max[j, 0] and a_max[i, 0] >= b_min[j, 0]
@@ -1343,6 +1685,101 @@ def self_connection_shared(a_particles: wp.array2d(dtype=int), i: int,
                 if pb >= 0 and pa == pb:
                     return True
     return False
+
+
+@wp.func
+def self_ee_geometry(my_edge: int, tgt_edge: int, thickness: float,
+                     sfe_particles: wp.array2d(dtype=int),
+                     p_next: wp.array2d(dtype=float),
+                     p_old: wp.array2d(dtype=float)):
+    scr = thickness * SELF_COLLISION_SCR
+    a0 = sfe_particles[my_edge, 0]
+    a1 = sfe_particles[my_edge, 1]
+    b0 = sfe_particles[tgt_edge, 0]
+    b1 = sfe_particles[tgt_edge, 1]
+    s, t, c1x, c1y, c1z, c2x, c2y, c2z = dmath.closest_pt_segment_segment(
+        p_old[a0, 0], p_old[a0, 1], p_old[a0, 2], p_old[a1, 0], p_old[a1, 1], p_old[a1, 2],
+        p_old[b0, 0], p_old[b0, 1], p_old[b0, 2], p_old[b1, 0], p_old[b1, 1], p_old[b1, 2])
+    cdx = c1x - c2x
+    cdy = c1y - c2y
+    cdz = c1z - c2z
+    clen = dmath.length3(cdx, cdy, cdz)
+    ok = clen >= 1.0e-9
+    safe = clen if clen > 1.0e-30 else 1.0
+    nx = cdx / safe
+    ny = cdy / safe
+    nz = cdz / safe
+    dax = dmath.lerp(p_next[a0, 0] - p_old[a0, 0], p_next[a1, 0] - p_old[a1, 0], s)
+    day = dmath.lerp(p_next[a0, 1] - p_old[a0, 1], p_next[a1, 1] - p_old[a1, 1], s)
+    daz = dmath.lerp(p_next[a0, 2] - p_old[a0, 2], p_next[a1, 2] - p_old[a1, 2], s)
+    dbx = dmath.lerp(p_next[b0, 0] - p_old[b0, 0], p_next[b1, 0] - p_old[b1, 0], t)
+    dby = dmath.lerp(p_next[b0, 1] - p_old[b0, 1], p_next[b1, 1] - p_old[b1, 1], t)
+    dbz = dmath.lerp(p_next[b0, 2] - p_old[b0, 2], p_next[b1, 2] - p_old[b1, 2], t)
+    l = clen + (nx * dax + ny * day + nz * daz) - (nx * dbx + ny * dby + nz * dbz)
+    ok = ok and (l <= (thickness + scr))
+    return s, t, nx, ny, nz, ok
+
+
+@wp.func
+def self_pt_geometry(point_prim: int, tri_prim: int, thickness: float, first: bool,
+                     sfp_particles: wp.array2d(dtype=int),
+                     sft_particles: wp.array2d(dtype=int),
+                     p_next: wp.array2d(dtype=float),
+                     p_old: wp.array2d(dtype=float)):
+    scr = thickness * SELF_COLLISION_SCR
+    pp = sfp_particles[point_prim, 0]
+    t0 = sft_particles[tri_prim, 0]
+    t1 = sft_particles[tri_prim, 1]
+    t2 = sft_particles[tri_prim, 2]
+    oax = p_old[pp, 0]
+    oay = p_old[pp, 1]
+    oaz = p_old[pp, 2]
+    ob0x = p_old[t0, 0]
+    ob0y = p_old[t0, 1]
+    ob0z = p_old[t0, 2]
+    ob1x = p_old[t1, 0]
+    ob1y = p_old[t1, 1]
+    ob1z = p_old[t1, 2]
+    ob2x = p_old[t2, 0]
+    ob2y = p_old[t2, 1]
+    ob2z = p_old[t2, 2]
+    dax = p_next[pp, 0] - oax
+    day = p_next[pp, 1] - oay
+    daz = p_next[pp, 2] - oaz
+    db0x = p_next[t0, 0] - ob0x
+    db0y = p_next[t0, 1] - ob0y
+    db0z = p_next[t0, 2] - ob0z
+    db1x = p_next[t1, 0] - ob1x
+    db1y = p_next[t1, 1] - ob1y
+    db1z = p_next[t1, 2] - ob1z
+    db2x = p_next[t2, 0] - ob2x
+    db2y = p_next[t2, 1] - ob2y
+    db2z = p_next[t2, 2] - ob2z
+    cpx, cpy, cpz, u, v, w = dmath.closest_pt_point_triangle(
+        oax, oay, oaz, ob0x, ob0y, ob0z, ob1x, ob1y, ob1z, ob2x, ob2y, ob2z)
+    dtx = db0x * u + db1x * v + db2x * w
+    dty = db0y * u + db1y * v + db2y * w
+    dtz = db0z * u + db1z * v + db2z * w
+    cvx = cpx - oax
+    cvy = cpy - oay
+    cvz = cpz - oaz
+    cvlen = dmath.length3(cvx, cvy, cvz)
+    ok = cvlen > EPSILON
+    safe = cvlen if cvlen > 1.0e-30 else 1.0
+    nx = cvx / safe
+    ny = cvy / safe
+    nz = cvz / safe
+    l = cvlen - (nx * dax + ny * day + nz * daz) + (nx * dtx + ny * dty + nz * dtz)
+    ok = ok and (l < (thickness + scr))
+    sign = float(0.0)
+    if first:
+        otnx, otny, otnz = dmath.triangle_normal(ob0x, ob0y, ob0z, ob1x, ob1y, ob1z,
+                                                 ob2x, ob2y, ob2z)
+        n2x, n2y, n2z = dmath.normalize3(oax - cpx, oay - cpy, oaz - cpz)
+        d = otnx * n2x + otny * n2y + otnz * n2z
+        ok = ok and (wp.abs(d) >= SELF_COLLISION_POINT_TRIANGLE_ANGLE_COS)
+        sign = dmath.fsign(d)
+    return ok, sign
 
 
 @wp.func
