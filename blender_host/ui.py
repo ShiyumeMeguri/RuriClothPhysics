@@ -695,6 +695,8 @@ class RCP_PT_collider(bpy.types.Panel):
         box.label(text="半径 = 显示尺寸 × 缩放; 位置就是终点球心", icon='INFO')
         box.prop(obj, "empty_display_size", text="显示尺寸")
         box.prop(obj, "scale", text="缩放")
+        layout.operator("ruri_cloth_physics.collider_mirror", icon='MOD_MIRROR',
+                        text="镜像整根胶囊")
 
     def draw(self, context):
         layout = self.layout
@@ -759,6 +761,13 @@ class RCP_PT_collider(bpy.types.Panel):
         row = layout.row(align=True)
         row.operator("ruri_cloth_physics.collider_mirror", icon='MOD_MIRROR')
         row.operator("ruri_cloth_physics.collider_clear", icon='X')
+        mirrored = collider_geom.flip_side_name(obj.name)
+        if not mirrored:
+            layout.label(text="名字里没有 L/R 标记, 镜像只能新建一份副本", icon='INFO')
+        elif collider_geom.is_collider(bpy.data.objects.get(mirrored)):
+            layout.label(text="镜像将更新已存在的 %s" % mirrored, icon='CHECKMARK')
+        else:
+            layout.label(text="镜像将新建 %s" % mirrored, icon='ADD')
 
 
 class RCP_PT_viewport_display(_ConfigPanel, bpy.types.Panel):

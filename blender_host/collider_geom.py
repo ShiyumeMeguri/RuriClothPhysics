@@ -1,9 +1,14 @@
+import re
+
 import bpy
 import mathutils
 import numpy as np
 
 from . import armature
 from ..cloth_kernel import defs
+
+SIDE_FLIP = {"l": "r", "r": "l", "left": "right", "right": "left"}
+_NAME_PARTS = re.compile(r"([._\- ])")
 
 KIND_VALUES = {'SPHERE': defs.COLLIDER_SPHERE, 'CAPSULE': defs.COLLIDER_CAPSULE,
                'PLANE': defs.COLLIDER_PLANE}
@@ -18,6 +23,26 @@ BONE_CONSTRAINT = "Ruri 跟随骨骼"
 
 FOLLOW_NONE = 'NONE'
 FOLLOW_BONE = 'BONE'
+
+
+def _match_case(sample, word):
+    if sample.isupper():
+        return word.upper()
+    if sample[:1].isupper():
+        return word.capitalize()
+    return word
+
+
+def flip_side_name(name):
+    parts = _NAME_PARTS.split(name)
+    flipped = False
+    for index, part in enumerate(parts):
+        word = SIDE_FLIP.get(part.lower())
+        if word is None:
+            continue
+        parts[index] = _match_case(part, word)
+        flipped = True
+    return "".join(parts) if flipped else ""
 
 
 def settings_of(obj):
@@ -41,13 +66,13 @@ def end_object(settings):
 
 
 def owner_of(scene, obj):
-    if scene is None:
+    if scene is None or obj is None:
         return None
     for candidate in scene.objects:
         settings = settings_of(candidate)
         if settings is None or not settings.is_collider:
             continue
-        if end_object(settings) is obj:
+        if settings.end_object is obj:
             return candidate
     return None
 

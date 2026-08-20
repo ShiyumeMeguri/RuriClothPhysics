@@ -342,60 +342,134 @@ class RCP_OT_collider_detach(bpy.types.Operator):
         return {'FINISHED'}
 
 
+def _mirror_sources(context):
+    scene = context.scene
+    found = []
+    seen = set()
+    candidates = list(context.selected_objects)
+    if context.object is not None:
+        candidates.append(context.object)
+    for obj in candidates:
+        collider = obj if collider_geom.is_collider(obj) else collider_geom.owner_of(scene, obj)
+        if collider is None or collider.name in seen:
+            continue
+        seen.add(collider.name)
+        found.append(collider)
+    return found
+
+
+def _mirror_space(context, obj):
+    constraint = collider_geom.bone_constraint(obj)
+    if constraint is not None and constraint.target is not None:
+        return constraint.target
+    active = context.object
+    if active is not None and active.type == 'ARMATURE':
+        return active
+    return None
+
+
+def _mirror_world(space, matrix):
+    flip = mathutils.Matrix.Diagonal((-1.0, 1.0, 1.0, 1.0))
+    if space is None:
+        return flip @ matrix @ flip
+    basis = space.matrix_world
+    return basis @ flip @ basis.inverted_safe() @ matrix @ flip
+
+
+def _collection_of(context, obj):
+    return obj.users_collection[0] if obj.users_collection else context.collection
+
+
 class RCP_OT_collider_mirror(bpy.types.Operator):
     bl_idname = "ruri_cloth_physics.collider_mirror"
     bl_label = "镜像碰撞体"
-    bl_description = ("沿世界 X 轴镜像复制选中的碰撞体; 父级骨骼按左右命名规则(.L/.R)一并翻转。"
-                      "镜像出来的是正常朝向的新物体, 不使用负缩放")
+    bl_description = ("按左右命名规则镜像选中的碰撞体, 胶囊连同它的两个圆一起。"
+                      "对侧同名碰撞体已存在就直接更新它, 不会再堆一份; "
+                      "镜像在骨架局部空间进行, 不使用负缩放")
     bl_options = {'REGISTER', 'UNDO'}
 
     @classmethod
     def poll(cls, context):
-        return collider_geom.is_collider(context.object)
+        return bool(_mirror_sources(context))
 
-    def _mirror_world(self, empty):
-        location, rotation, scale = empty.matrix_world.decompose()
-        location.x = -location.x
-        rotation = mathutils.Quaternion((rotation.w, rotation.x, -rotation.y, -rotation.z))
-        return mathutils.Matrix.LocRotScale(location, rotation, scale)
-
-    def _copy(self, context, source, collection):
-        copy = source.copy()
-        copy.name = bpy.utils.flip_name(source.name) or source.name
-        collection.objects.link(copy)
-        world = self._mirror_world(source)
-        constraint = collider_geom.bone_constraint(copy)
+    def _place(self, context, source, target):
+        target.empty_display_size = source.empty_display_size
+        constraint = collider_geom.bone_constraint(source)
+        world = _mirror_world(_mirror_space(context, source), source.matrix_world)
         if constraint is None or constraint.target is None:
-            copy.matrix_basis = world
+            collider_geom.detach(target)
             context.view_layer.update()
-            return copy
-        flipped = bpy.utils.flip_name(constraint.subtarget)
-        bone_name = flipped if flipped in constraint.target.pose.bones else constraint.subtarget
-        collider_geom.detach(copy)
-        copy.matrix_basis = world
-        collider_geom.attach_to_bone(context.view_layer, copy, constraint.target, bone_name)
+            target.matrix_basis = world
+            context.view_layer.update()
+            return
+        bone_name = collider_geom.flip_side_name(constraint.subtarget)
+        if bone_name not in constraint.target.pose.bones:
+            bone_name = constraint.subtarget
+        collider_geom.attach_to_bone(context.view_layer, target, constraint.target, bone_name)
+        collider_geom.set_world(context.view_layer, target, world)
+
+    def _mirrored_end(self, context, source_end, target, target_settings):
+        end = target_settings.end_object
+        if end is None or end is source_end or end is target or collider_geom.is_collider(end):
+            end = collider_geom.new_empty(
+                _collection_of(context, target),
+                collider_geom.flip_side_name(source_end.name) or (target.name + ".end"),
+                collider_geom.END_DISPLAY_TYPE, source_end.empty_display_size)
+            target_settings.end_object = end
+        return end
+
+    def _apply(self, context, source, target):
+        source_settings = source.ruri_cloth_physics_collider
+        target_settings = target.ruri_cloth_physics_collider
+        target_settings.is_collider = True
+        target_settings.shape = source_settings.shape
+        target_settings.enabled = source_settings.enabled
+        self._place(context, source, target)
+        source_end = source_settings.end_object
+        if source_end is None:
+            return
+        self._place(context, source_end, self._mirrored_end(context, source_end, target,
+                                                            target_settings))
+
+    def _counterpart(self, source, name):
+        target = bpy.data.objects.get(name) if name else None
+        if target is None or target is source or not collider_geom.is_collider(target):
+            return None
+        return target
+
+    def _create(self, context, source, name):
+        copy = source.copy()
+        copy.name = name or source.name
+        _collection_of(context, source).objects.link(copy)
+        copy.ruri_cloth_physics_collider.end_object = None
         return copy
 
     def execute(self, context):
         context.view_layer.update()
         config = _active_config(context)
         created = []
-        for source in list(context.selected_objects):
-            if not collider_geom.is_collider(source):
-                continue
-            settings = source.ruri_cloth_physics_collider
-            end = collider_geom.end_object(settings)
-            collection = source.users_collection[0] if source.users_collection \
-                else context.collection
-            copy = self._copy(context, source, collection)
-            if end is not None:
-                copy.ruri_cloth_physics_collider.end_object = self._copy(context, end, collection)
-            _reference_collider(config, copy)
-            created.append(copy.name)
-        if not created:
-            self.report({'WARNING'}, "没有选中任何碰撞体空物体")
+        updated = []
+        unnamed = []
+        for source in _mirror_sources(context):
+            name = collider_geom.flip_side_name(source.name)
+            if not name:
+                unnamed.append(source.name)
+            target = self._counterpart(source, name)
+            if target is None:
+                target = self._create(context, source, name)
+                created.append(target.name)
+            else:
+                updated.append(target.name)
+            self._apply(context, source, target)
+            _reference_collider(config, target)
+        if not created and not updated:
+            self.report({'WARNING'}, "没有选中任何碰撞体")
             return {'CANCELLED'}
-        self.report({'INFO'}, "已镜像 %d 个: %s" % (len(created), ", ".join(created[:4])))
+        if unnamed:
+            self.report({'WARNING'}, "%d 个名字里没有左右标记, 只能新建副本: %s"
+                        % (len(unnamed), ", ".join(sorted(unnamed)[:3])))
+        self.report({'INFO'}, "已镜像 %d 个: 更新 %d, 新建 %d"
+                    % (len(created) + len(updated), len(updated), len(created)))
         return {'FINISHED'}
 
 
