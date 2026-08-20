@@ -100,6 +100,9 @@ _SLIM_OUTPUT_PARTICLE_FIELDS = ("positions", "out_rotations")
 assert not (set(_INPUT_UPLOAD_FIELDS) & set(_CONFIG_TEAM_FIELDS))
 assert len(set(_INPUT_UPLOAD_FIELDS)) == len(_INPUT_UPLOAD_FIELDS)
 
+_HOST_TEAM_FIELDS = frozenset(_INPUT_UPLOAD_FIELDS + _CONFIG_TEAM_FIELDS)
+_HOST_COLLIDER_FIELDS = frozenset(_COLLIDER_INPUT_FIELDS)
+
 
 def _arena_subset_dtype(spec, fields):
     items = []
@@ -421,6 +424,15 @@ class GpuEngine:
         names = names or list(self.colliders.device.keys())
         flat = {name: self.colliders.download(name) for name in names}
         device.scatter_arena(world.colliders, flat, self.program.num_colliders, names)
+
+    def download_state(self, world):
+        self.download_team(world, [name for name in self.team.device
+                                   if name not in _HOST_TEAM_FIELDS])
+        if self.program.num_particles:
+            self.download_particles(world)
+        if self.program.num_colliders:
+            self.download_colliders(world, [name for name in self.colliders.device
+                                            if name not in _HOST_COLLIDER_FIELDS])
 
     def _frame_scalars(self, frame_globals):
         power = _defs.simulation_power(frame_globals.simulation_frequency)

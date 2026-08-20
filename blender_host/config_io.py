@@ -177,7 +177,7 @@ def _remove_owned_colliders(settings, state):
     doomed = {}
     for obj in collider_set(list(settings.configs), state.context.scene,
                             state.armature_object, True):
-        end = collider_geom.end_object(collider_geom.settings_of(obj))
+        end = collider_geom.settings_of(obj).end_object
         if end is not None:
             doomed[end.name] = end
         doomed[obj.name] = obj

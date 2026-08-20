@@ -51,6 +51,11 @@ def notify_backend_changed():
     for backend in _backends.values():
         backend.release(_world)
 
+
+def _flush_backends():
+    for backend in _backends.values():
+        backend.flush(_world)
+
 NORMAL_AXIS_VECTORS = {
     'RIGHT': (1.0, 0.0, 0.0),
     'UP': (0.0, 1.0, 0.0),
@@ -336,6 +341,7 @@ def ensure_entry(obj, config_index, config):
         return entry
 
     if entry.setup is None or entry.topology_token != topology_token or config.rebuild_pending:
+        _flush_backends()
         if entry.team is not None:
             _world.unregister_team(entry.team)
             entry.team = None
@@ -367,6 +373,7 @@ def ensure_entry(obj, config_index, config):
         entry.team = _world.register_team(setup, params, entry.binding)
     elif entry.team is not None:
         if entry.collider_token != collider_token:
+            _flush_backends()
             entry.binding = build_collider_binding(config)
             entry.collider_token = collider_token
             _world.update_colliders(entry.team, entry.binding)

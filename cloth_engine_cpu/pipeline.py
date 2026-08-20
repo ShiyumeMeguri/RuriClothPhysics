@@ -85,6 +85,10 @@ def release(world=None):
     pass
 
 
+def flush(world=None):
+    pass
+
+
 def run_frame(world, frame_globals):
     world.ensure_buckets()
     ctx = Context(world, frame_globals)

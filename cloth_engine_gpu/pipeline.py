@@ -24,16 +24,24 @@ def run_frame(world, frame_globals):
     io.end_frame(world)
 
 
+def _download(engine, target):
+    if engine.program is None or engine.signature != GpuEngine._structure_signature(target):
+        return
+    if engine.program.num_teams:
+        engine.download_state(target)
+
+
+def flush(world):
+    for engine in _engines.values():
+        if engine.world is world:
+            _download(engine, world)
+
+
 def release(world=None):
     for key, engine in list(_engines.items()):
         target = engine.world
         if world is not None and target is not world:
             continue
         if target is not None:
-            if engine.program.num_teams:
-                engine.download_team(target)
-            if engine.program.num_particles:
-                engine.download_particles(target)
-            if engine.program.num_colliders:
-                engine.download_colliders(target)
+            _download(engine, target)
         del _engines[key]

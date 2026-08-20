@@ -114,12 +114,22 @@ class Program:
 
 
 def _arena_dump(arena, fields):
-    team = arena["team"]
-    live = np.flatnonzero(team != 0)
-    if live.shape[0]:
-        assert live[-1] - live[0] == live.shape[0] - 1 and live[0] == 0, \
-            "live arena rows must be a contiguous prefix for absolute indexing"
-    return {name: np.ascontiguousarray(arena[name][live]) for name in fields}
+    live = np.flatnonzero(arena["team"] != 0)
+    return {name: np.ascontiguousarray(arena[name][live]) for name in fields}, live
+
+
+def _compacted_rows(arena, live):
+    lookup = np.full(int(arena["team"].shape[0]), -1, dtype=np.int64)
+    lookup[live] = np.arange(live.shape[0], dtype=np.int64)
+    return lookup
+
+
+def _retarget(values, lookup, label):
+    if values.shape[0] == 0:
+        return values
+    mapped = lookup[values]
+    assert int(mapped.min()) >= 0, "%s points at a released arena row" % label
+    return np.ascontiguousarray(mapped, dtype=I4)
 
 
 def _live_extent(team_rows, start_field, count_field):
@@ -139,23 +149,30 @@ def build_program(world):
     program.num_self_triangles = _live_extent(world.team, "st_start", "st_count")
     _compute_self_capacities(program, world)
 
-    program.distance = _arena_dump(world.distance, ("team", "particle", "target", "rest"))
-    program.bending = _arena_dump(world.bending, ("team", "pair", "rest", "sign"))
-    program.tether = _arena_dump(world.tether, ("team", "particle"))
-    program.motion = _arena_dump(world.motion, ("team", "particle"))
-    program.update_move = _arena_dump(world.update_move, ("team", "particle"))
-    program.update_fixed = _arena_dump(world.update_fixed, ("team", "particle"))
-    program.spring = _arena_dump(world.spring, ("team", "particle"))
-    program.collision_process = _arena_dump(world.collision_process, ("team", "particle"))
-    program.collision_edges = _arena_dump(world.collision_edges, ("team", "edge"))
-    program.edges = _arena_dump(world.edges, ("team", "edge"))
-    program.triangles = _arena_dump(world.triangles, ("team", "triangle"))
-    program.v2t = _arena_dump(world.v2t, ("team", "owner", "triangle", "flip_normal", "flip_tangent"))
+    program.distance, _ = _arena_dump(world.distance, ("team", "particle", "target", "rest"))
+    program.bending, _ = _arena_dump(world.bending, ("team", "pair", "rest", "sign"))
+    program.tether, _ = _arena_dump(world.tether, ("team", "particle"))
+    program.motion, _ = _arena_dump(world.motion, ("team", "particle"))
+    program.update_move, _ = _arena_dump(world.update_move, ("team", "particle"))
+    program.update_fixed, _ = _arena_dump(world.update_fixed, ("team", "particle"))
+    program.spring, _ = _arena_dump(world.spring, ("team", "particle"))
+    program.collision_process, _ = _arena_dump(world.collision_process, ("team", "particle"))
+    program.collision_edges, edge_live = _arena_dump(world.collision_edges, ("team", "edge"))
+    program.edges, _ = _arena_dump(world.edges, ("team", "edge"))
+    program.triangles, triangle_live = _arena_dump(world.triangles, ("team", "triangle"))
+    program.v2t, _ = _arena_dump(world.v2t,
+                                 ("team", "owner", "triangle", "flip_normal", "flip_tangent"))
+    program.v2t["triangle"] = _retarget(program.v2t["triangle"],
+                                        _compacted_rows(world.triangles, triangle_live),
+                                        "v2t.triangle")
     program.num_triangle_entries = int(program.triangles["team"].shape[0])
-    program.point_pairs = _arena_dump(world.point_pairs, ("team", "particle", "collider"))
-    program.edge_pairs = _arena_dump(world.edge_pairs, ("team", "edge", "collider"))
-    program.center_fixed = _arena_dump(world.center_fixed, ("team", "particle"))
-    program.angle_buffered = _arena_dump(world.angle_buffered, ("team", "particle"))
+    program.point_pairs, _ = _arena_dump(world.point_pairs, ("team", "particle", "collider"))
+    program.edge_pairs, _ = _arena_dump(world.edge_pairs, ("team", "edge", "collider"))
+    program.edge_pairs["edge"] = _retarget(program.edge_pairs["edge"],
+                                           _compacted_rows(world.collision_edges, edge_live),
+                                           "edge_pairs.edge")
+    program.center_fixed, _ = _arena_dump(world.center_fixed, ("team", "particle"))
+    program.angle_buffered, _ = _arena_dump(world.angle_buffered, ("team", "particle"))
     program.baseline_entries = np.ascontiguousarray(world.baseline_entries)
 
     n_particles = program.num_particles
