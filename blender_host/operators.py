@@ -1,8 +1,12 @@
 import bpy
-from bpy.props import BoolProperty, EnumProperty, IntProperty, StringProperty
+import mathutils
+from bpy.props import BoolProperty, EnumProperty, StringProperty
 
 from . import chain
+from . import collider_geom
+from . import properties
 from . import runtime
+from . import selection_sync
 from . import wind_geom
 
 
@@ -43,6 +47,11 @@ def _unique_name(collection, base):
 
 def _mark_rebuild(config):
     config.rebuild_pending = True
+
+
+def _set_active_index(owner, index_name, value):
+    with selection_sync.suppressed():
+        setattr(owner, index_name, value)
 
 
 class RCP_OT_config_add(bpy.types.Operator):
@@ -113,113 +122,288 @@ class RCP_OT_config_move(bpy.types.Operator):
         return {'FINISHED'}
 
 
-class RCP_OT_collider_add(bpy.types.Operator):
-    bl_idname = "ruri_cloth_physics.collider_add"
-    bl_label = "添加碰撞体"
+def _collider_collection(context, armature_object):
+    return collider_geom.collection_for(context.scene, armature_object, create=True)
+
+
+def _link_empty(context, collection, name, display_type, display_size, location):
+    empty = collider_geom.new_empty(collection, name, display_type, display_size)
+    empty.location = location
+    return empty
+
+
+def _reference_collider(config, empty):
+    if config is None:
+        return
+    for reference in config.collider_collision.collider_references:
+        if reference.object is empty:
+            return
+    with selection_sync.suppressed():
+        config.collider_collision.collider_references.add().object = empty
+        config.collider_collision.active_collider_reference_index = \
+            len(config.collider_collision.collider_references) - 1
+
+
+def _make_collider(context, collection, name, shape, location, radius):
+    empty = _link_empty(context, collection, name, collider_geom.DISPLAY_TYPE[shape],
+                        radius, location)
+    settings = empty.ruri_cloth_physics_collider
+    settings.is_collider = True
+    settings.shape = shape
+    return empty
+
+
+def _make_capsule(context, collection, name, start_location, end_location, radius):
+    empty = _make_collider(context, collection, name, 'CAPSULE', start_location, radius)
+    end = _link_empty(context, collection, name + ".end", collider_geom.END_DISPLAY_TYPE,
+                      radius, end_location)
+    empty.ruri_cloth_physics_collider.end_object = end
+    return empty, end
+
+
+def _active_bone(context):
+    obj = context.object
+    if obj is None or obj.type != 'ARMATURE' or obj.pose is None:
+        return None, None
+    bone = obj.data.bones.active
+    if bone is None:
+        return obj, None
+    return obj, obj.pose.bones.get(bone.name)
+
+
+class RCP_OT_collider_create(bpy.types.Operator):
+    bl_idname = "ruri_cloth_physics.collider_create"
+    bl_label = "新建碰撞体"
+    bl_description = ("在本骨架的碰撞体集合里新建一个碰撞体空物体; 有活动骨骼时贴合它并加子级约束跟随, "
+                      "否则放在 3D 游标处。之后直接用 G/R/S 摆它就行")
     bl_options = {'REGISTER', 'UNDO'}
+
+    shape: EnumProperty(name="形状", items=properties.COLLIDER_SHAPE_ITEMS, default='SPHERE')
 
     @classmethod
     def poll(cls, context):
         return _active_settings(context) is not None
 
     def execute(self, context):
-        settings = _active_settings(context)
-        item = settings.colliders.add()
-        item.name = _unique_name(settings.colliders, "碰撞体")
-        settings.active_collider_index = len(settings.colliders) - 1
-        settings.collider_serial += 1
+        context.view_layer.update()
+        armature_object, pose_bone = _active_bone(context)
+        config = _active_config(context)
+        collection = _collider_collection(context, armature_object)
+        if pose_bone is not None:
+            matrix = armature_object.matrix_world
+            head = matrix @ pose_bone.head
+            tail = matrix @ pose_bone.tail
+            radius = max(pose_bone.length * 0.2, 0.005)
+            base = pose_bone.name
+        else:
+            head = context.scene.cursor.location.copy()
+            tail = head.copy()
+            tail.z += 0.2
+            radius = 0.05
+            base = "碰撞体"
+        parts = []
+        if self.shape == 'CAPSULE':
+            empty, end = _make_capsule(context, collection, base + ".胶囊", head, tail, radius)
+            parts = [empty, end]
+        else:
+            center = head if self.shape == 'PLANE' else (head + tail) * 0.5
+            empty = _make_collider(context, collection, base + ".碰撞体", self.shape,
+                                   center, radius)
+            parts = [empty]
+        if pose_bone is not None:
+            for part in parts:
+                collider_geom.attach_to_bone(context.view_layer, part, armature_object,
+                                             pose_bone.name)
+        _reference_collider(config, empty)
+        self.report({'INFO'}, "已新建 %s" % empty.name)
         return {'FINISHED'}
 
 
-class RCP_OT_collider_remove(bpy.types.Operator):
-    bl_idname = "ruri_cloth_physics.collider_remove"
-    bl_label = "移除碰撞体"
+class RCP_OT_collider_convert(bpy.types.Operator):
+    bl_idname = "ruri_cloth_physics.collider_convert"
+    bl_label = "设为碰撞体"
+    bl_description = "把当前空物体标记为碰撞体"
     bl_options = {'REGISTER', 'UNDO'}
 
     @classmethod
     def poll(cls, context):
-        settings = _active_settings(context)
-        return settings is not None and len(settings.colliders) > 0
+        return context.object is not None and context.object.type == 'EMPTY'
 
     def execute(self, context):
-        settings = _active_settings(context)
-        index = settings.active_collider_index
-        settings.colliders.remove(index)
-        settings.active_collider_index = min(index, len(settings.colliders) - 1)
-        settings.collider_serial += 1
+        settings = context.object.ruri_cloth_physics_collider
+        settings.is_collider = True
+        collider_geom.sync_display(context.object)
         return {'FINISHED'}
 
 
-class RCP_OT_collider_move(bpy.types.Operator):
-    bl_idname = "ruri_cloth_physics.collider_move"
-    bl_label = "移动碰撞体"
+class RCP_OT_collider_clear(bpy.types.Operator):
+    bl_idname = "ruri_cloth_physics.collider_clear"
+    bl_label = "取消碰撞体"
     bl_options = {'REGISTER', 'UNDO'}
-
-    direction: EnumProperty(items=(('UP', "上移", ""), ('DOWN', "下移", "")))
 
     @classmethod
     def poll(cls, context):
-        settings = _active_settings(context)
-        return settings is not None and len(settings.colliders) > 1
+        return collider_geom.is_collider(context.object)
 
     def execute(self, context):
-        settings = _active_settings(context)
-        index = settings.active_collider_index
-        target = index - 1 if self.direction == 'UP' else index + 1
-        if target < 0 or target >= len(settings.colliders):
+        context.object.ruri_cloth_physics_collider.is_collider = False
+        return {'FINISHED'}
+
+
+class RCP_OT_collider_end_create(bpy.types.Operator):
+    bl_idname = "ruri_cloth_physics.collider_end_create"
+    bl_label = "新建终点圆"
+    bl_description = "为当前胶囊碰撞体创建终点圆空物体, 并作为子级放在起点圆上方"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        if not collider_geom.is_collider(context.object):
+            return False
+        settings = context.object.ruri_cloth_physics_collider
+        return settings.shape == 'CAPSULE' and collider_geom.end_object(settings) is None
+
+    def execute(self, context):
+        context.view_layer.update()
+        obj = context.object
+        settings = obj.ruri_cloth_physics_collider
+        offset = mathutils.Vector((0.0, 0.0, max(obj.empty_display_size, 0.001) * 4.0))
+        collection = obj.users_collection[0] if obj.users_collection else context.collection
+        end = _link_empty(context, collection, obj.name + ".end", collider_geom.END_DISPLAY_TYPE,
+                          obj.empty_display_size, obj.matrix_world.translation + offset)
+        constraint = collider_geom.bone_constraint(obj)
+        if constraint is not None and constraint.target is not None:
+            collider_geom.attach_to_bone(context.view_layer, end, constraint.target,
+                                         constraint.subtarget)
+        settings.end_object = end
+        return {'FINISHED'}
+
+
+class RCP_OT_collider_attach_bone(bpy.types.Operator):
+    bl_idname = "ruri_cloth_physics.collider_attach_bone"
+    bl_label = "挂到活动骨骼"
+    bl_description = ("给选中的碰撞体加一个跟随活动骨骼的子级约束, 保持当前位置不变。"
+                      "不改父级、不进骨架层级, 删掉约束就彻底脱开")
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        _armature_object, pose_bone = _active_bone(context)
+        return pose_bone is not None
+
+    def execute(self, context):
+        armature_object, pose_bone = _active_bone(context)
+        attached = []
+        for empty in context.selected_objects:
+            if not collider_geom.is_collider(empty):
+                continue
+            collider_geom.attach_to_bone(context.view_layer, empty, armature_object,
+                                         pose_bone.name)
+            end = collider_geom.end_object(empty.ruri_cloth_physics_collider)
+            if end is not None:
+                collider_geom.attach_to_bone(context.view_layer, end, armature_object,
+                                             pose_bone.name)
+            attached.append(empty.name)
+        if not attached:
+            self.report({'WARNING'}, "没有选中任何碰撞体空物体")
             return {'CANCELLED'}
-        settings.colliders.move(index, target)
-        settings.active_collider_index = target
-        settings.collider_serial += 1
+        self.report({'INFO'}, "已挂 %d 个到 %s" % (len(attached), pose_bone.name))
+        return {'FINISHED'}
+
+
+class RCP_OT_collider_detach(bpy.types.Operator):
+    bl_idname = "ruri_cloth_physics.collider_detach"
+    bl_label = "脱开骨骼"
+    bl_description = "删掉选中碰撞体的跟随约束, 让它停在世界空间不再跟骨骼动"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        return collider_geom.is_collider(context.object)
+
+    def execute(self, context):
+        context.view_layer.update()
+        detached = 0
+        for empty in context.selected_objects:
+            if not collider_geom.is_collider(empty):
+                continue
+            for target in (empty, collider_geom.end_object(empty.ruri_cloth_physics_collider)):
+                if target is None or collider_geom.bone_constraint(target) is None:
+                    continue
+                world = target.matrix_world.copy()
+                collider_geom.detach(target)
+                target.matrix_basis = world
+                detached += 1
+        context.view_layer.update()
+        if not detached:
+            self.report({'WARNING'}, "选中的碰撞体本来就没挂骨骼")
+            return {'CANCELLED'}
+        self.report({'INFO'}, "已脱开 %d 个" % detached)
         return {'FINISHED'}
 
 
 class RCP_OT_collider_mirror(bpy.types.Operator):
     bl_idname = "ruri_cloth_physics.collider_mirror"
     bl_label = "镜像碰撞体"
-    bl_description = "按左右命名规则(.L/.R)生成当前碰撞体的镜像副本"
+    bl_description = ("沿世界 X 轴镜像复制选中的碰撞体; 父级骨骼按左右命名规则(.L/.R)一并翻转。"
+                      "镜像出来的是正常朝向的新物体, 不使用负缩放")
     bl_options = {'REGISTER', 'UNDO'}
 
     @classmethod
     def poll(cls, context):
-        settings = _active_settings(context)
-        return settings is not None and len(settings.colliders) > 0
+        return collider_geom.is_collider(context.object)
+
+    def _mirror_world(self, empty):
+        location, rotation, scale = empty.matrix_world.decompose()
+        location.x = -location.x
+        rotation = mathutils.Quaternion((rotation.w, rotation.x, -rotation.y, -rotation.z))
+        return mathutils.Matrix.LocRotScale(location, rotation, scale)
+
+    def _copy(self, context, source, collection):
+        copy = source.copy()
+        copy.name = bpy.utils.flip_name(source.name) or source.name
+        collection.objects.link(copy)
+        world = self._mirror_world(source)
+        constraint = collider_geom.bone_constraint(copy)
+        if constraint is None or constraint.target is None:
+            copy.matrix_basis = world
+            context.view_layer.update()
+            return copy
+        flipped = bpy.utils.flip_name(constraint.subtarget)
+        bone_name = flipped if flipped in constraint.target.pose.bones else constraint.subtarget
+        collider_geom.detach(copy)
+        copy.matrix_basis = world
+        collider_geom.attach_to_bone(context.view_layer, copy, constraint.target, bone_name)
+        return copy
 
     def execute(self, context):
-        settings = _active_settings(context)
-        source = settings.colliders[settings.active_collider_index]
-        flipped_bone = bpy.utils.flip_name(source.bone) if source.bone else ""
-        if not flipped_bone or flipped_bone == source.bone:
-            self.report({'WARNING'}, "骨骼名没有可识别的左右后缀")
+        context.view_layer.update()
+        config = _active_config(context)
+        created = []
+        for source in list(context.selected_objects):
+            if not collider_geom.is_collider(source):
+                continue
+            settings = source.ruri_cloth_physics_collider
+            end = collider_geom.end_object(settings)
+            collection = source.users_collection[0] if source.users_collection \
+                else context.collection
+            copy = self._copy(context, source, collection)
+            if end is not None:
+                copy.ruri_cloth_physics_collider.end_object = self._copy(context, end, collection)
+            _reference_collider(config, copy)
+            created.append(copy.name)
+        if not created:
+            self.report({'WARNING'}, "没有选中任何碰撞体空物体")
             return {'CANCELLED'}
-        if flipped_bone not in context.object.data.bones:
-            self.report({'WARNING'}, "镜像骨骼 %s 不存在" % flipped_bone)
-            return {'CANCELLED'}
-
-        item = settings.colliders.add()
-        item.name = _unique_name(settings.colliders, bpy.utils.flip_name(source.name) or source.name)
-        item.shape = source.shape
-        item.bone = flipped_bone
-        center = list(source.center)
-        center[0] = -center[0]
-        item.center = center
-        item.radius = source.radius
-        item.start_radius = source.start_radius
-        item.end_radius = source.end_radius
-        item.radius_separation = source.radius_separation
-        item.length = source.length
-        item.direction = source.direction
-        item.reverse_direction = source.reverse_direction
-        item.aligned_on_center = source.aligned_on_center
-        settings.active_collider_index = len(settings.colliders) - 1
-        settings.collider_serial += 1
+        self.report({'INFO'}, "已镜像 %d 个: %s" % (len(created), ", ".join(created[:4])))
         return {'FINISHED'}
 
 
 class RCP_OT_colliders_from_selected(bpy.types.Operator):
     bl_idname = "ruri_cloth_physics.colliders_from_selected"
-    bl_label = "从选中骨骼生成碰撞体"
-    bl_description = "为每根选中骨骼创建一个沿骨骼方向的胶囊碰撞体, 并加入当前配置的引用列表"
+    bl_label = "从选中骨骼生成胶囊"
+    bl_description = ("为每根选中骨骼生成一根贴合它的胶囊碰撞体(两个圆形空物体, 分别在骨骼首尾), "
+                      "父级到该骨骼并加入当前配置的引用列表")
     bl_options = {'REGISTER', 'UNDO'}
 
     @classmethod
@@ -227,32 +411,81 @@ class RCP_OT_colliders_from_selected(bpy.types.Operator):
         return _active_settings(context) is not None and len(_selected_bone_names(context)) > 0
 
     def execute(self, context):
+        context.view_layer.update()
         obj = context.object
-        settings = _active_settings(context)
         config = _active_config(context)
+        collection = _collider_collection(context, obj)
         created = 0
         for name in _selected_bone_names(context):
-            bone = obj.data.bones.get(name)
-            if bone is None:
+            pose_bone = obj.pose.bones.get(name)
+            if pose_bone is None:
                 continue
-            item = settings.colliders.add()
-            item.name = _unique_name(settings.colliders, name)
-            item.shape = 'CAPSULE'
-            item.bone = name
-            item.direction = 'Y'
-            item.aligned_on_center = True
-            item.center = (0.0, bone.length * 0.5, 0.0)
-            item.length = max(bone.length, 0.001)
-            radius = max(bone.length * 0.2, 0.005)
-            item.radius = radius
-            item.start_radius = radius
-            item.end_radius = radius
-            if config is not None:
-                reference = config.collider_collision.collider_references.add()
-                reference.collider = item.name
+            matrix = obj.matrix_world
+            radius = max(pose_bone.length * 0.2, 0.005)
+            empty, end = _make_capsule(context, collection, name + ".胶囊",
+                                       matrix @ pose_bone.head, matrix @ pose_bone.tail, radius)
+            for part in (empty, end):
+                collider_geom.attach_to_bone(context.view_layer, part, obj, name)
+            _reference_collider(config, empty)
             created += 1
-        settings.collider_serial += 1
-        self.report({'INFO'}, "已生成 %d 个碰撞体" % created)
+        if not created:
+            self.report({'WARNING'}, "选中的骨骼都不在姿态里")
+            return {'CANCELLED'}
+        self.report({'INFO'}, "已生成 %d 根胶囊" % created)
+        return {'FINISHED'}
+
+
+class RCP_OT_collider_reference_clean(bpy.types.Operator):
+    bl_idname = "ruri_cloth_physics.collider_reference_clean"
+    bl_label = "清理失效引用"
+    bl_description = "删掉本骨架所有配置里指向空白或已不是碰撞体的引用行"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        return _active_settings(context) is not None
+
+    def execute(self, context):
+        removed = 0
+        for config in _active_settings(context).configs:
+            collision = config.collider_collision
+            references = collision.collider_references
+            for index in range(len(references) - 1, -1, -1):
+                if not collider_geom.is_collider(references[index].object):
+                    references.remove(index)
+                    removed += 1
+            collision.active_collider_reference_index = max(0, min(
+                collision.active_collider_reference_index, len(references) - 1))
+        if not removed:
+            self.report({'INFO'}, "没有失效引用")
+            return {'CANCELLED'}
+        self.report({'INFO'}, "已清理 %d 行失效引用" % removed)
+        return {'FINISHED'}
+
+
+class RCP_OT_collider_reference_add_selected(bpy.types.Operator):
+    bl_idname = "ruri_cloth_physics.collider_reference_add_selected"
+    bl_label = "添加选中的碰撞体"
+    bl_description = "把视口里选中的碰撞体空物体加入当前配置的引用列表(自动去重)"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        return _active_config(context) is not None
+
+    def execute(self, context):
+        config = _active_config(context)
+        added = 0
+        for empty in context.selected_objects:
+            if not collider_geom.is_collider(empty):
+                continue
+            before = len(config.collider_collision.collider_references)
+            _reference_collider(config, empty)
+            added += len(config.collider_collision.collider_references) - before
+        if not added:
+            self.report({'WARNING'}, "选中的对象里没有新的碰撞体")
+            return {'CANCELLED'}
+        self.report({'INFO'}, "已添加 %d 个碰撞体引用" % added)
         return {'FINISHED'}
 
 
@@ -300,7 +533,7 @@ class RCP_OT_list_add(bpy.types.Operator):
         if collection is None:
             return {'CANCELLED'}
         collection.add()
-        setattr(owner, index_name, len(collection) - 1)
+        _set_active_index(owner, index_name, len(collection) - 1)
         config = _active_config(context)
         if self.list_id in {'ROOT_BONES', 'ATTRIBUTE_OVERRIDES', 'COLLISION_BONES',
                             'SKINNING_BONES'}:
@@ -326,13 +559,11 @@ class RCP_OT_list_remove(bpy.types.Operator):
         index = getattr(owner, index_name)
         index = min(index, len(collection) - 1)
         collection.remove(index)
-        setattr(owner, index_name, min(index, len(collection) - 1))
+        _set_active_index(owner, index_name, min(index, len(collection) - 1))
         config = _active_config(context)
         if self.list_id in {'ROOT_BONES', 'ATTRIBUTE_OVERRIDES', 'COLLISION_BONES',
                             'SKINNING_BONES'}:
             _mark_rebuild(config)
-        else:
-            context.object.ruri_cloth_physics.collider_serial += 1
         return {'FINISHED'}
 
 
@@ -357,7 +588,7 @@ class RCP_OT_list_move(bpy.types.Operator):
         if target < 0 or target >= len(collection):
             return {'CANCELLED'}
         collection.move(index, target)
-        setattr(owner, index_name, target)
+        _set_active_index(owner, index_name, target)
         config = _active_config(context)
         if self.list_id == 'ROOT_BONES':
             _mark_rebuild(config)
@@ -393,7 +624,7 @@ class RCP_OT_bones_from_selected(bpy.types.Operator):
             existing.add(name)
             added += 1
         if added:
-            setattr(owner, index_name, len(collection) - 1)
+            _set_active_index(owner, index_name, len(collection) - 1)
             _mark_rebuild(_active_config(context))
         self.report({'INFO'}, "已添加 %d 根骨骼" % added)
         return {'FINISHED'}
@@ -466,27 +697,6 @@ class RCP_OT_reset(bpy.types.Operator):
 
     def execute(self, context):
         runtime.request_reset(context.object, self.mode)
-        return {'FINISHED'}
-
-
-class RCP_OT_collider_activate(bpy.types.Operator):
-    bl_idname = "ruri_cloth_physics.collider_activate"
-    bl_label = "选中该碰撞体"
-    bl_description = "把视口里点到的碰撞体设为当前碰撞体"
-    bl_options = {'REGISTER', 'UNDO'}
-
-    index: IntProperty(default=0)
-
-    @classmethod
-    def poll(cls, context):
-        return _active_settings(context) is not None
-
-    def execute(self, context):
-        settings = _active_settings(context)
-        if not 0 <= self.index < len(settings.colliders):
-            return {'CANCELLED'}
-        settings.active_collider_index = self.index
-        self.report({'INFO'}, "当前碰撞体: %s" % settings.colliders[self.index].name)
         return {'FINISHED'}
 
 
@@ -760,7 +970,6 @@ class RCP_OT_promote_degenerate(bpy.types.Operator):
 
 
 class RCP_MT_bones(bpy.types.Menu):
-    """Right-click entry point. Right-click any row here to put it on the Q menu."""
 
     bl_idname = "RCP_MT_bones"
     bl_label = "Ruri 布料物理"
@@ -773,8 +982,6 @@ class RCP_MT_bones(bpy.types.Menu):
             return
         layout.prop(settings, "show_bones", toggle=True,
                     icon='HIDE_OFF' if settings.show_bones else 'HIDE_ON')
-        layout.prop(settings, "show_colliders", toggle=True,
-                    icon='MESH_CAPSULE')
         layout.separator()
         layout.operator("ruri_cloth_physics.root_add_selected", icon='ADD')
         layout.operator("ruri_cloth_physics.root_remove_selected", icon='REMOVE')
@@ -794,6 +1001,7 @@ class RCP_MT_bones(bpy.types.Menu):
         operator.list_id = 'ATTRIBUTE_OVERRIDES'
         operator.attribute = 'FIXED'
         layout.operator("ruri_cloth_physics.colliders_from_selected", icon='MESH_CAPSULE')
+        layout.operator("ruri_cloth_physics.collider_attach_bone", icon='BONE_DATA')
         layout.separator()
         layout.operator("ruri_cloth_physics.reset", icon='FILE_REFRESH')
 
@@ -814,16 +1022,20 @@ _CLASSES = (
     RCP_OT_config_add,
     RCP_OT_config_remove,
     RCP_OT_config_move,
-    RCP_OT_collider_add,
-    RCP_OT_collider_remove,
-    RCP_OT_collider_move,
+    RCP_OT_collider_create,
+    RCP_OT_collider_convert,
+    RCP_OT_collider_clear,
+    RCP_OT_collider_end_create,
+    RCP_OT_collider_attach_bone,
+    RCP_OT_collider_detach,
     RCP_OT_collider_mirror,
     RCP_OT_colliders_from_selected,
+    RCP_OT_collider_reference_add_selected,
+    RCP_OT_collider_reference_clean,
     RCP_OT_list_add,
     RCP_OT_list_remove,
     RCP_OT_list_move,
     RCP_OT_bones_from_selected,
-    RCP_OT_collider_activate,
     RCP_OT_root_add_selected,
     RCP_OT_root_remove_selected,
     RCP_OT_chain_select,

@@ -7,6 +7,7 @@ from bpy.app.handlers import persistent
 
 from . import armature
 from . import bone_binding
+from . import collider_geom
 from . import curve_host
 from . import wind_geom
 from ..cloth_kernel import compile as kernel_compile
@@ -74,12 +75,7 @@ class ColliderBinding:
     def __init__(self):
         self.count = 0
         self.kinds = np.zeros(0, dtype=np.int32)
-        self.bone_names = []
-        self.centers = np.zeros((0, 3), dtype=np.float32)
-        self.sizes = np.zeros((0, 3), dtype=np.float32)
-        self.axes = np.zeros((0, 3), dtype=np.float32)
-        self.aligned = np.zeros(0, dtype=bool)
-        self.token = ()
+        self.objects = []
 
 
 class RuntimeEntry:
@@ -90,7 +86,6 @@ class RuntimeEntry:
         self.binding = None
         self.topology_token = None
         self.collider_token = None
-        self.collider_serial = -1
         self.params_token = None
         self.host = None
         self.write_mask = None
@@ -295,60 +290,32 @@ def _build_params(config):
     }
 
 
-_AXIS_VECTORS = {
-    'X': np.array([1.0, 0.0, 0.0], dtype=np.float32),
-    'Y': np.array([0.0, 1.0, 0.0], dtype=np.float32),
-    'Z': np.array([0.0, 0.0, 1.0], dtype=np.float32),
-}
-
-KIND_VALUES = {'SPHERE': defs.COLLIDER_SPHERE, 'CAPSULE': defs.COLLIDER_CAPSULE,
-               'PLANE': defs.COLLIDER_PLANE}
-
-
-def build_collider_binding(obj, config):
-    binding = ColliderBinding()
-    pool = obj.ruri_cloth_physics.colliders
-    kinds = []
-    bone_names = []
-    centers = []
-    sizes = []
-    axes = []
-    aligned = []
-    token = []
+def _collider_objects(config):
     for reference in config.collider_collision.collider_references:
-        item = pool.get(reference.collider) if reference.collider else None
-        if item is None or not item.enabled:
+        target = reference.object
+        settings = collider_geom.settings_of(target)
+        if settings is None or not settings.is_collider:
             continue
-        if item.shape == 'SPHERE':
-            kind = defs.COLLIDER_SPHERE
-            size = (item.radius, item.radius, 0.0)
-        elif item.shape == 'CAPSULE':
-            kind = defs.COLLIDER_CAPSULE
-            if item.radius_separation:
-                size = (item.start_radius, item.end_radius, item.length)
-            else:
-                size = (item.start_radius, item.start_radius, item.length)
-        else:
-            kind = defs.COLLIDER_PLANE
-            size = (0.0, 0.0, 0.0)
-        axis = _AXIS_VECTORS[item.direction] * (-1.0 if item.reverse_direction else 1.0)
-        kinds.append(kind)
-        bone_names.append(item.bone)
-        centers.append(tuple(item.center))
-        sizes.append(size)
-        axes.append(axis)
-        aligned.append(item.aligned_on_center)
-        token.append((item.name, item.shape, item.bone, tuple(item.center), size,
-                      item.direction, item.reverse_direction, item.aligned_on_center))
+        yield target, settings
 
+
+def _collider_token(config):
+    entries = []
+    for target, settings in _collider_objects(config):
+        end = collider_geom.end_object(settings)
+        entries.append((target.session_uid, settings.shape,
+                        end.session_uid if end is not None else 0))
+    return tuple(entries)
+
+
+def build_collider_binding(config):
+    binding = ColliderBinding()
+    kinds = []
+    for target, settings in _collider_objects(config):
+        binding.objects.append(target)
+        kinds.append(collider_geom.KIND_VALUES[settings.shape])
     binding.count = len(kinds)
     binding.kinds = np.array(kinds, dtype=np.int32)
-    binding.bone_names = bone_names
-    binding.centers = np.array(centers, dtype=np.float32).reshape(-1, 3)
-    binding.sizes = np.array(sizes, dtype=np.float32).reshape(-1, 3)
-    binding.axes = np.array(axes, dtype=np.float32).reshape(-1, 3)
-    binding.aligned = np.array(aligned, dtype=bool)
-    binding.token = tuple(token)
     return binding
 
 
@@ -359,10 +326,10 @@ def ensure_entry(obj, config_index, config):
         entry = RuntimeEntry()
         _registry[key] = entry
 
-    settings = obj.ruri_cloth_physics
     topology_token = _topology_token(config)
     params_token = _params_token(obj, config)
-    signature_rev = (topology_token, params_token, settings.collider_serial, obj.mode)
+    collider_token = _collider_token(config)
+    signature_rev = (topology_token, params_token, collider_token, obj.mode)
     if (entry.setup is not None and not config.rebuild_pending
             and entry.signature_rev == signature_rev):
         return entry
@@ -386,9 +353,8 @@ def ensure_entry(obj, config_index, config):
             return entry
         entry.setup = setup
         entry.kinematics = armature.KinematicsHost(setup)
-        entry.binding = build_collider_binding(obj, config)
-        entry.collider_token = entry.binding.token
-        entry.collider_serial = obj.ruri_cloth_physics.collider_serial
+        entry.binding = build_collider_binding(config)
+        entry.collider_token = collider_token
         entry.params_token = None
         attrs = setup.attributes
         invalid = ((attrs & defs.ATTR_MOVE) == 0) & ((attrs & defs.ATTR_FIXED) == 0)
@@ -399,13 +365,10 @@ def ensure_entry(obj, config_index, config):
         entry.params_token = params_token
         entry.team = _world.register_team(setup, params, entry.binding)
     elif entry.team is not None:
-        if entry.collider_serial != obj.ruri_cloth_physics.collider_serial:
-            binding = build_collider_binding(obj, config)
-            if binding.token != entry.collider_token:
-                entry.binding = binding
-                entry.collider_token = binding.token
-                _world.update_colliders(entry.team, binding)
-            entry.collider_serial = obj.ruri_cloth_physics.collider_serial
+        if entry.collider_token != collider_token:
+            entry.binding = build_collider_binding(config)
+            entry.collider_token = collider_token
+            _world.update_colliders(entry.team, entry.binding)
 
     if entry.team is not None:
         if entry.params_token != params_token:
@@ -574,10 +537,16 @@ def run_frame(scene, frame_delta_time):
 
     collected = []
     name_maps = {}
+    depsgraph = None
+    evaluated_objects = None
+    collider_cache = {}
     for obj in _active_armatures(scene):
         settings = obj.ruri_cloth_physics
+        if depsgraph is None:
+            depsgraph = bpy.context.evaluated_depsgraph_get()
+            evaluated_objects = collider_geom.evaluated_objects(depsgraph)
         if frame_globals.zones is None:
-            frame_globals.zones = _gather_wind_zones(scene)
+            frame_globals.zones = _gather_wind_zones(scene, depsgraph)
 
         matrix_world = armature.read_matrix(obj.matrix_world)
         matrix_world_inverse = np.linalg.inv(matrix_world)
@@ -623,26 +592,10 @@ def run_frame(scene, frame_delta_time):
 
             binding = entry.binding
             if binding.count:
-                positions = np.zeros((binding.count, 3), dtype=np.float32)
-                rotations = np.zeros((binding.count, 4), dtype=np.float32)
-                scales = np.ones((binding.count, 3), dtype=np.float32)
-                enabled = np.ones(binding.count, dtype=bool)
-                pose_bones = obj.pose.bones
-                collider_start, _ = batch.collider_slices[entry_index]
-                collider_index = batch.collider_pose_index
-                for k in range(binding.count):
-                    bone_index = int(collider_index[collider_start + k])
-                    pose_bone = pose_bones[bone_index] if bone_index >= 0 else None
-                    if pose_bone is not None:
-                        world = obj.matrix_world @ pose_bone.matrix
-                    else:
-                        world = obj.matrix_world
-                    location, rotation, scale = world.decompose()
-                    positions[k] = (location.x, location.y, location.z)
-                    rotations[k] = (rotation.x, rotation.y, rotation.z, rotation.w)
-                    scales[k] = (scale.x, scale.y, scale.z)
+                positions, rotations, tips, radii, enabled = collider_geom.gather(
+                    binding.objects, depsgraph, evaluated_objects, collider_cache)
                 kernel_io.set_team_collider_input(_world, entry.team, positions, rotations,
-                                                  scales, enabled)
+                                                  tips, radii, enabled)
 
             name_map[config.name] = entry.team
             collected.append((entry, obj, config, batch, entry_index, start, stop,

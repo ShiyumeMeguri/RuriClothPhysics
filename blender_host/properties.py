@@ -2,7 +2,6 @@ import math
 import re
 
 import bpy
-import mathutils
 from bpy.props import (
     BoolProperty,
     CollectionProperty,
@@ -55,9 +54,6 @@ def _topology_update(self, context):
 
 
 def _collider_update(self, context):
-    obj = _owner_object(self)
-    if obj is not None and obj.type == 'ARMATURE':
-        obj.ruri_cloth_physics.collider_serial += 1
     _redraw()
 
 
@@ -87,6 +83,14 @@ def _wind_mode_update(self, context):
     obj = _owner_object(self)
     if obj is not None and obj.type == 'EMPTY':
         wind_geom.sync_display(obj, self)
+    _redraw(self, context)
+
+
+def _collider_shape_update(self, context):
+    from . import collider_geom
+    obj = _owner_object(self)
+    if obj is not None and obj.type == 'EMPTY' and self.is_collider:
+        collider_geom.sync_display(obj)
     _redraw(self, context)
 
 
@@ -277,8 +281,39 @@ class RCPBoneReference(bpy.types.PropertyGroup):
     bone: _bone_property("骨骼", _topology_update)
 
 
+def _collider_reference_poll(self, obj):
+    from . import collider_geom
+    return collider_geom.is_collider(obj)
+
+
+def _collider_reference_index_update(self, context):
+    from . import collider_geom
+    from . import selection_sync
+    obj = _owner_object(self)
+    if obj is None or obj.type != 'ARMATURE':
+        return
+    if not obj.ruri_cloth_physics.sync_list_selection or selection_sync.is_suppressed():
+        return
+    index = self.active_collider_reference_index
+    if not 0 <= index < len(self.collider_references):
+        return
+    target = self.collider_references[index].object
+    view_layer = context.view_layer if context is not None else None
+    if not collider_geom.is_collider(target) or view_layer is None:
+        return
+    if target.name not in view_layer.objects or not target.visible_get():
+        return
+    with selection_sync.suppressed():
+        for other in context.selected_objects:
+            other.select_set(False)
+        target.select_set(True)
+
+
 class RCPColliderReference(bpy.types.PropertyGroup):
-    collider: StringProperty(name="碰撞体", default="", update=_collider_update)
+    object: PointerProperty(
+        name="碰撞体", type=bpy.types.Object, poll=_collider_reference_poll,
+        description="参与本配置碰撞的碰撞体空物体。下拉框只列出已标记为碰撞体的空物体",
+        update=_collider_update)
 
 
 ATTRIBUTE_OVERRIDE_ITEMS = (
@@ -306,48 +341,22 @@ class RCPAttributeOverride(bpy.types.PropertyGroup):
         update=_topology_update)
 
 
-def _collider_rotation(item):
-    obj = item.id_data
-    if obj is None or getattr(obj, "type", None) != 'ARMATURE':
-        return None
-    if item.bone and obj.pose is not None:
-        pose_bone = obj.pose.bones.get(item.bone)
-        if pose_bone is not None:
-            return (obj.matrix_world @ pose_bone.matrix).to_3x3()
-    return obj.matrix_world.to_3x3()
-
-
-def _center_world_get(self):
-    rotation = _collider_rotation(self)
-    if rotation is None:
-        return tuple(self.center)
-    return tuple(rotation @ mathutils.Vector(self.center))
-
-
-def _center_world_set(self, value):
-    rotation = _collider_rotation(self)
-    if rotation is None:
-        self.center = value
-        return
-    inverse = rotation.copy()
-    inverse.invert_safe()
-    self.center = tuple(inverse @ mathutils.Vector(value))
-
-
 COLLIDER_SHAPE_ITEMS = (
-    ('SPHERE', "球", "球形碰撞体", 'MESH_UVSPHERE', 0),
-    ('CAPSULE', "胶囊", "胶囊碰撞体", 'MESH_CAPSULE', 1),
-    ('PLANE', "平面", "无限平面碰撞体", 'MESH_PLANE', 2),
-)
-
-CAPSULE_DIRECTION_ITEMS = (
-    ('X', "X 轴", "沿骨骼局部 X 轴"),
-    ('Y', "Y 轴", "沿骨骼局部 Y 轴(骨骼方向)"),
-    ('Z', "Z 轴", "沿骨骼局部 Z 轴"),
+    ('SPHERE', "球", "球形碰撞体: 空物体本身显示为球, 半径 = 显示尺寸 × 缩放", 'SPHERE', 0),
+    ('CAPSULE', "胶囊", "胶囊碰撞体: 本空物体是起点圆, 另一个圆形空物体是终点圆; "
+                        "两端各自的位置与半径直接决定胶囊形状", 'MESH_CAPSULE', 1),
+    ('PLANE', "平面", "无限平面碰撞体: 平面法线 = 空物体的 +Z 轴", 'MESH_PLANE', 2),
 )
 
 
-class RCPColliderItem(bpy.types.PropertyGroup):
+def _collider_end_poll(self, obj):
+    from . import collider_geom
+    return (obj.type == 'EMPTY' and obj is not self.id_data
+            and not collider_geom.is_collider(obj))
+
+
+class RCPColliderSettings(bpy.types.PropertyGroup):
+    is_collider: BoolProperty(default=False, options={'HIDDEN'}, update=_collider_shape_update)
     enabled: BoolProperty(
         name="启用", default=True,
         description="关闭后本碰撞体对所有配置立即失效, 中途重新启用是安全的: "
@@ -355,51 +364,17 @@ class RCPColliderItem(bpy.types.PropertyGroup):
                     "不会把它当成'从禁用前的位置一路扫过来'而把布料打飞。"
                     "另外, 当它被缩放到接近 0 时会自动挂起, 恢复正常缩放时同样重新快照。",
         update=_collider_update)
-    shape: EnumProperty(name="形状", items=COLLIDER_SHAPE_ITEMS, default='SPHERE',
-                        description="碰撞体的几何形状。球最快, 胶囊适合四肢躯干, 平面用来做地面。",
-                        update=_collider_update)
-    bone_uid: StringProperty(default="", options={'HIDDEN'})
-    bone: _bone_property("骨骼", _collider_update)
-    center: FloatVectorProperty(name="中心偏移", size=3, default=(0.0, 0.0, 0.0),
-                                subtype='TRANSLATION', update=_collider_update)
-    center_world: FloatVectorProperty(
-        name="中心偏移(世界轴)", size=3, subtype='TRANSLATION',
-        description="与上面同一个偏移, 但按世界 XYZ 表示: 上下就是上下, 左右就是左右",
-        get=_center_world_get, set=_center_world_set)
-    radius: FloatProperty(
-        name="半径", default=0.05, min=0.001, soft_max=0.5,
-        description="球形碰撞体的半径(米)。仅形状 = 球时使用; 胶囊请用下面的始端/终端半径。",
-        update=_collider_update)
-    start_radius: FloatProperty(
-        name="始端半径", default=0.05, min=0.001, soft_max=0.5,
-        description="胶囊起点一端的半径(米)。未勾选'两端半径不同'时, 终点端也用这个值。",
-        update=_collider_update)
-    end_radius: FloatProperty(
-        name="终端半径", default=0.05, min=0.001, soft_max=0.5,
-        description="胶囊终点一端的半径(米)。【只有勾选'两端半径不同'后才会被采用】",
-        update=_collider_update)
-    radius_separation: BoolProperty(
-        name="两端半径不同", default=False,
-        description="让胶囊两端可以有不同粗细, 做成锥形(大腿→小腿、上臂→前臂)。"
-                    "关闭时终端半径被忽略, 两端都用始端半径。",
-        update=_collider_update)
-    length: FloatProperty(
-        name="长度", default=0.2, min=0.001, soft_max=2.0,
-        description="胶囊两端球心之间连同端帽的总长度(米)。",
-        update=_collider_update)
-    direction: EnumProperty(
-        name="轴向", items=CAPSULE_DIRECTION_ITEMS, default='Y',
-        description="胶囊沿骨骼的哪根局部轴延伸。Blender 骨骼的指向是局部 Y, 所以贴合骨头一般选 Y。",
-        update=_collider_update)
-    reverse_direction: BoolProperty(
-        name="轴向反转", default=False,
-        description="把胶囊的延伸方向掉个头。当胶囊长到了骨骼的反侧时勾这个。",
-        update=_collider_update)
-    aligned_on_center: BoolProperty(
-        name="以中心为原点", default=True,
-        description="勾选 = 胶囊以骨骼原点为中心向两侧各伸一半长度; "
-                    "取消 = 从骨骼原点开始, 整根长度只往轴向一侧伸出(贴合从关节起算的肢体)。",
-        update=_collider_update)
+    shape: EnumProperty(
+        name="形状", items=COLLIDER_SHAPE_ITEMS, default='SPHERE',
+        description="碰撞体的几何形状。球最快, 胶囊适合四肢躯干, 平面用来做地面。"
+                    "形状会同步切换空物体的显示方式。",
+        update=_collider_shape_update)
+    end_object: PointerProperty(
+        name="终点圆", type=bpy.types.Object, poll=_collider_end_poll,
+        description="胶囊另一端的圆形空物体: 它的位置 = 终点球心, 它的显示尺寸 × 缩放 = 终点半径。"
+                    "两端可以分别父级到不同骨骼, 胶囊会跟着一起拉伸。"
+                    "留空 = 胶囊退化成起点处的一个球。",
+        update=_collider_shape_update)
 
 
 class RCPTetherSettings(bpy.types.PropertyGroup):
@@ -510,7 +485,8 @@ class RCPColliderCollisionSettings(bpy.types.PropertyGroup):
         update=_param_update)
     limit_distance: PointerProperty(type=RCPCurvePushoutDistance)
     collider_references: CollectionProperty(type=RCPColliderReference)
-    active_collider_reference_index: IntProperty(default=0)
+    active_collider_reference_index: IntProperty(default=0,
+                                                 update=_collider_reference_index_update)
     collision_bones: CollectionProperty(type=RCPBoneReference)
     active_collision_bone_index: IntProperty(default=0)
 
@@ -924,22 +900,41 @@ class RCPWindZoneSettings(bpy.types.PropertyGroup):
                     "勾选本项后它改为叠加, 不参与抢占。最多同时叠加 3 个, 超出的被忽略。")
 
 
+def _collider_layer(self):
+    from . import collider_geom
+    obj = _owner_object(self)
+    scene = bpy.context.scene
+    if obj is None or scene is None:
+        return None
+    collection = collider_geom.collection_for(scene, obj)
+    return collider_geom.layer_collection_for(bpy.context.view_layer, collection)
+
+
+def _show_colliders_get(self):
+    layer = _collider_layer(self)
+    return True if layer is None else not layer.hide_viewport
+
+
+def _show_colliders_set(self, value):
+    layer = _collider_layer(self)
+    if layer is not None:
+        layer.hide_viewport = not value
+
+
 class RCPObjectSettings(bpy.types.PropertyGroup):
     live: BoolProperty(name="实时模拟", default=False,
                        description="在播放/拖动时间轴时实时模拟布料")
     show_colliders: BoolProperty(
-        name="编辑碰撞体", default=False, update=_redraw,
-        description="打开后在视口里画出全部碰撞体并显示拖拽控制器, 平时关闭不干扰视图; "
-                    "与模拟是否开启无关")
-    show_collider_gizmo: BoolProperty(
-        name="拖拽控制器", default=True, update=_redraw,
-        description="编辑碰撞体时, 为当前碰撞体显示可拖拽的半径/长度/位置控制器")
+        name="显示碰撞体", get=_show_colliders_get, set=_show_colliders_set,
+        description="开关本骨架碰撞体集合的显示。这只是视图里的眼睛, 碰撞照常参与模拟; "
+                    "要让某个碰撞体不参与请用它自己的启用开关")
     sync_list_selection: BoolProperty(
         name="列表联动视口选中", default=True,
-        description="在根骨骼列表里选中一行时, 同步选中并激活视口里的那根骨骼")
+        description="在根骨骼列表里选中一行时同步选中视口里的那根骨骼; "
+                    "在碰撞体列表里选中一行时同步选中对应的碰撞体空物体, 可以直接 G/R/S 摆它")
     gizmo_size: FloatProperty(
         name="控制器大小", default=1.0, min=0.1, max=6.0, update=_redraw,
-        description="碰撞体拖拽控制器的抓取块大小倍率, 觉得太小抓不住就调大")
+        description="粒子半径拖拽控制器的抓取块大小倍率, 觉得太小抓不住就调大")
     show_bones: BoolProperty(
         name="显示骨骼", default=False, update=_redraw,
         description="在视口里画出配置驱动的骨骼: 根骨骼与被带动的子骨骼两种颜色; "
@@ -958,10 +953,7 @@ class RCPObjectSettings(bpy.types.PropertyGroup):
         description="关闭时骨骼画在模型前面, 不会被身体挡住")
     configs: CollectionProperty(type=RCPClothConfig)
     active_config_index: IntProperty(default=0)
-    colliders: CollectionProperty(type=RCPColliderItem)
-    active_collider_index: IntProperty(default=0, update=_redraw)
     param_serial: IntProperty(default=0, options={'HIDDEN'})
-    collider_serial: IntProperty(default=0, options={'HIDDEN'})
 
 
 BACKEND_ITEMS = (
@@ -997,7 +989,6 @@ _CLASSES = tuple(_curve_classes) + tuple(_check_classes) + (
     RCPBoneReference,
     RCPColliderReference,
     RCPAttributeOverride,
-    RCPColliderItem,
     RCPTetherSettings,
     RCPDistanceSettings,
     RCPTriangleBendingSettings,
@@ -1013,6 +1004,7 @@ _CLASSES = tuple(_curve_classes) + tuple(_check_classes) + (
     RCPGizmoSettings,
     RCPClothConfig,
     RCPWindZoneSettings,
+    RCPColliderSettings,
     RCPObjectSettings,
     RCPSceneSettings,
 )
@@ -1023,11 +1015,13 @@ def register():
         bpy.utils.register_class(cls)
     bpy.types.Object.ruri_cloth_physics = PointerProperty(type=RCPObjectSettings)
     bpy.types.Object.ruri_cloth_physics_wind = PointerProperty(type=RCPWindZoneSettings)
+    bpy.types.Object.ruri_cloth_physics_collider = PointerProperty(type=RCPColliderSettings)
     bpy.types.Scene.ruri_cloth_physics = PointerProperty(type=RCPSceneSettings)
 
 
 def unregister():
     del bpy.types.Scene.ruri_cloth_physics
+    del bpy.types.Object.ruri_cloth_physics_collider
     del bpy.types.Object.ruri_cloth_physics_wind
     del bpy.types.Object.ruri_cloth_physics
     for cls in reversed(_CLASSES):

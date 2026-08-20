@@ -3,16 +3,19 @@ import os
 
 import bpy
 
-FORMAT_VERSION = 1
+FORMAT_VERSION = 4
 
 SCOPE_OBJECT = 'OBJECT'
 SCOPE_CONFIG = 'CONFIG'
+SCOPE_COLLIDERS = 'COLLIDERS'
 
 MODE_REPLACE = 'REPLACE'
 MODE_APPEND = 'APPEND'
 
+COLLIDER_REFERENCE_GROUP = 'RCPColliderReference'
+
 SKIP_EXACT = frozenset({
-    "rna_type", "node_name", "param_serial", "collider_serial", "rebuild_pending",
+    "rna_type", "node_name", "param_serial", "rebuild_pending",
 })
 
 
@@ -51,23 +54,41 @@ def read_group(group):
     return data
 
 
-def _write_value(owner, prop, value, report):
+class LoadState:
+
+    def __init__(self, armature_object, context):
+        self.armature_object = armature_object
+        self.context = context
+        self.report = {}
+        self.colliders = {}
+
+
+def _resolve_pointer(owner, prop, value, state):
+    if owner.bl_rna.identifier == COLLIDER_REFERENCE_GROUP and prop.identifier == "object":
+        target = state.colliders.get(value)
+        if value and target is None:
+            state.report.setdefault("missing_colliders", []).append(value)
+        return target
+    target = bpy.data.objects.get(value) if value else None
+    if value and target is None:
+        state.report.setdefault("missing_objects", []).append(value)
+    return target
+
+
+def _write_value(owner, prop, value, state):
     identifier = prop.identifier
     if prop.type == 'POINTER':
         if _is_id_pointer(prop):
-            target = bpy.data.objects.get(value) if value else None
-            if value and target is None:
-                report.setdefault("missing_objects", []).append(value)
-            setattr(owner, identifier, target)
+            setattr(owner, identifier, _resolve_pointer(owner, prop, value, state))
             return
         if isinstance(value, dict):
-            write_group(getattr(owner, identifier), value, report)
+            write_group(getattr(owner, identifier), value, state)
         return
     if prop.type == 'COLLECTION':
         collection = getattr(owner, identifier)
         collection.clear()
         for entry in value or ():
-            write_group(collection.add(), entry, report)
+            write_group(collection.add(), entry, state)
         return
     if getattr(prop, "is_array", False):
         setattr(owner, identifier, tuple(value))
@@ -75,7 +96,7 @@ def _write_value(owner, prop, value, report):
     setattr(owner, identifier, value)
 
 
-def write_group(group, data, report):
+def write_group(group, data, state):
     properties = {prop.identifier: prop for prop in group.bl_rna.properties}
     ordered = [key for key in data if key != "points_serialized"]
     if "points_serialized" in data:
@@ -83,23 +104,62 @@ def write_group(group, data, report):
     for key in ordered:
         prop = properties.get(key)
         if prop is None or _skip(key):
-            report.setdefault("unknown_properties", []).append(key)
+            state.report.setdefault("unknown_properties", []).append(key)
             continue
         if prop.is_readonly and not (prop.type == 'COLLECTION'
                                      or (prop.type == 'POINTER' and not _is_id_pointer(prop))):
             continue
         try:
-            _write_value(group, prop, data[key], report)
+            _write_value(group, prop, data[key], state)
         except (TypeError, ValueError) as error:
-            report.setdefault("rejected", []).append("%s: %s" % (key, error))
+            state.report.setdefault("rejected", []).append("%s: %s" % (key, error))
 
 
-def serialize(settings, scope, config_index=0):
+def _referenced_colliders(configs):
+    from . import collider_geom
+    for config in configs:
+        for reference in config.collider_collision.collider_references:
+            if collider_geom.is_collider(reference.object):
+                yield reference.object
+
+
+def collider_set(configs, scene, armature_object, include_owned):
+    from . import collider_geom
+    candidates = list(_referenced_colliders(configs))
+    if include_owned:
+        candidates.extend(collider_geom.owned_colliders(scene, armature_object))
+    ordered = []
+    seen = set()
+    for target in candidates:
+        if target.name in seen:
+            continue
+        seen.add(target.name)
+        ordered.append(target)
+    return ordered
+
+
+def _collider_table(colliders, armature_object):
+    from . import collider_geom
+    return [collider_geom.serialize(target, armature_object) for target in colliders]
+
+
+def _assignments(configs):
+    return {config.name: [target.name for target in _referenced_colliders([config])]
+            for config in configs}
+
+
+def serialize(settings, scope, scene, config_index=0):
+    armature_object = settings.id_data
+    configs = [settings.configs[config_index]] if scope == SCOPE_CONFIG else list(settings.configs)
+    colliders = collider_set(configs, scene, armature_object, scope != SCOPE_CONFIG)
     payload = {"format": FORMAT_VERSION, "scope": scope,
-               "addon": "RuriClothPhysics"}
+               "addon": "RuriClothPhysics",
+               "colliders": _collider_table(colliders, armature_object)}
+    if scope == SCOPE_COLLIDERS:
+        payload["assignments"] = _assignments(configs)
+        return payload
     if scope == SCOPE_CONFIG:
-        payload["config"] = read_group(settings.configs[config_index])
-        payload["colliders"] = [read_group(item) for item in settings.colliders]
+        payload["config"] = read_group(configs[0])
         return payload
     payload["settings"] = read_group(settings)
     return payload
@@ -112,54 +172,89 @@ def _bone_names(settings):
     return found
 
 
-def deserialize(settings, payload, mode):
-    report = {}
+def _remove_owned_colliders(settings, state):
+    from . import collider_geom
+    doomed = {}
+    for obj in collider_set(list(settings.configs), state.context.scene,
+                            state.armature_object, True):
+        end = collider_geom.end_object(collider_geom.settings_of(obj))
+        if end is not None:
+            doomed[end.name] = end
+        doomed[obj.name] = obj
+    for obj in doomed.values():
+        bpy.data.objects.remove(obj)
+    state.report["removed_colliders"] = len(doomed)
+
+
+def _create_colliders(payload, state):
+    from . import collider_geom
+    collection = collider_geom.collection_for(state.context.scene, state.armature_object,
+                                              create=True)
+    for data in payload.get("colliders", ()):
+        empty, missing = collider_geom.deserialize(data, state.armature_object, collection,
+                                                   state.context.view_layer)
+        state.colliders[data.get("name", empty.name)] = empty
+        if missing:
+            state.report.setdefault("missing_bones", []).extend(missing)
+    state.report["created_colliders"] = len(state.colliders)
+
+
+def _apply_assignments(settings, payload, mode, state):
+    by_name = {config.name: config for config in settings.configs}
+    for config_name, keys in (payload.get("assignments") or {}).items():
+        config = by_name.get(config_name)
+        if config is None:
+            state.report.setdefault("missing_configs", []).append(config_name)
+            continue
+        references = config.collider_collision.collider_references
+        if mode == MODE_REPLACE:
+            references.clear()
+        present = {reference.object for reference in references}
+        for key in keys:
+            target = state.colliders.get(key)
+            if target is None:
+                state.report.setdefault("missing_colliders", []).append(key)
+            elif target not in present:
+                references.add().object = target
+                present.add(target)
+
+
+def deserialize(settings, payload, mode, context):
+    state = LoadState(settings.id_data, context)
     if payload.get("addon") != "RuriClothPhysics":
-        report["error"] = "不是本插件的配置文件"
-        return report
+        state.report["error"] = "不是本插件的配置文件"
+        return state.report
     if payload.get("format") != FORMAT_VERSION:
-        report["error"] = "配置文件版本 %s 与本插件的 %d 不一致" % (
+        state.report["error"] = "配置文件版本 %s 与本插件的 %d 不一致" % (
             payload.get("format"), FORMAT_VERSION)
-        return report
+        return state.report
 
     scope = payload.get("scope")
-    if scope == SCOPE_CONFIG:
+    if mode == MODE_REPLACE:
+        _remove_owned_colliders(settings, state)
+    _create_colliders(payload, state)
+    if scope == SCOPE_COLLIDERS:
+        _apply_assignments(settings, payload, mode, state)
+    elif scope == SCOPE_CONFIG:
         if mode == MODE_REPLACE:
             settings.configs.clear()
-        write_group(settings.configs.add(), payload["config"], report)
-        existing = {item.name for item in settings.colliders}
-        for entry in payload.get("colliders", ()):
-            if entry.get("name") in existing:
-                continue
-            write_group(settings.colliders.add(), entry, report)
+        write_group(settings.configs.add(), payload["config"], state)
         settings.active_config_index = len(settings.configs) - 1
     else:
         data = dict(payload["settings"])
         if mode == MODE_APPEND:
-            configs = data.pop("configs", [])
-            colliders = data.pop("colliders", [])
-            for entry in configs:
-                write_group(settings.configs.add(), entry, report)
-            existing = {item.name for item in settings.colliders}
-            for entry in colliders:
-                if entry.get("name") in existing:
-                    continue
-                write_group(settings.colliders.add(), entry, report)
+            for entry in data.pop("configs", []):
+                write_group(settings.configs.add(), entry, state)
         else:
-            write_group(settings, data, report)
+            write_group(settings, data, state)
         settings.active_config_index = max(0, len(settings.configs) - 1)
 
-    wanted = set()
     for config in settings.configs:
-        for item in config.root_bones:
-            wanted.add(item.bone)
-    if "" in wanted:
-        report["unresolved_bones"] = True
-    for config in settings.configs:
+        if any(item.bone == "" for item in config.root_bones):
+            state.report["unresolved_bones"] = True
         config.rebuild_pending = True
     settings.param_serial += 1
-    settings.collider_serial += 1
-    return report
+    return state.report
 
 
 PRESET_FOLDER = "RuriClothPhysics"

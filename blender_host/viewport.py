@@ -1,9 +1,6 @@
 import numpy as np
 
 ARROW = 'ARROW'
-MOVE = 'MOVE'
-DIAL = 'DIAL'
-PICK = 'PICK'
 
 _layers = []
 
@@ -64,11 +61,10 @@ class Canvas:
 
 class Handle:
 
-    __slots__ = ("identifier", "kind", "matrix", "scale", "color", "read", "write", "minimum",
-                 "operator", "properties")
+    __slots__ = ("identifier", "kind", "matrix", "scale", "color", "read", "write", "minimum")
 
     def __init__(self, identifier, kind, matrix, read=None, write=None, scale=0.05,
-                 color=(1.0, 1.0, 1.0), minimum=None, operator=None, properties=None):
+                 color=(1.0, 1.0, 1.0), minimum=None):
         self.identifier = identifier
         self.kind = kind
         self.matrix = matrix
@@ -77,8 +73,6 @@ class Handle:
         self.read = read
         self.write = write
         self.minimum = minimum
-        self.operator = operator
-        self.properties = properties or {}
 
 
 class Layer:

@@ -568,6 +568,14 @@ def _neg_transform_pose(arr_pos, arr_rot, ci, m, flip1, flip2):
 
 
 @cuda.jit(device=True)
+def _neg_transform_point(arr_pos, ci, m):
+    px, py, pz = dmath.transform_point(m, arr_pos[ci, 0], arr_pos[ci, 1], arr_pos[ci, 2])
+    arr_pos[ci, 0] = px
+    arr_pos[ci, 1] = py
+    arr_pos[ci, 2] = pz
+
+
+@cuda.jit(device=True)
 def _shift_pose(arr_pos, arr_rot, ci, cpx, cpy, cpz, svx, svy, svz, srx, sry, srz, srw):
     lx = arr_pos[ci, 0] - cpx
     ly = arr_pos[ci, 1] - cpy
@@ -611,52 +619,38 @@ def _rotate_vec(arr, p, srx, sry, srz, srw):
 
 @cuda.jit(device=True)
 def do_collider_frame_pre(ci, c_team, c_enabled, c_enabled_prev, c_active,
-                          c_input_scales, c_input_positions, c_input_rotations, c_center,
-                          c_frame_pos, c_frame_rot, c_frame_scl,
-                          c_old_frame_pos, c_old_frame_rot, c_now_pos, c_now_rot,
-                          c_old_pos, c_old_rot,
+                          c_input_positions, c_input_rotations, c_input_tips, c_input_radii,
+                          c_frame_pos, c_frame_rot, c_frame_tip, c_frame_radius,
+                          c_old_frame_pos, c_old_frame_rot, c_old_frame_tip,
+                          c_now_pos, c_now_rot, c_now_tip,
+                          c_old_pos, c_old_rot, c_old_tip,
                           t_reset_pending, t_neg_teleport, t_neg_matrix, t_neg_change,
                           t_inertia_shift, t_shift_vec, t_shift_rot, t_old_cwp):
     enabled_now = c_enabled[ci] != 0
     rising = enabled_now and (c_enabled_prev[ci] == 0)
-    sx = c_input_scales[ci, 0]
-    sy = c_input_scales[ci, 1]
-    sz = c_input_scales[ci, 2]
-    scale_invalid = (abs(sx) < float32(1e-6)) or (abs(sy) < float32(1e-6)) or (abs(sz) < float32(1e-6))
-    c_active[ci] = int32(1) if (enabled_now and not scale_invalid) else int32(0)
+    c_active[ci] = int32(1) if enabled_now else int32(0)
     c_enabled_prev[ci] = int32(1) if enabled_now else int32(0)
     if not enabled_now:
         return
     team = c_team[ci]
-    qx = c_input_rotations[ci, 0]
-    qy = c_input_rotations[ci, 1]
-    qz = c_input_rotations[ci, 2]
-    qw = c_input_rotations[ci, 3]
-    cx = sx if abs(sx) >= float32(1e-6) else float32(1e-6)
-    cy = sy if abs(sy) >= float32(1e-6) else float32(1e-6)
-    cz = sz if abs(sz) >= float32(1e-6) else float32(1e-6)
-    sgx = dmath.fsign(cx)
-    sgy = dmath.fsign(cy)
-    sgz = dmath.fsign(cz)
-    rrx, rry, rrz = dmath.quat_rotate(qx, qy, qz, qw, c_center[ci, 0] * sgx,
-                                      c_center[ci, 1] * sgy, c_center[ci, 2] * sgz)
-    c_frame_pos[ci, 0] = c_input_positions[ci, 0] + rrx * cx * sgx
-    c_frame_pos[ci, 1] = c_input_positions[ci, 1] + rry * cy * sgy
-    c_frame_pos[ci, 2] = c_input_positions[ci, 2] + rrz * cz * sgz
-    c_frame_rot[ci, 0] = qx
-    c_frame_rot[ci, 1] = qy
-    c_frame_rot[ci, 2] = qz
-    c_frame_rot[ci, 3] = qw
-    c_frame_scl[ci, 0] = cx
-    c_frame_scl[ci, 1] = cy
-    c_frame_scl[ci, 2] = cz
-    reset = (t_reset_pending[team] != 0) or rising or scale_invalid
+    for j in range(3):
+        c_frame_pos[ci, j] = c_input_positions[ci, j]
+        c_frame_tip[ci, j] = c_input_tips[ci, j]
+    for j in range(4):
+        c_frame_rot[ci, j] = c_input_rotations[ci, j]
+    c_frame_radius[ci, 0] = c_input_radii[ci, 0]
+    c_frame_radius[ci, 1] = c_input_radii[ci, 1]
+    reset = (t_reset_pending[team] != 0) or rising
     if reset:
         for j in range(3):
             fp = c_frame_pos[ci, j]
             c_old_frame_pos[ci, j] = fp
             c_now_pos[ci, j] = fp
             c_old_pos[ci, j] = fp
+            ft = c_frame_tip[ci, j]
+            c_old_frame_tip[ci, j] = ft
+            c_now_tip[ci, j] = ft
+            c_old_tip[ci, j] = ft
         for j in range(4):
             fr = c_frame_rot[ci, j]
             c_old_frame_rot[ci, j] = fr
@@ -670,6 +664,9 @@ def do_collider_frame_pre(ci, c_team, c_enabled, c_enabled_prev, c_active,
         _neg_transform_pose(c_old_frame_pos, c_old_frame_rot, ci, m, f1, f2)
         _neg_transform_pose(c_now_pos, c_now_rot, ci, m, f1, f2)
         _neg_transform_pose(c_old_pos, c_old_rot, ci, m, f1, f2)
+        _neg_transform_point(c_old_frame_tip, ci, m)
+        _neg_transform_point(c_now_tip, ci, m)
+        _neg_transform_point(c_old_tip, ci, m)
     if t_inertia_shift[team] != 0:
         cpx = t_old_cwp[team, 0]
         cpy = t_old_cwp[team, 1]
@@ -684,13 +681,18 @@ def do_collider_frame_pre(ci, c_team, c_enabled, c_enabled_prev, c_active,
         _shift_pose(c_old_frame_pos, c_old_frame_rot, ci, cpx, cpy, cpz, svx, svy, svz, srx, sry, srz, srw)
         _shift_pose(c_now_pos, c_now_rot, ci, cpx, cpy, cpz, svx, svy, svz, srx, sry, srz, srw)
         _shift_pose(c_old_pos, c_old_rot, ci, cpx, cpy, cpz, svx, svy, svz, srx, sry, srz, srw)
+        _shift_point(c_old_frame_tip, ci, cpx, cpy, cpz, svx, svy, svz, srx, sry, srz, srw)
+        _shift_point(c_now_tip, ci, cpx, cpy, cpz, svx, svy, svz, srx, sry, srz, srw)
+        _shift_point(c_old_tip, ci, cpx, cpy, cpz, svx, svy, svz, srx, sry, srz, srw)
 
 
 @cuda.jit(device=True)
-def do_collider_start_step(ci, c_team, c_kind, c_size, c_axis, c_aligned,
-                           c_frame_pos, c_frame_rot, c_frame_scl,
-                           c_old_frame_pos, c_old_frame_rot, c_now_pos, c_now_rot,
-                           c_old_pos, c_old_rot, c_work_rot, c_work_inv_old_rot,
+def do_collider_start_step(ci, c_team, c_kind,
+                           c_frame_pos, c_frame_rot, c_frame_tip, c_frame_radius,
+                           c_old_frame_pos, c_old_frame_rot, c_old_frame_tip,
+                           c_now_pos, c_now_rot, c_now_tip,
+                           c_old_pos, c_old_rot, c_old_tip,
+                           c_work_rot, c_work_inv_old_rot,
                            c_work_radius, c_work_old_pos, c_work_next_pos,
                            c_work_aabb_min, c_work_aabb_max,
                            t_frame_interp, t_step_mir, t_step_rir):
@@ -699,12 +701,18 @@ def do_collider_start_step(ci, c_team, c_kind, c_size, c_axis, c_aligned,
     posx = dmath.lerp(c_old_frame_pos[ci, 0], c_frame_pos[ci, 0], t)
     posy = dmath.lerp(c_old_frame_pos[ci, 1], c_frame_pos[ci, 1], t)
     posz = dmath.lerp(c_old_frame_pos[ci, 2], c_frame_pos[ci, 2], t)
+    tipx = dmath.lerp(c_old_frame_tip[ci, 0], c_frame_tip[ci, 0], t)
+    tipy = dmath.lerp(c_old_frame_tip[ci, 1], c_frame_tip[ci, 1], t)
+    tipz = dmath.lerp(c_old_frame_tip[ci, 2], c_frame_tip[ci, 2], t)
     rotx, roty, rotz, rotw = dmath.quat_slerp(
         c_old_frame_rot[ci, 0], c_old_frame_rot[ci, 1], c_old_frame_rot[ci, 2], c_old_frame_rot[ci, 3],
         c_frame_rot[ci, 0], c_frame_rot[ci, 1], c_frame_rot[ci, 2], c_frame_rot[ci, 3], t)
     c_now_pos[ci, 0] = posx
     c_now_pos[ci, 1] = posy
     c_now_pos[ci, 2] = posz
+    c_now_tip[ci, 0] = tipx
+    c_now_tip[ci, 1] = tipy
+    c_now_tip[ci, 2] = tipz
     c_now_rot[ci, 0] = rotx
     c_now_rot[ci, 1] = roty
     c_now_rot[ci, 2] = rotz
@@ -714,12 +722,18 @@ def do_collider_start_step(ci, c_team, c_kind, c_size, c_axis, c_aligned,
     opx = dmath.lerp(c_old_pos[ci, 0], posx, mir)
     opy = dmath.lerp(c_old_pos[ci, 1], posy, mir)
     opz = dmath.lerp(c_old_pos[ci, 2], posz, mir)
+    otx = dmath.lerp(c_old_tip[ci, 0], tipx, mir)
+    oty = dmath.lerp(c_old_tip[ci, 1], tipy, mir)
+    otz = dmath.lerp(c_old_tip[ci, 2], tipz, mir)
     orx, ory, orz, orw = dmath.quat_slerp(
         c_old_rot[ci, 0], c_old_rot[ci, 1], c_old_rot[ci, 2], c_old_rot[ci, 3],
         rotx, roty, rotz, rotw, rir)
     c_old_pos[ci, 0] = opx
     c_old_pos[ci, 1] = opy
     c_old_pos[ci, 2] = opz
+    c_old_tip[ci, 0] = otx
+    c_old_tip[ci, 1] = oty
+    c_old_tip[ci, 2] = otz
     c_old_rot[ci, 0] = orx
     c_old_rot[ci, 1] = ory
     c_old_rot[ci, 2] = orz
@@ -735,7 +749,7 @@ def do_collider_start_step(ci, c_team, c_kind, c_size, c_axis, c_aligned,
     c_work_inv_old_rot[ci, 3] = iow
     kind = c_kind[ci]
     if kind == COLLIDER_SPHERE:
-        radius = c_size[ci, 0] * abs(c_frame_scl[ci, 0])
+        radius = c_frame_radius[ci, 0]
         c_work_radius[ci, 0] = radius
         c_work_radius[ci, 1] = radius
         c_work_old_pos[ci, 0, 0] = opx
@@ -751,44 +765,20 @@ def do_collider_start_step(ci, c_team, c_kind, c_size, c_axis, c_aligned,
         c_work_aabb_max[ci, 1] = dmath.fmax2(opy, posy) + radius
         c_work_aabb_max[ci, 2] = dmath.fmax2(opz, posz) + radius
     elif kind == COLLIDER_CAPSULE:
-        axx = c_axis[ci, 0]
-        axy = c_axis[ci, 1]
-        axz = c_axis[ci, 2]
-        scl0 = c_frame_scl[ci, 0] * axx + c_frame_scl[ci, 1] * axy + c_frame_scl[ci, 2] * axz
-        sgn = dmath.fsign(scl0)
-        dirx = axx * sgn
-        diry = axy * sgn
-        dirz = axz * sgn
-        scl = abs(scl0)
-        start_radius = c_size[ci, 0] * scl
-        end_radius = c_size[ci, 1] * scl
-        cap_length = c_size[ci, 2] * scl
-        if c_aligned[ci] != 0:
-            start_len = cap_length * float32(0.5)
-            end_len = cap_length * float32(0.5)
-        else:
-            start_len = float32(0.0)
-            end_len = cap_length - start_radius
-        start_len = start_len - start_radius
-        if start_len < float32(0.0):
-            start_len = float32(0.0)
-        end_len = end_len - end_radius
-        if end_len < float32(0.0):
-            end_len = float32(0.0)
-        dox, doy, doz = dmath.quat_rotate(orx, ory, orz, orw, dirx, diry, dirz)
-        dnx, dny, dnz = dmath.quat_rotate(rotx, roty, rotz, rotw, dirx, diry, dirz)
-        sox = opx + dox * start_len
-        soy = opy + doy * start_len
-        soz = opz + doz * start_len
-        eox = opx - dox * end_len
-        eoy = opy - doy * end_len
-        eoz = opz - doz * end_len
-        snx = posx + dnx * start_len
-        sny = posy + dny * start_len
-        snz = posz + dnz * start_len
-        enx = posx - dnx * end_len
-        eny = posy - dny * end_len
-        enz = posz - dnz * end_len
+        start_radius = c_frame_radius[ci, 0]
+        end_radius = c_frame_radius[ci, 1]
+        sox = opx
+        soy = opy
+        soz = opz
+        eox = otx
+        eoy = oty
+        eoz = otz
+        snx = posx
+        sny = posy
+        snz = posz
+        enx = tipx
+        eny = tipy
+        enz = tipz
         c_work_radius[ci, 0] = start_radius
         c_work_radius[ci, 1] = end_radius
         c_work_old_pos[ci, 0, 0] = sox
@@ -810,11 +800,10 @@ def do_collider_start_step(ci, c_team, c_kind, c_size, c_axis, c_aligned,
         c_work_aabb_max[ci, 1] = dmath.fmax2(dmath.fmax2(soy, sny) + start_radius, dmath.fmax2(eoy, eny) + end_radius)
         c_work_aabb_max[ci, 2] = dmath.fmax2(dmath.fmax2(soz, snz) + start_radius, dmath.fmax2(eoz, enz) + end_radius)
     else:
-        sign_y = dmath.fsign(c_frame_scl[ci, 2] + float32(1e-30))
         nx, ny, nz = dmath.quat_rotate(rotx, roty, rotz, rotw, float32(0.0), float32(0.0), float32(1.0))
-        c_work_old_pos[ci, 0, 0] = nx * sign_y
-        c_work_old_pos[ci, 0, 1] = ny * sign_y
-        c_work_old_pos[ci, 0, 2] = nz * sign_y
+        c_work_old_pos[ci, 0, 0] = nx
+        c_work_old_pos[ci, 0, 1] = ny
+        c_work_old_pos[ci, 0, 2] = nz
         c_work_next_pos[ci, 0, 0] = posx
         c_work_next_pos[ci, 0, 1] = posy
         c_work_next_pos[ci, 0, 2] = posz
@@ -827,17 +816,20 @@ def do_collider_start_step(ci, c_team, c_kind, c_size, c_axis, c_aligned,
 
 
 @cuda.jit(device=True)
-def do_collider_end_step(ci, c_now_pos, c_now_rot, c_old_pos, c_old_rot):
+def do_collider_end_step(ci, c_now_pos, c_now_rot, c_now_tip, c_old_pos, c_old_rot, c_old_tip):
     for j in range(3):
         c_old_pos[ci, j] = c_now_pos[ci, j]
+        c_old_tip[ci, j] = c_now_tip[ci, j]
     for j in range(4):
         c_old_rot[ci, j] = c_now_rot[ci, j]
 
 
 @cuda.jit(device=True)
-def do_collider_frame_post(ci, c_frame_pos, c_frame_rot, c_old_frame_pos, c_old_frame_rot):
+def do_collider_frame_post(ci, c_frame_pos, c_frame_rot, c_frame_tip,
+                           c_old_frame_pos, c_old_frame_rot, c_old_frame_tip):
     for j in range(3):
         c_old_frame_pos[ci, j] = c_frame_pos[ci, j]
+        c_old_frame_tip[ci, j] = c_frame_tip[ci, j]
     for j in range(4):
         c_old_frame_rot[ci, j] = c_frame_rot[ci, j]
 
@@ -2216,11 +2208,12 @@ PARTICLE_KERNEL_FIELDS = (
 TRANSFORM_KERNEL_FIELDS = ("world", "bind_pose")
 
 COLLIDER_KERNEL_FIELDS = (
-    "team", "kind", "center", "size", "axis", "aligned", "enabled",
-    "enabled_prev", "active", "input_positions", "input_rotations", "input_scales",
-    "frame_positions", "frame_rotations", "frame_scales",
-    "old_frame_positions", "old_frame_rotations", "now_positions", "now_rotations",
-    "old_positions", "old_rotations",
+    "team", "kind", "enabled", "enabled_prev", "active",
+    "input_positions", "input_rotations", "input_tips", "input_radii",
+    "frame_positions", "frame_rotations", "frame_tips", "frame_radii",
+    "old_frame_positions", "old_frame_rotations", "old_frame_tips",
+    "now_positions", "now_rotations", "now_tips",
+    "old_positions", "old_rotations", "old_tips",
     "work_radius", "work_old_pos", "work_next_pos", "work_rot", "work_inv_old_rot",
     "work_aabb_min", "work_aabb_max",
 )
@@ -2517,25 +2510,26 @@ RESIDENT_BLOB_LAYOUT = (
     ('x_bind', 'f32_m4x4', (4, 4)),
     ('c_team', 'i32_s', ()),
     ('c_kind', 'i32_s', ()),
-    ('c_center', 'f32_v3', (3,)),
-    ('c_size', 'f32_v3', (3,)),
-    ('c_axis', 'f32_v3', (3,)),
-    ('c_aligned', 'u8_s', ()),
     ('c_enabled', 'u8_s', ()),
     ('c_enabled_prev', 'u8_s', ()),
     ('c_active', 'u8_s', ()),
     ('c_input_positions', 'f32_v3', (3,)),
     ('c_input_rotations', 'f32_v4', (4,)),
-    ('c_input_scales', 'f32_v3', (3,)),
+    ('c_input_tips', 'f32_v3', (3,)),
+    ('c_input_radii', 'f32_v2', (2,)),
     ('c_frame_pos', 'f32_v3', (3,)),
     ('c_frame_rot', 'f32_v4', (4,)),
-    ('c_frame_scl', 'f32_v3', (3,)),
+    ('c_frame_tip', 'f32_v3', (3,)),
+    ('c_frame_radius', 'f32_v2', (2,)),
     ('c_old_frame_pos', 'f32_v3', (3,)),
     ('c_old_frame_rot', 'f32_v4', (4,)),
+    ('c_old_frame_tip', 'f32_v3', (3,)),
     ('c_now_pos', 'f32_v3', (3,)),
     ('c_now_rot', 'f32_v4', (4,)),
+    ('c_now_tip', 'f32_v3', (3,)),
     ('c_old_pos', 'f32_v3', (3,)),
     ('c_old_rot', 'f32_v4', (4,)),
+    ('c_old_tip', 'f32_v3', (3,)),
     ('c_work_radius', 'f32_v2', (2,)),
     ('c_work_old_pos', 'f32_m2x3', (2, 3)),
     ('c_work_next_pos', 'f32_m2x3', (2, 3)),

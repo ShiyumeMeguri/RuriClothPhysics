@@ -93,7 +93,8 @@ _CONFIG_TEAM_FIELDS = (
     "wind_influence", "wind_frequency", "wind_turbulence", "wind_blend", "wind_synchronization",
     "wind_depth_weight", "wind_moving", "spring_power", "spring_limit_distance",
     "spring_normal_limit_ratio", "spring_noise")
-_COLLIDER_INPUT_FIELDS = ("input_positions", "input_rotations", "input_scales", "enabled")
+_COLLIDER_INPUT_FIELDS = ("input_positions", "input_rotations", "input_tips", "input_radii",
+                          "enabled")
 _SLIM_OUTPUT_PARTICLE_FIELDS = ("positions", "out_rotations")
 
 assert not (set(_INPUT_UPLOAD_FIELDS) & set(_CONFIG_TEAM_FIELDS))
@@ -143,7 +144,7 @@ class GpuEngine:
         for name in _STRUCT_TEAM_COLUMNS:
             parts.append(np.ascontiguousarray(team[name]).tobytes())
         colliders = world.colliders.arrays
-        for name in ("team", "kind", "center", "size", "axis", "aligned"):
+        for name in ("team", "kind"):
             parts.append(colliders[name].tobytes())
         point_pairs = world.point_pairs.arrays
         for name in ("team", "particle", "collider"):

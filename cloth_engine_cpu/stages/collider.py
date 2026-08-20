@@ -3,6 +3,10 @@ import numpy as np
 from ...cloth_kernel import defs
 from ...cloth_kernel import math as pm
 
+POINT_HISTORY = ("old_frame_positions", "now_positions", "old_positions",
+                 "old_frame_tips", "now_tips", "old_tips")
+ROTATION_HISTORY = ("old_frame_rotations", "now_rotations", "old_rotations")
+
 
 def frame_pre(world, ctx):
     ca = world.colliders
@@ -13,8 +17,7 @@ def frame_pre(world, ctx):
         return
     enabled_now = ca["enabled"][frame_columns]
     rising_edge_all = enabled_now & ~ca["enabled_prev"][frame_columns]
-    scale_invalid_all = (np.abs(ca["input_scales"][frame_columns]) < 1e-6).any(axis=1)
-    ca["active"][frame_columns] = enabled_now & ~scale_invalid_all
+    ca["active"][frame_columns] = enabled_now
     ca["enabled_prev"][frame_columns] = enabled_now
     keep = np.flatnonzero(enabled_now)
     if len(keep) == 0:
@@ -22,27 +25,22 @@ def frame_pre(world, ctx):
     index = frame_columns[keep]
     team = ct[index]
     rising_edge = rising_edge_all[keep]
-    scale_invalid = scale_invalid_all[keep]
 
-    quat = ca["input_rotations"][index]
-    scl = ca["input_scales"][index]
-    scl = np.where(np.abs(scl) < 1e-6, np.float32(1e-6), scl).astype(np.float32)
-    scl_sign = np.sign(np.where(scl == 0.0, 1.0, scl)).astype(np.float32)
-    center = ca["center"][index]
-    offset = pm.quat_rotate(quat, center * scl_sign) * scl * scl_sign
-    ca["frame_positions"][index] = ca["input_positions"][index] + offset
-    ca["frame_rotations"][index] = quat
-    ca["frame_scales"][index] = scl
+    ca["frame_positions"][index] = ca["input_positions"][index]
+    ca["frame_rotations"][index] = ca["input_rotations"][index]
+    ca["frame_tips"][index] = ca["input_tips"][index]
+    ca["frame_radii"][index] = ca["input_radii"][index]
 
-    reset = tt["reset_pending"][team] | rising_edge | scale_invalid
+    reset = tt["reset_pending"][team] | rising_edge
     if np.any(reset):
         r = index[reset]
-        ca["old_frame_positions"][r] = ca["frame_positions"][r]
-        ca["old_frame_rotations"][r] = ca["frame_rotations"][r]
-        ca["now_positions"][r] = ca["frame_positions"][r]
-        ca["now_rotations"][r] = ca["frame_rotations"][r]
-        ca["old_positions"][r] = ca["frame_positions"][r]
-        ca["old_rotations"][r] = ca["frame_rotations"][r]
+        for source, targets in (
+                ("frame_positions", ("old_frame_positions", "now_positions", "old_positions")),
+                ("frame_rotations", ("old_frame_rotations", "now_rotations", "old_rotations")),
+                ("frame_tips", ("old_frame_tips", "now_tips", "old_tips"))):
+            value = ca[source][r]
+            for name in targets:
+                ca[name][r] = value
 
     live = ~reset
     negative = live & tt["negative_scale_teleport"][team]
@@ -51,9 +49,9 @@ def frame_pre(world, ctx):
         gt = ct[g]
         matrix = tt["negative_scale_matrix"][gt]
         flip = tt["negative_scale_change"][gt]
-        for name in ("old_frame_positions", "now_positions", "old_positions"):
+        for name in POINT_HISTORY:
             ca[name][g] = pm.transform_points(ca[name][g], matrix)
-        for name in ("old_frame_rotations", "now_rotations", "old_rotations"):
+        for name in ROTATION_HISTORY:
             ca[name][g] = pm.transform_rotations(ca[name][g], matrix, flip)
 
     shifted = live & tt["inertia_shift"][team]
@@ -63,12 +61,11 @@ def frame_pre(world, ctx):
         center_pos = tt["old_component_world_position"][gt]
         shift_vector = tt["frame_component_shift_vector"][gt]
         shift_rotation = tt["frame_component_shift_rotation"][gt]
-        for pos_name, rot_name in (("old_frame_positions", "old_frame_rotations"),
-                                   ("now_positions", "now_rotations"),
-                                   ("old_positions", "old_rotations")):
-            local = ca[pos_name][g] - center_pos
-            ca[pos_name][g] = pm.quat_rotate(shift_rotation, local) + center_pos + shift_vector
-            ca[rot_name][g] = pm.quat_mul(shift_rotation, ca[rot_name][g])
+        for name in POINT_HISTORY:
+            local = ca[name][g] - center_pos
+            ca[name][g] = pm.quat_rotate(shift_rotation, local) + center_pos + shift_vector
+        for name in ROTATION_HISTORY:
+            ca[name][g] = pm.quat_mul(shift_rotation, ca[name][g])
 
 
 def start_step(world, ctx):
@@ -84,25 +81,29 @@ def start_step(world, ctx):
     t = tt["frame_interpolation"][team]
     pos = pm.lerp(ca["old_frame_positions"][index], ca["frame_positions"][index], t[:, None])
     rot = pm.quat_slerp(ca["old_frame_rotations"][index], ca["frame_rotations"][index], t)
+    tip = pm.lerp(ca["old_frame_tips"][index], ca["frame_tips"][index], t[:, None])
     ca["now_positions"][index] = pos
     ca["now_rotations"][index] = rot
+    ca["now_tips"][index] = tip
 
-    old_pos = pm.lerp(ca["old_positions"][index], pos, tt["step_move_inertia_ratio"][team][:, None])
+    move_ratio = tt["step_move_inertia_ratio"][team][:, None]
+    old_pos = pm.lerp(ca["old_positions"][index], pos, move_ratio)
     old_rot = pm.quat_slerp(ca["old_rotations"][index], rot, tt["step_rotation_inertia_ratio"][team])
+    old_tip = pm.lerp(ca["old_tips"][index], tip, move_ratio)
     ca["old_positions"][index] = old_pos
     ca["old_rotations"][index] = old_rot
+    ca["old_tips"][index] = old_tip
 
     ca["work_rot"][index] = rot
     ca["work_inv_old_rot"][index] = pm.quat_inverse(old_rot)
 
     kinds = ca["kind"][index]
-    sizes = ca["size"][index]
-    scales = ca["frame_scales"][index]
+    radii = ca["frame_radii"][index]
 
     sphere = kinds == defs.COLLIDER_SPHERE
     if np.any(sphere):
         g = index[sphere]
-        radius = sizes[sphere, 0] * np.abs(scales[sphere, 0])
+        radius = radii[sphere, 0]
         ca["work_radius"][g, 0] = radius
         ca["work_radius"][g, 1] = radius
         ca["work_old_pos"][g, 0] = old_pos[sphere]
@@ -115,30 +116,12 @@ def start_step(world, ctx):
     capsule = kinds == defs.COLLIDER_CAPSULE
     if np.any(capsule):
         g = index[capsule]
-        axes = ca["axis"][g]
-        scl0 = np.einsum('ij,ij->i', scales[capsule], axes)
-        direction = axes * np.sign(scl0)[:, None]
-        scl = np.abs(scl0)
-        size = sizes[capsule] * scl[:, None]
-        start_radius = size[:, 0]
-        end_radius = size[:, 1]
-        cap_length = size[:, 2]
-        aligned = ca["aligned"][g]
-        start_len = np.where(aligned, cap_length * 0.5, 0.0)
-        end_len = np.where(aligned, cap_length * 0.5, cap_length - start_radius)
-        start_len = np.maximum(start_len - start_radius, 0.0)
-        end_len = np.maximum(end_len - end_radius, 0.0)
-
-        c_old_pos = old_pos[capsule]
-        c_pos = pos[capsule]
-        c_old_rot = old_rot[capsule]
-        c_rot = rot[capsule]
-        d_old = pm.quat_rotate(c_old_rot, direction)
-        d_now = pm.quat_rotate(c_rot, direction)
-        s_old = c_old_pos + d_old * start_len[:, None]
-        e_old = c_old_pos - d_old * end_len[:, None]
-        s_now = c_pos + d_now * start_len[:, None]
-        e_now = c_pos - d_now * end_len[:, None]
+        start_radius = radii[capsule, 0]
+        end_radius = radii[capsule, 1]
+        s_old = old_pos[capsule]
+        e_old = old_tip[capsule]
+        s_now = pos[capsule]
+        e_now = tip[capsule]
 
         ca["work_radius"][g, 0] = start_radius
         ca["work_radius"][g, 1] = end_radius
@@ -159,8 +142,7 @@ def start_step(world, ctx):
         g = index[plane]
         up = np.zeros((len(g), 3), dtype=np.float32)
         up[:, 2] = 1.0
-        sign_y = np.sign(scales[plane, 2] + 1e-30)
-        normal = pm.quat_rotate(rot[plane], up) * sign_y[:, None]
+        normal = pm.quat_rotate(rot[plane], up)
         ca["work_old_pos"][g, 0] = normal
         ca["work_next_pos"][g, 0] = pos[plane]
         ca["work_aabb_min"][g] = -np.inf
@@ -592,6 +574,7 @@ def end_step(world, ctx):
         return
     ca["old_positions"][index] = ca["now_positions"][index]
     ca["old_rotations"][index] = ca["now_rotations"][index]
+    ca["old_tips"][index] = ca["now_tips"][index]
 
 
 def frame_post(world, ctx):
@@ -604,3 +587,4 @@ def frame_post(world, ctx):
         return
     ca["old_frame_positions"][index] = ca["frame_positions"][index]
     ca["old_frame_rotations"][index] = ca["frame_rotations"][index]
+    ca["old_frame_tips"][index] = ca["frame_tips"][index]

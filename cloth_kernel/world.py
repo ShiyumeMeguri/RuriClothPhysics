@@ -126,15 +126,17 @@ TRANSFORM_FIELDS = {
 COLLIDER_FIELDS = {
     "team": (I4, ()),
     "kind": (I4, ()),
-    "center": (F4, (3,)), "size": (F4, (3,)), "axis": (F4, (3,)), "aligned": (B1, ()),
     "enabled": (B1, ()),
     "enabled_prev": (B1, ()),
     "active": (B1, ()),
-    "input_positions": (F4, (3,)), "input_rotations": (F4, (4,)), "input_scales": (F4, (3,)),
-    "frame_positions": (F4, (3,)), "frame_rotations": (F4, (4,)), "frame_scales": (F4, (3,)),
+    "input_positions": (F4, (3,)), "input_rotations": (F4, (4,)),
+    "input_tips": (F4, (3,)), "input_radii": (F4, (2,)),
+    "frame_positions": (F4, (3,)), "frame_rotations": (F4, (4,)),
+    "frame_tips": (F4, (3,)), "frame_radii": (F4, (2,)),
     "old_frame_positions": (F4, (3,)), "old_frame_rotations": (F4, (4,)),
-    "now_positions": (F4, (3,)), "now_rotations": (F4, (4,)),
-    "old_positions": (F4, (3,)), "old_rotations": (F4, (4,)),
+    "old_frame_tips": (F4, (3,)),
+    "now_positions": (F4, (3,)), "now_rotations": (F4, (4,)), "now_tips": (F4, (3,)),
+    "old_positions": (F4, (3,)), "old_rotations": (F4, (4,)), "old_tips": (F4, (3,)),
     "work_radius": (F4, (2,)), "work_old_pos": (F4, (2, 3)), "work_next_pos": (F4, (2, 3)),
     "work_rot": (F4, (4,)), "work_inv_old_rot": (F4, (4,)),
     "work_aabb_min": (F4, (3,)), "work_aabb_max": (F4, (3,)),
@@ -511,10 +513,6 @@ class World:
             s = slice(cs, cs + c)
             ca["team"][s] = slot
             ca["kind"][s] = binding.kinds
-            ca["center"][s] = binding.centers
-            ca["size"][s] = binding.sizes
-            ca["axis"][s] = binding.axes
-            ca["aligned"][s] = binding.aligned
             ca["frame_rotations"][s] = pm.quat_identity((c,))
             ca["old_frame_rotations"][s] = pm.quat_identity((c,))
             ca["now_rotations"][s] = pm.quat_identity((c,))

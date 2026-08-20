@@ -171,12 +171,9 @@ class BatchedKinematics:
         write_mask = []
         position_mask = []
         transform_extra = []
-        collider_pose_index = []
         self.slices = []
-        self.collider_slices = []
         levels_by_depth = {}
         offset = 0
-        collider_offset = 0
         for entry in entries:
             kinematics = entry.kinematics
             count = len(kinematics.bone_names)
@@ -197,12 +194,6 @@ class BatchedKinematics:
                 levels_by_depth.setdefault(depth, []).append(np.asarray(level, dtype=np.int64) + offset)
             extras = entry.setup.transform_names[count:]
             transform_extra.append(np.array([name_to_index.get(name, -1) for name in extras], dtype=np.int64))
-            binding = entry.binding
-            self.collider_slices.append((collider_offset, collider_offset + binding.count))
-            for index in range(binding.count):
-                name = binding.bone_names[index]
-                collider_pose_index.append(name_to_index.get(name, -1) if name else -1)
-            collider_offset += binding.count
             offset += count
         self.count = offset
         self.rest_relative = np.concatenate(rest_relative, axis=0) if rest_relative \
@@ -216,7 +207,6 @@ class BatchedKinematics:
         self.write_mask = np.concatenate(write_mask) if write_mask else np.zeros(0, dtype=bool)
         self.position_mask = np.concatenate(position_mask) if position_mask else np.zeros(0, dtype=bool)
         self.transform_extra = transform_extra
-        self.collider_pose_index = np.array(collider_pose_index, dtype=np.int64)
         self.root_mask = self.parent_index < 0
         self.pose_safe = np.where(self.pose_index >= 0, self.pose_index, 0)
         self.pose_missing = self.pose_index < 0

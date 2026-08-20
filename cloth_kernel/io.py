@@ -57,12 +57,13 @@ def set_team_transform_worlds(world, slot, transform_worlds):
     world.transforms["world"][s] = transform_worlds.astype(np.float32)
 
 
-def set_team_collider_input(world, slot, positions, rotations, scales, enabled):
+def set_team_collider_input(world, slot, positions, rotations, tips, radii, enabled):
     s = world.collider_slice(slot)
     ca = world.colliders
     ca["input_positions"][s] = positions
     ca["input_rotations"][s] = rotations
-    ca["input_scales"][s] = scales
+    ca["input_tips"][s] = tips
+    ca["input_radii"][s] = radii
     ca["enabled"][s] = enabled
 
 

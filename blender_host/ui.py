@@ -1,10 +1,12 @@
 import bpy
 
+from . import collider_geom
 from . import curve_host
 
 CLOTH_TYPE_ICONS = {'BONE_CLOTH': 'MOD_CLOTH', 'BONE_SPRING': 'FORCE_HARMONIC'}
-COLLIDER_SHAPE_ICONS = {'SPHERE': 'MESH_UVSPHERE', 'CAPSULE': 'MESH_CAPSULE',
+COLLIDER_SHAPE_ICONS = {'SPHERE': 'SPHERE', 'CAPSULE': 'MESH_CAPSULE',
                         'PLANE': 'MESH_PLANE'}
+COLLIDER_SHAPE_BUTTONS = (('SPHERE', "球"), ('CAPSULE', "胶囊"), ('PLANE', "平面"))
 ATTRIBUTE_ICONS = {'FIXED': 'PINNED', 'MOVE': 'UNPINNED', 'IGNORE': 'X'}
 
 
@@ -56,13 +58,20 @@ def draw_curve(layout, owner, prop_name, label):
 
 def draw_collider_references(layout, config):
     collision = config.collider_collision
-    layout.label(text="碰撞体引用")
+    layout.label(text="本配置使用的碰撞体")
     row = layout.row()
     row.template_list("RCP_UL_collider_references", "", collision, "collider_references",
                       collision, "active_collider_reference_index", rows=3)
     side = row.column(align=True)
     _draw_side_buttons(side, "ruri_cloth_physics.list_add", "ruri_cloth_physics.list_remove",
                        "ruri_cloth_physics.list_move", 'COLLIDER_REFERENCES')
+    row = layout.row(align=True)
+    row.operator("ruri_cloth_physics.collider_reference_add_selected", icon='ADD')
+    row.operator("ruri_cloth_physics.collider_reference_clean", icon='BRUSH_DATA')
+    invalid = sum(1 for reference in collision.collider_references
+                  if not collider_geom.is_collider(reference.object))
+    if invalid:
+        layout.label(text="有 %d 行引用没指向碰撞体" % invalid, icon='ERROR')
 
 
 def draw_check_slider(layout, owner, prop_name, label):
@@ -82,18 +91,6 @@ class RCP_UL_configs(bpy.types.UIList):
                  icon='CHECKBOX_HLT' if item.enabled else 'CHECKBOX_DEHLT')
         row.label(icon=CLOTH_TYPE_ICONS.get(item.cloth_type, 'PHYSICS'))
         row.prop(item, "name", text="", emboss=False)
-
-
-class RCP_UL_colliders(bpy.types.UIList):
-    def draw_item(self, context, layout, data, item, icon, active_data, active_property,
-                  index=0, flt_flag=0):
-        row = layout.row(align=True)
-        row.prop(item, "enabled", text="", emboss=False,
-                 icon='CHECKBOX_HLT' if item.enabled else 'CHECKBOX_DEHLT')
-        row.label(icon=COLLIDER_SHAPE_ICONS.get(item.shape, 'MESH_UVSPHERE'))
-        row.prop(item, "name", text="", emboss=False)
-        if item.bone:
-            row.label(text=item.bone, icon='BONE_DATA')
 
 
 class RCP_UL_bone_references(bpy.types.UIList):
@@ -118,13 +115,15 @@ class RCP_UL_attribute_overrides(bpy.types.UIList):
 class RCP_UL_collider_references(bpy.types.UIList):
     def draw_item(self, context, layout, data, item, icon, active_data, active_property,
                   index=0, flt_flag=0):
-        obj = item.id_data
-        pool = obj.ruri_cloth_physics.colliders
-        entry = pool.get(item.collider) if item.collider else None
-        shape_icon = COLLIDER_SHAPE_ICONS.get(entry.shape, 'MESH_UVSPHERE') if entry else 'ERROR'
+        settings = collider_geom.settings_of(item.object)
         row = layout.row(align=True)
-        row.label(icon=shape_icon)
-        row.prop_search(item, "collider", obj.ruri_cloth_physics, "colliders", text="")
+        if settings is None or not settings.is_collider:
+            row.label(icon='ERROR')
+        else:
+            row.prop(settings, "enabled", text="", emboss=False,
+                     icon='CHECKBOX_HLT' if settings.enabled else 'CHECKBOX_DEHLT')
+            row.label(icon=COLLIDER_SHAPE_ICONS[settings.shape])
+        row.prop(item, "object", text="")
 
 
 class RCP_PT_ruri_cloth_physics(bpy.types.Panel):
@@ -240,8 +239,11 @@ class RCP_PT_config_main(_ConfigPanel, bpy.types.Panel):
         row = layout.row(align=True)
         row.scale_y = 1.2
         row.prop(settings, "show_collision_radius", toggle=True, icon='MESH_UVSPHERE')
+        sub = row.row(align=True)
+        sub.enabled = settings.show_collision_radius
+        sub.prop(settings, "gizmo_size", text="")
         if settings.show_collision_radius and not settings.live:
-            row.label(text="需开启实时模拟", icon='INFO')
+            layout.label(text="碰撞半径需开启实时模拟", icon='INFO')
         if settings.show_bones:
             legend = layout.row(align=True)
             legend.label(text="■ 根骨骼", icon='LAYER_ACTIVE')
@@ -289,9 +291,6 @@ class RCP_PT_config_main(_ConfigPanel, bpy.types.Panel):
             for name, attribute in loose[:4]:
                 box.label(text="%s 被设为 %s" % (name, attribute))
             box.operator("ruri_cloth_physics.repair_roots", icon='PINNED')
-
-        layout.separator()
-        draw_collider_references(layout, config)
 
         layout.separator()
         if is_spring:
@@ -633,64 +632,133 @@ class RCP_PT_colliders(_ConfigPanel, bpy.types.Panel):
         return _is_armature(context)
 
     def draw_header(self, context):
-        self.layout.prop(context.object.ruri_cloth_physics, "show_colliders", text="")
+        settings = context.object.ruri_cloth_physics
+        if collider_geom.collection_for(context.scene, context.object) is not None:
+            self.layout.prop(settings, "show_colliders", text="")
 
     def draw(self, context):
         layout = self.layout
         _setup_layout(layout)
         obj = context.object
         settings = obj.ruri_cloth_physics
+        collection = collider_geom.collection_for(context.scene, obj)
 
-        row = layout.row(align=True)
-        row.scale_y = 1.3
-        row.prop(settings, "show_colliders", toggle=True,
-                 icon='HIDE_OFF' if settings.show_colliders else 'HIDE_ON')
-        sub = row.row(align=True)
-        sub.enabled = settings.show_colliders
-        sub.prop(settings, "show_collider_gizmo", toggle=True, icon='GIZMO')
-        sub.prop(settings, "gizmo_size", text="")
+        if collection is not None:
+            row = layout.row(align=True)
+            row.scale_y = 1.3
+            row.prop(settings, "show_colliders", toggle=True,
+                     icon='HIDE_OFF' if settings.show_colliders else 'HIDE_ON')
+            row.label(text="集合 %s (%d)" % (collection.name, len(collection.objects)),
+                      icon='OUTLINER_COLLECTION')
 
-        row = layout.row()
-        row.template_list("RCP_UL_colliders", "", settings, "colliders", settings,
-                          "active_collider_index", rows=3)
-        side = row.column(align=True)
-        _draw_side_buttons(side, "ruri_cloth_physics.collider_add", "ruri_cloth_physics.collider_remove",
-                           "ruri_cloth_physics.collider_move")
-
-        row = layout.row(align=True)
+        box = layout.box()
+        box.label(text="碰撞体就是空物体: G/R/S 直接摆, 单个显隐用对象自己的眼睛",
+                  icon='OUTLINER_OB_EMPTY')
+        row = box.row(align=True)
+        row.scale_y = 1.2
+        for shape, label in COLLIDER_SHAPE_BUTTONS:
+            row.operator("ruri_cloth_physics.collider_create", text=label,
+                         icon=COLLIDER_SHAPE_ICONS[shape]).shape = shape
+        row = box.row(align=True)
         row.operator("ruri_cloth_physics.colliders_from_selected", icon='BONE_DATA',
-                     text="从选中骨骼生成")
-        row.operator("ruri_cloth_physics.collider_mirror", icon='MOD_MIRROR', text="镜像")
+                     text="从选中骨骼生成胶囊")
+        row = box.row(align=True)
+        row.operator("ruri_cloth_physics.collider_attach_bone", icon='CON_CHILDOF')
+        row.operator("ruri_cloth_physics.collider_mirror", icon='MOD_MIRROR', text="镜像选中")
 
-        if len(settings.colliders) == 0:
+        config = _active_config(context)
+        if config is None:
+            layout.label(text="还没有配置, 新建配置后才能指定它用哪些碰撞体", icon='INFO')
             return
-        item = settings.colliders[min(settings.active_collider_index,
-                                      len(settings.colliders) - 1)]
         layout.separator()
-        layout.prop(item, "shape")
-        layout.prop_search(item, "bone", obj.data, "bones")
-        if not item.bone:
-            layout.label(text="未绑定骨骼, 将跟随骨架原点", icon='ERROR')
-        layout.prop(item, "center_world")
-        row = layout.row()
-        row.prop(item, "center", text="中心偏移(骨骼局部)")
-        row.enabled = False
-        if item.shape == 'SPHERE':
-            layout.prop(item, "radius")
-        elif item.shape == 'CAPSULE':
-            layout.prop(item, "direction")
-            layout.prop(item, "aligned_on_center")
-            layout.prop(item, "length")
-            layout.prop(item, "radius_separation")
-            if item.radius_separation:
-                layout.prop(item, "start_radius")
-                layout.prop(item, "end_radius")
+        draw_collider_references(layout, config)
+
+
+class RCP_PT_collider(bpy.types.Panel):
+    bl_label = "Ruri 布料物理碰撞体"
+    bl_space_type = 'PROPERTIES'
+    bl_region_type = 'WINDOW'
+    bl_context = "physics"
+
+    @classmethod
+    def poll(cls, context):
+        return context.object is not None and context.object.type == 'EMPTY'
+
+    def draw_header(self, context):
+        settings = context.object.ruri_cloth_physics_collider
+        if settings.is_collider:
+            self.layout.prop(settings, "enabled", text="", icon='PHYSICS')
+
+    def _draw_end_circle(self, layout, obj, owner):
+        box = layout.box()
+        box.label(text="本空物体是 %s 的终点圆" % owner.name, icon='MESH_CAPSULE')
+        box.label(text="半径 = 显示尺寸 × 缩放; 位置就是终点球心", icon='INFO')
+        box.prop(obj, "empty_display_size", text="显示尺寸")
+        box.prop(obj, "scale", text="缩放")
+
+    def draw(self, context):
+        layout = self.layout
+        _setup_layout(layout)
+        obj = context.object
+        settings = obj.ruri_cloth_physics_collider
+        if not settings.is_collider:
+            owner = collider_geom.owner_of(context.scene, obj)
+            if owner is None:
+                layout.operator("ruri_cloth_physics.collider_convert", icon='PHYSICS')
             else:
-                layout.prop(item, "start_radius", text="半径")
-            column = layout.column()
-            column.enabled = False
-            column.label(text="胶囊沿骨骼方向铺满 length, 始端半径在骨骼末端",
-                         icon='INFO')
+                self._draw_end_circle(layout, obj, owner)
+            return
+
+        layout.prop(settings, "shape")
+        _kind, _position, _rotation, _tip, radii, live = collider_geom.solve(
+            obj, settings, context.evaluated_depsgraph_get())
+
+        if settings.shape == 'PLANE':
+            box = layout.box()
+            box.label(text="法线 = 空物体 +Z, 平面无限大", icon='CON_ROTLIKE')
+            box.prop(obj, "rotation_euler", text="旋转")
+        else:
+            box = layout.box()
+            box.label(text="半径 = 空物体显示尺寸 × 缩放", icon='OBJECT_ORIGIN')
+            box.prop(obj, "empty_display_size", text="显示尺寸")
+            box.prop(obj, "scale", text="缩放")
+            box.label(text="当前半径 %.4g 米" % radii[0])
+
+        if settings.shape == 'CAPSULE':
+            layout.prop(settings, "end_object")
+            end = collider_geom.end_object(settings)
+            if end is None:
+                layout.label(text="没有终点圆, 现在等价于一个球", icon='ERROR')
+                layout.operator("ruri_cloth_physics.collider_end_create", icon='ADD')
+            else:
+                column = layout.column()
+                column.enabled = False
+                column.label(text="终点半径 %.4g 米, 两端球心距 %.4g 米"
+                                  % (radii[1], (end.matrix_world.translation
+                                                - obj.matrix_world.translation).length))
+
+        if not collider_geom.is_live(obj, context.evaluated_depsgraph_get()):
+            layout.label(text="已被'在视图中禁用'或集合排除, 求解器已挂起它(位置会停在原地)",
+                         icon='ERROR')
+        elif not live:
+            layout.label(text="当前不参与碰撞: 已关闭或被缩放到接近 0", icon='ERROR')
+        if obj.matrix_world.determinant() < 0.0:
+            layout.label(text="镜像(负缩放)会让朝向失效, 请改用旋转或'镜像选中'", icon='ERROR')
+
+        box = layout.box()
+        box.label(text="跟随骨骼 = 子级约束, 不改父级不进骨架层级", icon='CON_CHILDOF')
+        constraint = collider_geom.bone_constraint(obj)
+        if constraint is None or constraint.target is None:
+            box.label(text="没挂骨骼, 固定在世界空间", icon='INFO')
+        else:
+            box.label(text="%s → %s" % (constraint.target.name, constraint.subtarget or "(未指定)"))
+        row = box.row(align=True)
+        row.operator("ruri_cloth_physics.collider_attach_bone", icon='CON_CHILDOF')
+        row.operator("ruri_cloth_physics.collider_detach", icon='UNLINKED')
+
+        row = layout.row(align=True)
+        row.operator("ruri_cloth_physics.collider_mirror", icon='MOD_MIRROR')
+        row.operator("ruri_cloth_physics.collider_clear", icon='X')
 
 
 class RCP_PT_viewport_display(_ConfigPanel, bpy.types.Panel):
@@ -767,7 +835,6 @@ class RCP_PT_wind_zone(bpy.types.Panel):
 
 _CLASSES = (
     RCP_UL_configs,
-    RCP_UL_colliders,
     RCP_UL_bone_references,
     RCP_UL_attribute_overrides,
     RCP_UL_collider_references,
@@ -790,6 +857,7 @@ _CLASSES = (
     RCP_PT_collider_collision,
     RCP_PT_viewport_display,
     RCP_PT_wind_zone,
+    RCP_PT_collider,
 )
 
 

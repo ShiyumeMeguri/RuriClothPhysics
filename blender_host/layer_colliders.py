@@ -1,212 +1,52 @@
-import mathutils
-import numpy as np
-
 from . import collider_geom
 from . import shapes
 from . import viewport
 from ..cloth_kernel import defs
+from ..cloth_kernel import math as pm
 
 COLOR_ACTIVE = (1.0, 0.42, 0.05, 1.0)
 COLOR_IDLE = (0.10, 0.45, 0.70, 0.55)
 COLOR_OFF = (0.40, 0.40, 0.40, 0.30)
 
-COLOR_RADIUS = (1.0, 1.0, 1.0)
-COLOR_END_RADIUS = (0.65, 0.65, 0.68)
-COLOR_LENGTH = (0.25, 0.95, 0.45)
-COLOR_CENTER = (1.0, 0.35, 0.85)
-COLOR_PICK = (0.35, 0.75, 1.0)
-COLOR_AXIS_X = (0.95, 0.25, 0.30)
-COLOR_AXIS_Y = (0.35, 0.85, 0.30)
-COLOR_AXIS_Z = (0.30, 0.50, 0.95)
 
-MINIMUM_RADIUS = 0.001
-GLYPH_FACTOR = 12.0
-MINIMUM_GLYPH = 0.18
-
-
-def _armatures(context):
-    seen = set()
-    candidates = list(context.selected_objects)
-    active = context.view_layer.objects.active
-    if active is not None:
-        candidates.append(active)
-    for obj in candidates:
-        if obj is None or obj.type != 'ARMATURE' or obj.name in seen:
+def _colliders(context):
+    scene = context.scene
+    if scene is None:
+        return
+    for obj in scene.objects:
+        settings = collider_geom.settings_of(obj)
+        if settings is None or not settings.is_collider or not obj.visible_get():
             continue
-        seen.add(obj.name)
-        if getattr(obj, "ruri_cloth_physics", None) is not None:
-            yield obj
-
-
-def _showing(obj):
-    settings = obj.ruri_cloth_physics
-    return settings.show_colliders and len(settings.colliders) > 0
+        yield obj, settings
 
 
 def poll(context):
-    return any(_showing(obj) for obj in _armatures(context))
+    for _ in _colliders(context):
+        return True
+    return False
 
 
 def collect(context, canvas):
-    for obj in _armatures(context):
-        if not _showing(obj):
-            continue
-        settings = obj.ruri_cloth_physics
-        active_index = settings.active_collider_index
-        for index, item in enumerate(settings.colliders):
-            matrix = collider_geom.bone_matrix(obj, item.bone)
-            kind, first, second, start_radius, end_radius = collider_geom.solve(item, matrix)
-            if not item.enabled:
-                color = COLOR_OFF
-            elif index == active_index:
-                color = COLOR_ACTIVE
-            else:
-                color = COLOR_IDLE
-            if kind == defs.COLLIDER_SPHERE:
-                canvas.lines(*shapes.sphere(first, start_radius), color=color)
-            elif kind == defs.COLLIDER_PLANE:
-                canvas.lines(*shapes.plane(first, second - first), color=color)
-            else:
-                canvas.lines(*shapes.capsule(first, second, start_radius, end_radius), color=color)
-
-
-def _active(context):
-    obj = context.object
-    if obj is None or obj.type != 'ARMATURE':
-        return None, None
-    settings = getattr(obj, "ruri_cloth_physics", None)
-    if settings is None or not settings.show_colliders or not settings.show_collider_gizmo:
-        return None, None
-    if not 0 <= settings.active_collider_index < len(settings.colliders):
-        return None, None
-    return obj, settings.colliders[settings.active_collider_index]
-
-
-def _axis_frame(matrix, center, column):
-    basis = matrix.to_3x3().normalized()
-    forward = basis.col[column].normalized()
-    reference = basis.col[(column + 1) % 3]
-    side = reference.cross(forward)
-    if side.length < 1e-6:
-        side = mathutils.Vector((1.0, 0.0, 0.0))
-    side.normalize()
-    up = forward.cross(side)
-    result = mathutils.Matrix(((side.x, up.x, forward.x),
-                               (side.y, up.y, forward.y),
-                               (side.z, up.z, forward.z))).to_4x4()
-    result.translation = matrix @ mathutils.Vector(center)
-    return result
-
-
-def _glyph_scale(settings, reference):
-    return max(reference * GLYPH_FACTOR, MINIMUM_GLYPH) * settings.gizmo_size
-
-
-def picks(context, obj):
-    settings = obj.ruri_cloth_physics
-    found = []
-    for index, item in enumerate(settings.colliders):
-        if index == settings.active_collider_index or not item.enabled:
-            continue
-        matrix = collider_geom.bone_matrix(obj, item.bone)
-        kind, first, second, start_radius, end_radius = collider_geom.solve(item, matrix)
-        frame = mathutils.Matrix.Translation(mathutils.Vector(first))
-        found.append(viewport.Handle(
-            "collider.pick.%d" % index, viewport.PICK, frame,
-            scale=_glyph_scale(settings, start_radius) * 0.6, color=COLOR_PICK,
-            operator="ruri_cloth_physics.collider_activate", properties={"index": index}))
-    return found
-
-
-def handles(context):
-    obj, item = _active(context)
-    if item is None:
-        obj = context.object
-        if obj is None or obj.type != 'ARMATURE':
-            return ()
-        settings = getattr(obj, "ruri_cloth_physics", None)
-        if settings is None or not settings.show_colliders or not settings.show_collider_gizmo:
-            return ()
-        return picks(context, obj)
-    settings = obj.ruri_cloth_physics
-
-    matrix = collider_geom.bone_matrix(obj, item.bone)
-    matrix = mathutils.Matrix([list(row) for row in np.asarray(matrix)])
-    center = tuple(item.center)
-    is_capsule = item.shape == 'CAPSULE'
-    radius = item.start_radius if is_capsule else item.radius
-    found = list(picks(context, obj))
-
-    def write_radius(value):
-        if is_capsule:
-            item.start_radius = value
-            if not item.radius_separation:
-                item.end_radius = value
+    active = context.object
+    depsgraph = context.evaluated_depsgraph_get()
+    for obj, settings in _colliders(context):
+        kind, position, rotation, tip, radii, live = collider_geom.solve(obj, settings, depsgraph)
+        if not live:
+            color = COLOR_OFF
+        elif obj is active:
+            color = COLOR_ACTIVE
         else:
-            item.radius = value
-
-    if item.shape != 'PLANE':
-        found.append(viewport.Handle(
-            "collider.radius", viewport.ARROW, _axis_frame(matrix, center, 0),
-            read=lambda: item.start_radius if is_capsule else item.radius,
-            write=write_radius, scale=_glyph_scale(settings, radius), color=COLOR_RADIUS,
-            minimum=MINIMUM_RADIUS))
-
-    if is_capsule:
-        found.append(viewport.Handle(
-            "collider.length", viewport.ARROW, _axis_frame(matrix, center, 1),
-            read=lambda: item.length * 0.5,
-            write=lambda value: setattr(item, "length", max(float(value) * 2.0, MINIMUM_RADIUS)),
-            scale=_glyph_scale(settings, item.length * 0.5), color=COLOR_LENGTH,
-            minimum=MINIMUM_RADIUS))
-        if item.radius_separation:
-            found.append(viewport.Handle(
-                "collider.end_radius", viewport.ARROW, _axis_frame(matrix, center, 2),
-                read=lambda: item.end_radius,
-                write=lambda value: setattr(item, "end_radius", value),
-                scale=_glyph_scale(settings, item.end_radius), color=COLOR_END_RADIUS,
-                minimum=MINIMUM_RADIUS))
-
-    rotation = matrix.to_3x3()
-    inverse = rotation.copy()
-    inverse.invert_safe()
-
-    def world_offset():
-        return rotation @ mathutils.Vector(item.center)
-
-    ball_frame = mathutils.Matrix.Translation(matrix.translation)
-    found.append(viewport.Handle(
-        "collider.center", viewport.MOVE, ball_frame,
-        read=lambda: tuple(world_offset()),
-        write=lambda value: setattr(item, "center",
-                                    tuple(inverse @ mathutils.Vector(
-                                        (float(value[0]), float(value[1]), float(value[2]))))),
-        scale=_glyph_scale(settings, radius) * 1.2, color=COLOR_CENTER))
-
-    def make_axis(index, direction, color, name):
-        component = world_offset()[index]
-        centre_world = matrix @ mathutils.Vector(item.center)
-        basis = viewport.axis_frame(centre_world - direction * component, direction)
-
-        def write(value):
-            current = world_offset()
-            current[index] = float(value)
-            item.center = tuple(inverse @ current)
-
-        return viewport.Handle(
-            "collider.center.%s" % name, viewport.ARROW, basis,
-            read=lambda: world_offset()[index], write=write,
-            scale=_glyph_scale(settings, radius) * 0.8, color=color)
-
-    for index, (direction, color, name) in enumerate((
-            (mathutils.Vector((1.0, 0.0, 0.0)), COLOR_AXIS_X, "x"),
-            (mathutils.Vector((0.0, 1.0, 0.0)), COLOR_AXIS_Y, "y"),
-            (mathutils.Vector((0.0, 0.0, 1.0)), COLOR_AXIS_Z, "z"))):
-        found.append(make_axis(index, direction, color, name))
-    return found
+            color = COLOR_IDLE
+        if kind == defs.COLLIDER_SPHERE:
+            canvas.lines(*shapes.sphere(position, radii[0]), color=color)
+        elif kind == defs.COLLIDER_PLANE:
+            normal = pm.quat_to_tangent(rotation[None])[0]
+            canvas.lines(*shapes.plane(position, normal, radii[0]), color=color)
+        else:
+            canvas.lines(*shapes.capsule(position, tip, radii[0], radii[1]), color=color)
 
 
-LAYER = viewport.Layer("colliders", poll=poll, collect=collect, handles=handles, order=10)
+LAYER = viewport.Layer("colliders", poll=poll, collect=collect, order=10)
 
 
 def register():

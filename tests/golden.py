@@ -128,12 +128,7 @@ class EmptyBinding:
     def __init__(self):
         self.count = 0
         self.kinds = np.zeros(0, dtype=np.int32)
-        self.bone_names = []
-        self.centers = np.zeros((0, 3), dtype=np.float32)
-        self.sizes = np.zeros((0, 3), dtype=np.float32)
-        self.axes = np.zeros((0, 3), dtype=np.float32)
-        self.aligned = np.zeros(0, dtype=bool)
-        self.token = ()
+        self.objects = []
 
 
 def run_golden(frame_count=60):

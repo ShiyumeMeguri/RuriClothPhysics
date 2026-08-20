@@ -8,13 +8,14 @@ from . import config_io
 from . import runtime
 
 SCOPE_ITEMS = (
-    ('OBJECT', "整个骨架", "全部配置 + 碰撞体 + 骨架级开关"),
-    ('CONFIG', "当前配置", "只存当前这一个配置(连同它引用的碰撞体)"),
+    ('OBJECT', "整个骨架", "全部配置 + 骨架级开关 + 它们用到的碰撞体定义"),
+    ('CONFIG', "当前配置", "只存当前这一个配置, 连同它用到的碰撞体定义"),
+    ('COLLIDERS', "只存碰撞体", "只存碰撞体本身与各配置的引用关系, 不动任何物理参数"),
 )
 
 MODE_ITEMS = (
-    ('REPLACE', "替换", "清空现有内容后载入"),
-    ('APPEND', "追加", "保留现有内容, 把文件里的配置接在后面"),
+    ('REPLACE', "替换", "清空现有内容后载入; 挂在本骨架下的旧碰撞体空物体会一并删除, 避免每次载入都多出一套"),
+    ('APPEND', "追加", "保留现有内容, 配置接在后面, 碰撞体照样新建一套"),
 )
 
 
@@ -32,6 +33,14 @@ def _report_problems(operator, report):
     missing = report.get("missing_objects")
     if missing:
         operator.report({'WARNING'}, "找不到对象: %s" % ", ".join(sorted(set(missing))[:4]))
+    bones = report.get("missing_bones")
+    if bones:
+        operator.report({'WARNING'}, "碰撞体的父级骨骼不存在: %s"
+                        % ", ".join(sorted(set(bones))[:4]))
+    configs = report.get("missing_configs")
+    if configs:
+        operator.report({'WARNING'}, "本骨架没有这些配置, 引用未恢复: %s"
+                        % ", ".join(sorted(set(configs))[:4]))
     if report.get("unresolved_bones"):
         operator.report({'WARNING'}, "有根骨骼在本骨架里不存在, 已留空")
     unknown = report.get("unknown_properties")
@@ -57,14 +66,19 @@ class RCP_OT_preset_save(bpy.types.Operator, ExportHelper):
 
     def invoke(self, context, event):
         settings = _settings(context)
-        base = context.object.name if self.scope == 'OBJECT' \
-            else settings.configs[settings.active_config_index].name
+        if self.scope == 'CONFIG':
+            base = settings.configs[settings.active_config_index].name
+        elif self.scope == 'COLLIDERS':
+            base = "%s.碰撞体" % context.object.name
+        else:
+            base = context.object.name
         self.filepath = os.path.join(config_io.preset_directory(create=True), "%s.json" % base)
         return super().invoke(context, event)
 
     def execute(self, context):
         settings = _settings(context)
-        payload = config_io.serialize(settings, self.scope,
+        context.view_layer.update()
+        payload = config_io.serialize(settings, self.scope, context.scene,
                                       min(settings.active_config_index,
                                           len(settings.configs) - 1))
         config_io.save(self.filepath, payload)
@@ -97,13 +111,13 @@ class RCP_OT_preset_load(bpy.types.Operator, ImportHelper):
         except (OSError, ValueError) as error:
             self.report({'ERROR'}, "读取失败: %s" % error)
             return {'CANCELLED'}
-        report = config_io.deserialize(settings, payload, self.mode)
+        report = config_io.deserialize(settings, payload, self.mode, context)
         if not _report_problems(self, report):
             return {'CANCELLED'}
         runtime.clear_registry()
-        self.report({'INFO'}, "已载入 %s (%d 配置 / %d 碰撞体)"
+        self.report({'INFO'}, "已载入 %s (%d 配置 / 新建 %d 碰撞体)"
                     % (os.path.basename(self.filepath), len(settings.configs),
-                       len(settings.colliders)))
+                       report.get("created_colliders", 0)))
         return {'FINISHED'}
 
 
@@ -141,11 +155,12 @@ class RCP_OT_preset_apply(bpy.types.Operator):
         except (OSError, ValueError) as error:
             self.report({'ERROR'}, "读取失败: %s" % error)
             return {'CANCELLED'}
-        report = config_io.deserialize(settings, payload, self.mode)
+        report = config_io.deserialize(settings, payload, self.mode, context)
         if not _report_problems(self, report):
             return {'CANCELLED'}
         runtime.clear_registry()
-        self.report({'INFO'}, "已应用 %s" % self.preset)
+        self.report({'INFO'}, "已应用 %s (新建 %d 碰撞体)"
+                    % (self.preset, report.get("created_colliders", 0)))
         return {'FINISHED'}
 
 

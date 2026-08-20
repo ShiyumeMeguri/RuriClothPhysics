@@ -97,6 +97,7 @@ from .kernels import (
     do_distance_gather,
     do_step_update,
     _neg_transform_pose,
+    _neg_transform_point,
     _shift_pose,
     _shift_point,
     _premul_quat,
@@ -1151,21 +1152,25 @@ def phase_05(scal_f, scal_i, blob_u8_s, blob_f32_v3, blob_f32_s, blob_i32_s, blo
     tid = cuda.grid(1)
     stride = cuda.gridsize(1)
     c_active = blob_u8_s[offs[S_c_active]:offs[S_c_active] + lens[S_c_active]]
-    c_center = blob_f32_v3[offs[S_c_center]:offs[S_c_center] + lens[S_c_center]]
     c_enabled = blob_u8_s[offs[S_c_enabled]:offs[S_c_enabled] + lens[S_c_enabled]]
     c_enabled_prev = blob_u8_s[offs[S_c_enabled_prev]:offs[S_c_enabled_prev] + lens[S_c_enabled_prev]]
     c_frame_pos = blob_f32_v3[offs[S_c_frame_pos]:offs[S_c_frame_pos] + lens[S_c_frame_pos]]
+    c_frame_radius = blob_f32_v2[offs[S_c_frame_radius]:offs[S_c_frame_radius] + lens[S_c_frame_radius]]
     c_frame_rot = blob_f32_v4[offs[S_c_frame_rot]:offs[S_c_frame_rot] + lens[S_c_frame_rot]]
-    c_frame_scl = blob_f32_v3[offs[S_c_frame_scl]:offs[S_c_frame_scl] + lens[S_c_frame_scl]]
+    c_frame_tip = blob_f32_v3[offs[S_c_frame_tip]:offs[S_c_frame_tip] + lens[S_c_frame_tip]]
     c_input_positions = blob_f32_v3[offs[S_c_input_positions]:offs[S_c_input_positions] + lens[S_c_input_positions]]
+    c_input_radii = blob_f32_v2[offs[S_c_input_radii]:offs[S_c_input_radii] + lens[S_c_input_radii]]
     c_input_rotations = blob_f32_v4[offs[S_c_input_rotations]:offs[S_c_input_rotations] + lens[S_c_input_rotations]]
-    c_input_scales = blob_f32_v3[offs[S_c_input_scales]:offs[S_c_input_scales] + lens[S_c_input_scales]]
+    c_input_tips = blob_f32_v3[offs[S_c_input_tips]:offs[S_c_input_tips] + lens[S_c_input_tips]]
     c_now_pos = blob_f32_v3[offs[S_c_now_pos]:offs[S_c_now_pos] + lens[S_c_now_pos]]
     c_now_rot = blob_f32_v4[offs[S_c_now_rot]:offs[S_c_now_rot] + lens[S_c_now_rot]]
+    c_now_tip = blob_f32_v3[offs[S_c_now_tip]:offs[S_c_now_tip] + lens[S_c_now_tip]]
     c_old_frame_pos = blob_f32_v3[offs[S_c_old_frame_pos]:offs[S_c_old_frame_pos] + lens[S_c_old_frame_pos]]
     c_old_frame_rot = blob_f32_v4[offs[S_c_old_frame_rot]:offs[S_c_old_frame_rot] + lens[S_c_old_frame_rot]]
+    c_old_frame_tip = blob_f32_v3[offs[S_c_old_frame_tip]:offs[S_c_old_frame_tip] + lens[S_c_old_frame_tip]]
     c_old_pos = blob_f32_v3[offs[S_c_old_pos]:offs[S_c_old_pos] + lens[S_c_old_pos]]
     c_old_rot = blob_f32_v4[offs[S_c_old_rot]:offs[S_c_old_rot] + lens[S_c_old_rot]]
+    c_old_tip = blob_f32_v3[offs[S_c_old_tip]:offs[S_c_old_tip] + lens[S_c_old_tip]]
     c_team = blob_i32_s[offs[S_c_team]:offs[S_c_team] + lens[S_c_team]]
     t_cws = blob_f32_v3[offs[S_t_cws]:offs[S_t_cws] + lens[S_t_cws]]
     t_enabled = blob_u8_s[offs[S_t_enabled]:offs[S_t_enabled] + lens[S_t_enabled]]
@@ -1183,10 +1188,11 @@ def phase_05(scal_f, scal_i, blob_u8_s, blob_f32_v3, blob_f32_s, blob_i32_s, blo
     while ci < num_colliders:
         if team_frame_mask(t_enabled, t_valid, t_cws, c_team[ci]):
             do_collider_frame_pre(ci, c_team, c_enabled, c_enabled_prev, c_active,
-                                  c_input_scales, c_input_positions, c_input_rotations, c_center,
-                                  c_frame_pos, c_frame_rot, c_frame_scl,
-                                  c_old_frame_pos, c_old_frame_rot, c_now_pos, c_now_rot,
-                                  c_old_pos, c_old_rot,
+                                  c_input_positions, c_input_rotations, c_input_tips, c_input_radii,
+                                  c_frame_pos, c_frame_rot, c_frame_tip, c_frame_radius,
+                                  c_old_frame_pos, c_old_frame_rot, c_old_frame_tip,
+                                  c_now_pos, c_now_rot, c_now_tip,
+                                  c_old_pos, c_old_rot, c_old_tip,
                                   t_reset_pending, t_negative_scale_teleport,
                                   t_negative_scale_matrix, t_negative_scale_change,
                                   t_inertia_shift, t_frame_component_shift_vector,
@@ -1411,19 +1417,20 @@ def phase_11(scal_f, scal_i, blob_u8_s, blob_f32_v3, blob_f32_s, blob_i32_s, blo
     stride = cuda.gridsize(1)
     _k = k
     c_active = blob_u8_s[offs[S_c_active]:offs[S_c_active] + lens[S_c_active]]
-    c_aligned = blob_u8_s[offs[S_c_aligned]:offs[S_c_aligned] + lens[S_c_aligned]]
-    c_axis = blob_f32_v3[offs[S_c_axis]:offs[S_c_axis] + lens[S_c_axis]]
     c_frame_pos = blob_f32_v3[offs[S_c_frame_pos]:offs[S_c_frame_pos] + lens[S_c_frame_pos]]
+    c_frame_radius = blob_f32_v2[offs[S_c_frame_radius]:offs[S_c_frame_radius] + lens[S_c_frame_radius]]
     c_frame_rot = blob_f32_v4[offs[S_c_frame_rot]:offs[S_c_frame_rot] + lens[S_c_frame_rot]]
-    c_frame_scl = blob_f32_v3[offs[S_c_frame_scl]:offs[S_c_frame_scl] + lens[S_c_frame_scl]]
+    c_frame_tip = blob_f32_v3[offs[S_c_frame_tip]:offs[S_c_frame_tip] + lens[S_c_frame_tip]]
     c_kind = blob_i32_s[offs[S_c_kind]:offs[S_c_kind] + lens[S_c_kind]]
     c_now_pos = blob_f32_v3[offs[S_c_now_pos]:offs[S_c_now_pos] + lens[S_c_now_pos]]
     c_now_rot = blob_f32_v4[offs[S_c_now_rot]:offs[S_c_now_rot] + lens[S_c_now_rot]]
+    c_now_tip = blob_f32_v3[offs[S_c_now_tip]:offs[S_c_now_tip] + lens[S_c_now_tip]]
     c_old_frame_pos = blob_f32_v3[offs[S_c_old_frame_pos]:offs[S_c_old_frame_pos] + lens[S_c_old_frame_pos]]
     c_old_frame_rot = blob_f32_v4[offs[S_c_old_frame_rot]:offs[S_c_old_frame_rot] + lens[S_c_old_frame_rot]]
+    c_old_frame_tip = blob_f32_v3[offs[S_c_old_frame_tip]:offs[S_c_old_frame_tip] + lens[S_c_old_frame_tip]]
     c_old_pos = blob_f32_v3[offs[S_c_old_pos]:offs[S_c_old_pos] + lens[S_c_old_pos]]
     c_old_rot = blob_f32_v4[offs[S_c_old_rot]:offs[S_c_old_rot] + lens[S_c_old_rot]]
-    c_size = blob_f32_v3[offs[S_c_size]:offs[S_c_size] + lens[S_c_size]]
+    c_old_tip = blob_f32_v3[offs[S_c_old_tip]:offs[S_c_old_tip] + lens[S_c_old_tip]]
     c_team = blob_i32_s[offs[S_c_team]:offs[S_c_team] + lens[S_c_team]]
     c_work_aabb_max = blob_f32_v3[offs[S_c_work_aabb_max]:offs[S_c_work_aabb_max] + lens[S_c_work_aabb_max]]
     c_work_aabb_min = blob_f32_v3[offs[S_c_work_aabb_min]:offs[S_c_work_aabb_min] + lens[S_c_work_aabb_min]]
@@ -1445,10 +1452,12 @@ def phase_11(scal_f, scal_i, blob_u8_s, blob_f32_v3, blob_f32_s, blob_i32_s, blo
         cm = c_team[ci]
         if team_frame_mask(t_enabled, t_valid, t_cws, cm) and t_update_count[cm] > _k \
                 and c_active[ci] != 0:
-            do_collider_start_step(ci, c_team, c_kind, c_size, c_axis, c_aligned,
-                                   c_frame_pos, c_frame_rot, c_frame_scl,
-                                   c_old_frame_pos, c_old_frame_rot, c_now_pos, c_now_rot,
-                                   c_old_pos, c_old_rot, c_work_rot, c_work_inv_old_rot,
+            do_collider_start_step(ci, c_team, c_kind,
+                                   c_frame_pos, c_frame_rot, c_frame_tip, c_frame_radius,
+                                   c_old_frame_pos, c_old_frame_rot, c_old_frame_tip,
+                                   c_now_pos, c_now_rot, c_now_tip,
+                                   c_old_pos, c_old_rot, c_old_tip,
+                                   c_work_rot, c_work_inv_old_rot,
                                    c_work_radius, c_work_old_pos, c_work_next_pos,
                                    c_work_aabb_min, c_work_aabb_max,
                                    t_frame_interpolation, t_step_move_inertia_ratio,
@@ -3499,8 +3508,10 @@ def phase_44(scal_f, scal_i, blob_u8_s, blob_f32_v3, blob_f32_s, blob_i32_s, blo
     c_active = blob_u8_s[offs[S_c_active]:offs[S_c_active] + lens[S_c_active]]
     c_now_pos = blob_f32_v3[offs[S_c_now_pos]:offs[S_c_now_pos] + lens[S_c_now_pos]]
     c_now_rot = blob_f32_v4[offs[S_c_now_rot]:offs[S_c_now_rot] + lens[S_c_now_rot]]
+    c_now_tip = blob_f32_v3[offs[S_c_now_tip]:offs[S_c_now_tip] + lens[S_c_now_tip]]
     c_old_pos = blob_f32_v3[offs[S_c_old_pos]:offs[S_c_old_pos] + lens[S_c_old_pos]]
     c_old_rot = blob_f32_v4[offs[S_c_old_rot]:offs[S_c_old_rot] + lens[S_c_old_rot]]
+    c_old_tip = blob_f32_v3[offs[S_c_old_tip]:offs[S_c_old_tip] + lens[S_c_old_tip]]
     c_team = blob_i32_s[offs[S_c_team]:offs[S_c_team] + lens[S_c_team]]
     t_cws = blob_f32_v3[offs[S_t_cws]:offs[S_t_cws] + lens[S_t_cws]]
     t_enabled = blob_u8_s[offs[S_t_enabled]:offs[S_t_enabled] + lens[S_t_enabled]]
@@ -3512,7 +3523,8 @@ def phase_44(scal_f, scal_i, blob_u8_s, blob_f32_v3, blob_f32_s, blob_i32_s, blo
         cm = c_team[ci]
         if team_frame_mask(t_enabled, t_valid, t_cws, cm) and t_update_count[cm] > _k \
                 and c_active[ci] != 0:
-            do_collider_end_step(ci, c_now_pos, c_now_rot, c_old_pos, c_old_rot)
+            do_collider_end_step(ci, c_now_pos, c_now_rot, c_now_tip,
+                                 c_old_pos, c_old_rot, c_old_tip)
         ci += stride
 
 
@@ -3772,8 +3784,10 @@ def phase_52(scal_f, scal_i, blob_u8_s, blob_f32_v3, blob_f32_s, blob_i32_s, blo
     c_active = blob_u8_s[offs[S_c_active]:offs[S_c_active] + lens[S_c_active]]
     c_frame_pos = blob_f32_v3[offs[S_c_frame_pos]:offs[S_c_frame_pos] + lens[S_c_frame_pos]]
     c_frame_rot = blob_f32_v4[offs[S_c_frame_rot]:offs[S_c_frame_rot] + lens[S_c_frame_rot]]
+    c_frame_tip = blob_f32_v3[offs[S_c_frame_tip]:offs[S_c_frame_tip] + lens[S_c_frame_tip]]
     c_old_frame_pos = blob_f32_v3[offs[S_c_old_frame_pos]:offs[S_c_old_frame_pos] + lens[S_c_old_frame_pos]]
     c_old_frame_rot = blob_f32_v4[offs[S_c_old_frame_rot]:offs[S_c_old_frame_rot] + lens[S_c_old_frame_rot]]
+    c_old_frame_tip = blob_f32_v3[offs[S_c_old_frame_tip]:offs[S_c_old_frame_tip] + lens[S_c_old_frame_tip]]
     c_team = blob_i32_s[offs[S_c_team]:offs[S_c_team] + lens[S_c_team]]
     t_cws = blob_f32_v3[offs[S_t_cws]:offs[S_t_cws] + lens[S_t_cws]]
     t_enabled = blob_u8_s[offs[S_t_enabled]:offs[S_t_enabled] + lens[S_t_enabled]]
@@ -3785,7 +3799,8 @@ def phase_52(scal_f, scal_i, blob_u8_s, blob_f32_v3, blob_f32_s, blob_i32_s, blo
         cm = c_team[ci]
         if team_frame_mask(t_enabled, t_valid, t_cws, cm) and t_running[cm] != 0 \
                 and c_active[ci] != 0:
-            do_collider_frame_post(ci, c_frame_pos, c_frame_rot, c_old_frame_pos, c_old_frame_rot)
+            do_collider_frame_post(ci, c_frame_pos, c_frame_rot, c_frame_tip,
+                                   c_old_frame_pos, c_old_frame_rot, c_old_frame_tip)
         ci += stride
 
 
