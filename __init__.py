@@ -12,44 +12,44 @@ from . import dependencies
 
 dependencies.ensure_installed()
 
-from .blender_host import (
-    properties,
-    operators,
-    bake,
-    presets,
-    ui,
-    runtime,
-    selection_sync,
-    layer_colliders,
-    layer_bones,
-    layer_particles,
-    layer_wind,
-    viewport_draw,
-    viewport_handles,
-)
-
-_MODULES = (
-    properties,
-    operators,
-    bake,
-    presets,
-    ui,
-    runtime,
-    selection_sync,
-    layer_colliders,
-    layer_bones,
-    layer_particles,
-    layer_wind,
-    viewport_draw,
-    viewport_handles,
-)
+def _blender_modules():
+    from .blender_host import (
+        properties,
+        operators,
+        bake,
+        presets,
+        ui,
+        runtime,
+        selection_sync,
+        layer_colliders,
+        layer_bones,
+        layer_particles,
+        layer_wind,
+        viewport_draw,
+        viewport_handles,
+    )
+    return (
+        properties,
+        operators,
+        bake,
+        presets,
+        ui,
+        runtime,
+        selection_sync,
+        layer_colliders,
+        layer_bones,
+        layer_particles,
+        layer_wind,
+        viewport_draw,
+        viewport_handles,
+    )
 
 
 def register():
-    for module in _MODULES:
+    for module in _blender_modules():
         module.register()
 
 
 def unregister():
-    for module in reversed(_MODULES):
+    for module in reversed(_blender_modules()):
         module.unregister()
