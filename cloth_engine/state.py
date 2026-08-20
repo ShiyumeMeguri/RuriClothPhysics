@@ -107,8 +107,10 @@ class DomainStorage:
             offset = self.byte_offsets[field_name]
             shape = self.array_shapes[field_name]
             warp_dtype = self.warp_dtypes[field_name]
-            self.device_arrays[field_name] = wp.array(
+            device_array = wp.array(
                 ptr=self.device_slab.ptr + offset, dtype=warp_dtype, shape=shape, device=DEVICE)
+            device_array._backing_slab = self.device_slab
+            self.device_arrays[field_name] = device_array
             upload_array = wp.array(
                 ptr=self.upload_slab.ptr + offset, dtype=warp_dtype, shape=shape, device="cpu",
                 pinned=True)
