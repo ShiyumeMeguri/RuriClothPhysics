@@ -36,6 +36,19 @@ COLLISION_POINT = wp.constant(int(_defs.COLLISION_POINT))
 TO_FIXED = wp.constant(float(_defs.TO_FIXED))
 MAX_DISTANCE_RATIO_FUTURE_PREDICTION = wp.constant(
     float(_defs.MAX_DISTANCE_RATIO_FUTURE_PREDICTION))
+TELEPORT_RESET = wp.constant(int(_defs.TELEPORT_RESET))
+ZONE_BOX = wp.constant(int(_defs.ZONE_BOX))
+ZONE_SPHERE_DIR = wp.constant(int(_defs.ZONE_SPHERE_DIR))
+ZONE_SPHERE_RADIAL = wp.constant(int(_defs.ZONE_SPHERE_RADIAL))
+WIND_ZONE_SLOTS = wp.constant(int(_defs.WIND_ZONE_SLOTS))
+WIND_ZONE_RESULT_SLOTS = wp.constant(int(_defs.WIND_ZONE_RESULT_SLOTS))
+WIND_ZONE_MIN_MAIN = wp.constant(float(_defs.WIND_ZONE_MIN_MAIN))
+SCAL_FRAME_DT = wp.constant(int(_defs.SCAL_FRAME_DT))
+SCAL_SIM_DT = wp.constant(int(_defs.SCAL_SIM_DT))
+SCAL_TIME_SCALE = wp.constant(int(_defs.SCAL_TIME_SCALE))
+SCAL_POWER1 = wp.constant(int(_defs.SCAL_POWER1))
+SCAL_MAX_SIM = wp.constant(int(_defs.SCAL_MAX_SIM))
+SCAL_N_ZONES = wp.constant(int(_defs.SCAL_N_ZONES))
 
 
 @wp.func

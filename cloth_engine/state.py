@@ -1,6 +1,8 @@
 import numpy as np
 import warp as wp
 
+from ..cloth_kernel import defs as _defs
+from ..cloth_kernel import io as _io
 from ..cloth_kernel import program as _program
 from ..cloth_kernel import world as _world
 
@@ -67,53 +69,110 @@ def _fields_from_specification_map(specification_map):
     return fields
 
 
-DOMAIN_SPECIFICATION_TABLE = (
-    ("particle", _world.PARTICLE_FIELDS),
-    ("transform", _world.TRANSFORM_FIELDS),
-    ("collider", _world.COLLIDER_FIELDS),
-    ("distance", _world.DISTANCE_FIELDS),
-    ("bending", _world.BENDING_FIELDS),
-    ("tether", _world.INDEX_FIELDS),
-    ("motion", _world.INDEX_FIELDS),
-    ("update_move", _world.INDEX_FIELDS),
-    ("update_fixed", _world.INDEX_FIELDS),
-    ("spring", _world.INDEX_FIELDS),
-    ("collision_process", _world.INDEX_FIELDS),
-    ("center_fixed", _world.INDEX_FIELDS),
-    ("angle_buffered", _world.INDEX_FIELDS),
-    ("edges", _world.EDGE_FIELDS),
-    ("collision_edges", _world.EDGE_FIELDS),
-    ("triangles", _world.TRIANGLE_FIELDS),
-    ("v2t", _world.V2T_FIELDS),
-    ("point_pairs", _world.PAIR_POINT_FIELDS),
-    ("edge_pairs", _world.PAIR_EDGE_FIELDS),
-    ("self_points", _world.PRIMITIVE_FIELDS),
-    ("self_edges", _world.PRIMITIVE_FIELDS),
-    ("self_triangles", _world.PRIMITIVE_FIELDS),
-)
+def _normalized_fields(field_source):
+    if isinstance(field_source, np.dtype):
+        return _fields_from_structured_dtype(field_source)
+    return _fields_from_specification_map(field_source)
 
 
-def _domain_fields_table():
-    table = {"team": _fields_from_structured_dtype(_world.TEAM_DTYPE)}
-    for domain_name, specification_map in DOMAIN_SPECIFICATION_TABLE:
-        table[domain_name] = _fields_from_specification_map(specification_map)
-    return table
+STORAGE_COUNT_PER_STORAGE = "per_storage"
+STORAGE_COUNT_PER_PLANE = "per_plane"
+STORAGE_COUNT_FROM_SPECIFICATION = "from_specification"
 
-
-DOMAIN_FIELDS = _domain_fields_table()
-
-DOMAIN_NAMES = tuple(DOMAIN_FIELDS.keys())
+STORAGE_COUNT_RULES = (STORAGE_COUNT_PER_STORAGE, STORAGE_COUNT_PER_PLANE,
+                       STORAGE_COUNT_FROM_SPECIFICATION)
 
 DERIVED_STORAGE_NAME = "derived"
 
-DERIVED_FIELDS = dict(_program.DERIVED_PLANE_FIELDS)
+FRAME_SCALAR_STORAGE_NAME = "frame_scalar"
+
+FRAME_SCALAR_FIELD_SOURCE = {
+    plane_name: (scalar_type, ())
+    for plane_name, scalar_type, _element_count in _defs.FRAME_SCALAR_PLANE_SPECIFICATION}
+
+FRAME_SCALAR_PLANE_COUNTS = {
+    plane_name: int(element_count)
+    for plane_name, _scalar_type, element_count in _defs.FRAME_SCALAR_PLANE_SPECIFICATION}
+
+STORAGE_SPECIFICATION_TABLE = (
+    ("team", _world.TEAM_DTYPE, STORAGE_COUNT_PER_STORAGE, None),
+    ("particle", _world.PARTICLE_FIELDS, STORAGE_COUNT_PER_STORAGE, None),
+    ("transform", _world.TRANSFORM_FIELDS, STORAGE_COUNT_PER_STORAGE, None),
+    ("collider", _world.COLLIDER_FIELDS, STORAGE_COUNT_PER_STORAGE, None),
+    ("distance", _world.DISTANCE_FIELDS, STORAGE_COUNT_PER_STORAGE, None),
+    ("bending", _world.BENDING_FIELDS, STORAGE_COUNT_PER_STORAGE, None),
+    ("tether", _world.INDEX_FIELDS, STORAGE_COUNT_PER_STORAGE, None),
+    ("motion", _world.INDEX_FIELDS, STORAGE_COUNT_PER_STORAGE, None),
+    ("update_move", _world.INDEX_FIELDS, STORAGE_COUNT_PER_STORAGE, None),
+    ("update_fixed", _world.INDEX_FIELDS, STORAGE_COUNT_PER_STORAGE, None),
+    ("spring", _world.INDEX_FIELDS, STORAGE_COUNT_PER_STORAGE, None),
+    ("collision_process", _world.INDEX_FIELDS, STORAGE_COUNT_PER_STORAGE, None),
+    ("center_fixed", _world.INDEX_FIELDS, STORAGE_COUNT_PER_STORAGE, None),
+    ("angle_buffered", _world.INDEX_FIELDS, STORAGE_COUNT_PER_STORAGE, None),
+    ("edges", _world.EDGE_FIELDS, STORAGE_COUNT_PER_STORAGE, None),
+    ("collision_edges", _world.EDGE_FIELDS, STORAGE_COUNT_PER_STORAGE, None),
+    ("triangles", _world.TRIANGLE_FIELDS, STORAGE_COUNT_PER_STORAGE, None),
+    ("v2t", _world.V2T_FIELDS, STORAGE_COUNT_PER_STORAGE, None),
+    ("point_pairs", _world.PAIR_POINT_FIELDS, STORAGE_COUNT_PER_STORAGE, None),
+    ("edge_pairs", _world.PAIR_EDGE_FIELDS, STORAGE_COUNT_PER_STORAGE, None),
+    ("self_points", _world.PRIMITIVE_FIELDS, STORAGE_COUNT_PER_STORAGE, None),
+    ("self_edges", _world.PRIMITIVE_FIELDS, STORAGE_COUNT_PER_STORAGE, None),
+    ("self_triangles", _world.PRIMITIVE_FIELDS, STORAGE_COUNT_PER_STORAGE, None),
+    ("zone", _io.ZONE_FIELDS, STORAGE_COUNT_PER_STORAGE, None),
+    (DERIVED_STORAGE_NAME, _program.DERIVED_PLANE_FIELDS, STORAGE_COUNT_PER_PLANE, None),
+    (FRAME_SCALAR_STORAGE_NAME, FRAME_SCALAR_FIELD_SOURCE, STORAGE_COUNT_FROM_SPECIFICATION,
+     FRAME_SCALAR_PLANE_COUNTS),
+)
+
+
+def _validate_storage_specification():
+    seen = set()
+    for row in STORAGE_SPECIFICATION_TABLE:
+        assert len(row) == 4, \
+            "a storage row declares name, field source, count rule and declared counts, " \
+            "got %r" % (row,)
+        storage_name, field_source, count_rule, declared_counts = row
+        assert storage_name not in seen, "storage %s is declared twice" % storage_name
+        seen.add(storage_name)
+        assert count_rule in STORAGE_COUNT_RULES, \
+            "storage %s declares the count rule %r, only %r are defined" \
+            % (storage_name, count_rule, STORAGE_COUNT_RULES)
+        fields = _normalized_fields(field_source)
+        assert fields, "storage %s declares no fields" % storage_name
+        if count_rule == STORAGE_COUNT_FROM_SPECIFICATION:
+            assert declared_counts is not None and set(declared_counts) == set(fields), \
+                "storage %s takes its element counts from its own specification so the " \
+                "specification has to carry one count per field" % storage_name
+        else:
+            assert declared_counts is None, \
+                "storage %s takes its element counts from the caller so it must not also " \
+                "carry declared counts" % storage_name
+
+
+_validate_storage_specification()
+
+STORAGE_NAMES = tuple(row[0] for row in STORAGE_SPECIFICATION_TABLE)
+
+STORAGE_FIELDS = {row[0]: _normalized_fields(row[1]) for row in STORAGE_SPECIFICATION_TABLE}
+
+STORAGE_COUNT_RULE = {row[0]: row[2] for row in STORAGE_SPECIFICATION_TABLE}
+
+STORAGE_DECLARED_COUNTS = {row[0]: row[3] for row in STORAGE_SPECIFICATION_TABLE
+                           if row[3] is not None}
+
+DOMAIN_NAMES = tuple(storage_name for storage_name in STORAGE_NAMES
+                     if STORAGE_COUNT_RULE[storage_name] == STORAGE_COUNT_PER_STORAGE)
+
+PLANE_STORAGE_NAMES = tuple(storage_name for storage_name in STORAGE_NAMES
+                            if STORAGE_COUNT_RULE[storage_name] == STORAGE_COUNT_PER_PLANE)
+
+DOMAIN_FIELDS = {storage_name: STORAGE_FIELDS[storage_name] for storage_name in DOMAIN_NAMES}
+
+DERIVED_FIELDS = STORAGE_FIELDS[DERIVED_STORAGE_NAME]
 
 DERIVED_PLANE_NAMES = _program.DERIVED_PLANE_NAMES
 
-STORAGE_NAMES = DOMAIN_NAMES + (DERIVED_STORAGE_NAME,)
-
-STORAGE_FIELDS = dict(DOMAIN_FIELDS)
-STORAGE_FIELDS[DERIVED_STORAGE_NAME] = DERIVED_FIELDS
+FRAME_SCALAR_FIELDS = STORAGE_FIELDS[FRAME_SCALAR_STORAGE_NAME]
 
 
 def _aligned(value):
@@ -249,23 +308,35 @@ class SlabStorage:
 
 
 class ClothState:
-    def __init__(self, element_counts, derived_plane_counts):
+    def __init__(self, element_counts, plane_counts):
         missing = sorted(set(DOMAIN_NAMES) - set(element_counts))
         if missing:
             raise ValueError("element counts missing for domains %r" % (missing,))
         unknown = sorted(set(element_counts) - set(DOMAIN_NAMES))
         if unknown:
             raise ValueError("element counts given for unknown domains %r" % (unknown,))
+        declared_planes = set()
+        for storage_name in PLANE_STORAGE_NAMES:
+            declared_planes |= set(STORAGE_FIELDS[storage_name])
+        missing_planes = sorted(declared_planes - set(plane_counts))
+        if missing_planes:
+            raise ValueError("element counts missing for planes %r" % (missing_planes,))
+        unknown_planes = sorted(set(plane_counts) - declared_planes)
+        if unknown_planes:
+            raise ValueError("element counts given for unknown planes %r" % (unknown_planes,))
         self.storages = {}
-        for domain_name in DOMAIN_NAMES:
-            self.storages[domain_name] = SlabStorage(
-                domain_name, DOMAIN_FIELDS[domain_name],
-                uniform_element_counts(DOMAIN_FIELDS[domain_name],
-                                       int(element_counts[domain_name])))
+        for storage_name in STORAGE_NAMES:
+            fields = STORAGE_FIELDS[storage_name]
+            count_rule = STORAGE_COUNT_RULE[storage_name]
+            if count_rule == STORAGE_COUNT_PER_STORAGE:
+                counts = uniform_element_counts(fields, int(element_counts[storage_name]))
+            elif count_rule == STORAGE_COUNT_PER_PLANE:
+                counts = {plane_name: int(plane_counts[plane_name]) for plane_name in fields}
+            else:
+                counts = dict(STORAGE_DECLARED_COUNTS[storage_name])
+            self.storages[storage_name] = SlabStorage(storage_name, fields, counts)
         self.domain_element_counts = {domain_name: int(element_counts[domain_name])
                                       for domain_name in DOMAIN_NAMES}
-        self.storages[DERIVED_STORAGE_NAME] = SlabStorage(
-            DERIVED_STORAGE_NAME, DERIVED_FIELDS, dict(derived_plane_counts))
 
     def element_count(self, domain_name):
         return self.domain_element_counts[domain_name]
@@ -302,12 +373,15 @@ class ClothState:
         return self.storages[storage_name].read(field_name)
 
     def structure_key(self):
-        domains = tuple((domain_name, self.domain_element_counts[domain_name])
-                        for domain_name in DOMAIN_NAMES)
-        planes = tuple((plane_name,
-                        self.storages[DERIVED_STORAGE_NAME].element_counts[plane_name])
-                       for plane_name in DERIVED_PLANE_NAMES)
-        return domains + planes
+        entries = []
+        for storage_name in STORAGE_NAMES:
+            storage = self.storages[storage_name]
+            if STORAGE_COUNT_RULE[storage_name] == STORAGE_COUNT_PER_STORAGE:
+                entries.append((storage_name, self.domain_element_counts[storage_name]))
+                continue
+            for plane_name in storage.field_order:
+                entries.append((plane_name, storage.element_counts[plane_name]))
+        return tuple(entries)
 
     def total_size_in_bytes(self):
         return sum(self.storages[storage_name].total_size_in_bytes

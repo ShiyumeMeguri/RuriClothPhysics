@@ -11,6 +11,19 @@ LEVEL_STRATEGY_SPLIT = "split"
 LEVEL_STRATEGY_BLOCK = "block"
 LEVEL_STRATEGIES = (LEVEL_STRATEGY_SPLIT, LEVEL_STRATEGY_BLOCK)
 
+LAUNCH_PER_ELEMENT = "per_element"
+LAUNCH_SINGLE_BLOCK = "single_block"
+LAUNCH_STRATEGIES = (LAUNCH_PER_ELEMENT, LAUNCH_SINGLE_BLOCK)
+
+
+def launch_dimension(launch_strategy, element_count):
+    if launch_strategy == LAUNCH_PER_ELEMENT:
+        return (int(element_count),)
+    if launch_strategy == LAUNCH_SINGLE_BLOCK:
+        return (LAUNCH_BLOCK_DIMENSION,)
+    raise ValueError("unknown launch strategy %r, expected one of %r"
+                     % (launch_strategy, LAUNCH_STRATEGIES))
+
 
 def _normalize_dimension(dimension):
     if isinstance(dimension, int):
@@ -19,15 +32,16 @@ def _normalize_dimension(dimension):
 
 
 class LaunchEntry:
-    __slots__ = ("kernel", "dimension", "inputs")
+    __slots__ = ("kernel", "dimension", "inputs", "constants")
 
     def __init__(self, kernel, dimension, inputs):
         self.kernel = kernel
         self.dimension = dimension
         self.inputs = inputs
+        self.constants = tuple(value for value in inputs if not isinstance(value, wp.array))
 
     def identity(self):
-        return (self.kernel.module.name, self.kernel.key, self.dimension)
+        return (self.kernel.module.name, self.kernel.key, self.dimension, self.constants)
 
 
 class Plan:

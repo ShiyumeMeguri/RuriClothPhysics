@@ -794,4 +794,11 @@ def trs_inverse_f64(px: float, py: float, pz: float,
 
 @wp.func
 def mat4_mul_f64(a: wp.mat44d, b: wp.mat44d):
-    return a * b
+    product = wp.mat44d()
+    for row in range(4):
+        for column in range(4):
+            accumulator = wp.float64(0.0)
+            for inner in range(4):
+                accumulator = accumulator + a[row, inner] * b[inner, column]
+            product[row, column] = accumulator
+    return product

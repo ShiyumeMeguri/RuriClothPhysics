@@ -20,6 +20,26 @@ class WindZoneInput:
         self.attenuation_lut = None
 
 
+ZONE_FIELDS = {
+    "zone_id": (np.int32, ()),
+    "mode": (np.int32, ()),
+    "is_addition": (np.uint8, ()),
+    "main": (np.float32, ()),
+    "turbulence": (np.float32, ()),
+    "world_position": (np.float32, (3,)),
+    "world_direction": (np.float32, (3,)),
+    "world_to_local": (np.float64, (4, 4)),
+    "size": (np.float32, (3,)),
+    "zone_volume": (np.float32, ()),
+    "attenuation_lut": (np.float32, (16,)),
+}
+
+assert set(ZONE_FIELDS) == set(WindZoneInput.__slots__), \
+    "the wind zone field table and the wind zone input record must describe the same zone, " \
+    "the table declares %r and the record declares %r" \
+    % (sorted(ZONE_FIELDS), sorted(WindZoneInput.__slots__))
+
+
 class FrameGlobals:
     __slots__ = ("frame_delta_time", "simulation_frequency", "max_simulation_count",
                  "global_time_scale", "frame_index", "zones")
