@@ -9,6 +9,7 @@ import sys
 _REQUIRED_MODULES = (
     ("numba", "numba"),
     ("numba_cuda", "numba-cuda"),
+    ("warp", "warp-lang"),
 )
 
 _ROOT = pathlib.Path(__file__).resolve().parent
