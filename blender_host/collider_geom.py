@@ -21,7 +21,8 @@ MINIMUM_RADIUS = 1e-5
 COLLECTION_SUFFIX = "Colliders"
 BONE_CONSTRAINT = "Ruri Follow Bone"
 SHAPE_PREFIX = {'SPHERE': "Sphere", 'CAPSULE': "Capsule", 'PLANE': "Plane"}
-END_PREFIX = "CapsuleEnd"
+CAPSULE_START = "01"
+CAPSULE_END = "02"
 
 FOLLOW_NONE = 'NONE'
 FOLLOW_BONE = 'BONE'
@@ -47,20 +48,30 @@ def flip_side_name(name):
     return "".join(parts) if flipped else ""
 
 
-def collider_name(shape, base):
+def _stem(shape, base):
     return "%s.%s" % (SHAPE_PREFIX[shape], base) if base else SHAPE_PREFIX[shape]
 
 
+def collider_name(shape, base):
+    stem = _stem(shape, base)
+    return "%s.%s" % (stem, CAPSULE_START) if shape == 'CAPSULE' else stem
+
+
 def end_name(base):
-    return "%s.%s" % (END_PREFIX, base) if base else END_PREFIX
+    return "%s.%s" % (_stem('CAPSULE', base), CAPSULE_END)
 
 
 def base_name(obj):
-    for prefix in tuple(SHAPE_PREFIX.values()) + (END_PREFIX,):
+    name = obj.name
+    for tail in ("." + CAPSULE_START, "." + CAPSULE_END):
+        if name.endswith(tail):
+            name = name[:-len(tail)]
+            break
+    for prefix in SHAPE_PREFIX.values():
         head = prefix + "."
-        if obj.name.startswith(head):
-            return obj.name[len(head):]
-    return obj.name
+        if name.startswith(head):
+            return name[len(head):]
+    return name
 
 
 def settings_of(obj):
@@ -267,7 +278,7 @@ def _place(obj, armature_object, data, view_layer):
 
 def deserialize(data, armature_object, collection, view_layer):
     shape = data.get("shape", 'SPHERE')
-    empty = new_empty(collection, data.get("name", SHAPE_PREFIX[shape]), DISPLAY_TYPE[shape],
+    empty = new_empty(collection, data.get("name", collider_name(shape, "")), DISPLAY_TYPE[shape],
                       data.get("display_size", 0.05))
     settings = settings_of(empty)
     settings.is_collider = True
