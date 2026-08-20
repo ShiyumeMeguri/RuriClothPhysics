@@ -75,7 +75,6 @@ class ColliderBinding:
     def __init__(self):
         self.count = 0
         self.kinds = np.zeros(0, dtype=np.int32)
-        self.objects = []
 
 
 class RuntimeEntry:
@@ -308,12 +307,14 @@ def _collider_token(config):
     return tuple(entries)
 
 
+def collider_objects(config):
+    return [target for target, _settings in _collider_objects(config)]
+
+
 def build_collider_binding(config):
     binding = ColliderBinding()
-    kinds = []
-    for target, settings in _collider_objects(config):
-        binding.objects.append(target)
-        kinds.append(collider_geom.KIND_VALUES[settings.shape])
+    kinds = [collider_geom.KIND_VALUES[settings.shape]
+             for _target, settings in _collider_objects(config)]
     binding.count = len(kinds)
     binding.kinds = np.array(kinds, dtype=np.int32)
     return binding
@@ -590,10 +591,9 @@ def run_frame(scene, frame_delta_time):
                                            invisible, distance_weight, 0)
             kernel_io.set_team_transform_worlds(_world, entry.team, transform_worlds)
 
-            binding = entry.binding
-            if binding.count:
+            if entry.binding.count:
                 positions, rotations, tips, radii, enabled = collider_geom.gather(
-                    binding.objects, depsgraph, evaluated_objects, collider_cache)
+                    collider_objects(config), depsgraph, evaluated_objects, collider_cache)
                 kernel_io.set_team_collider_input(_world, entry.team, positions, rotations,
                                                   tips, radii, enabled)
 
@@ -683,6 +683,13 @@ def _on_load_post(*args):
     bone_binding.invalidate()
 
 
+@persistent
+def _on_undo_post(*args):
+    global _last_display
+    _last_display = None
+    bone_binding.invalidate()
+
+
 def _solver_driven_bones(scene):
     for obj in scene.objects if scene is not None else ():
         if obj.type != 'ARMATURE':
@@ -728,6 +735,9 @@ def register():
         bpy.app.handlers.frame_change_post.append(_on_frame_change_post)
     if _on_load_post not in bpy.app.handlers.load_post:
         bpy.app.handlers.load_post.append(_on_load_post)
+    for handlers in (bpy.app.handlers.undo_post, bpy.app.handlers.redo_post):
+        if _on_undo_post not in handlers:
+            handlers.append(_on_undo_post)
     if _on_save_pre not in bpy.app.handlers.save_pre:
         bpy.app.handlers.save_pre.append(_on_save_pre)
     if _on_save_post not in bpy.app.handlers.save_post:
@@ -741,6 +751,9 @@ def unregister():
         bpy.app.handlers.frame_change_post.remove(_on_frame_change_post)
     if _on_load_post in bpy.app.handlers.load_post:
         bpy.app.handlers.load_post.remove(_on_load_post)
+    for handlers in (bpy.app.handlers.undo_post, bpy.app.handlers.redo_post):
+        if _on_undo_post in handlers:
+            handlers.remove(_on_undo_post)
     if _on_save_pre in bpy.app.handlers.save_pre:
         bpy.app.handlers.save_pre.remove(_on_save_pre)
     if _on_save_post in bpy.app.handlers.save_post:
