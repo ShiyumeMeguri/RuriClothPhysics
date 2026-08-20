@@ -1,6 +1,8 @@
 from numba import cuda, float32, float64, int32
 from numba.cuda import libdevice
 
+from cloth_kernel import defs as _defs
+
 
 @cuda.jit(device=True)
 def fsign(x):
@@ -539,8 +541,8 @@ def cnoise2(px, py):
     return float32(2.3) * nxy
 
 
-DEPTH_MASS = float32(5.0)
-FRICTION_MASS = float32(3.0)
+DEPTH_MASS = float32(_defs.DEPTH_MASS)
+FRICTION_MASS = float32(_defs.FRICTION_MASS)
 
 
 @cuda.jit(device=True)
@@ -694,9 +696,9 @@ def mat4_mul_f64(out, a, b):
             out[i, j] = acc
 
 
-SELF_COLLISION_FIXED_MASS = float32(100.0)
-SELF_COLLISION_FRICTION_MASS = float32(10.0)
-SELF_COLLISION_CLOTH_MASS = float32(50.0)
+SELF_COLLISION_FIXED_MASS = float32(_defs.SELF_COLLISION_FIXED_MASS)
+SELF_COLLISION_FRICTION_MASS = float32(_defs.SELF_COLLISION_FRICTION_MASS)
+SELF_COLLISION_CLOTH_MASS = float32(_defs.SELF_COLLISION_CLOTH_MASS)
 
 
 @cuda.jit(device=True)

@@ -30,31 +30,44 @@ def _phase_tree(entries, depth):
     return out
 
 
-PHASE_TREE = _phase_tree([(n, c) for n, c, _ in phases.PHASE_TABLE], 0)
+PHASE_TREE = _phase_tree([(name, context) for name, context, _domain in phases.PHASE_TABLE], 0)
+PHASE_GRID_DOMAIN = {name: domain for name, _context, domain in phases.PHASE_TABLE}
+
+_LOOP_BINDINGS = {
+    "_k": ("sub_end", 0),
+    "_sit": ("self_iterations", 1),
+}
+
+_PREDICATES = {
+    "total_ct > 0": lambda flags, k, sit: flags["total_ct"] > 0,
+    "total_it > 0": lambda flags, k, sit: flags["total_it"] > 0,
+    "_k == 0": lambda flags, k, sit: k == 0,
+}
 
 
-def _flatten_plan(tree, k, sit, sub_end, has_ct, has_it, out):
+def _flatten_plan(tree, k, sit, flags, out):
     for head, name, sub in tree:
         if name is not None:
-            out.append((getattr(phases, name), k, sit))
+            out.append((name, k, sit))
             continue
-        kind, expr = head
+        kind, expression = head
         if kind == "loop":
-            span = range(sub_end) if expr == "_k" else range(kernels.SELF_COLLISION_SOLVER_ITERATION)
-            for value in span:
-                nk = value if expr == "_k" else k
-                ns = value if expr == "_sit" else sit
-                _flatten_plan(sub, nk, ns, sub_end, has_ct, has_it, out)
+            assert expression in _LOOP_BINDINGS, "no loop binding for %s" % expression
+            source, slot = _LOOP_BINDINGS[expression]
+            state = [k, sit]
+            for value in range(flags[source]):
+                state[slot] = value
+                _flatten_plan(sub, state[0], state[1], flags, out)
             continue
-        taken = {"total_it > 0": has_it, "total_ct > 0": has_ct, "_k == 0": k == 0}[expr]
+        assert expression in _PREDICATES, "no predicate for %s" % expression
+        taken = _PREDICATES[expression](flags, k, sit)
         if kind == "else":
             taken = not taken
         if taken:
-            _flatten_plan(sub, k, sit, sub_end, has_ct, has_it, out)
+            _flatten_plan(sub, k, sit, flags, out)
 
-_MAX_COOP_BLOCKS = 544
 _THREADS = 128
-_SELF_PAIRS_PER_THREAD = 64
+_GRID_ITEMS_PER_THREAD = {"self_pairs": 64, "self_contacts": 8}
 
 _ZONE_MODE = {"GLOBAL_DIRECTION": 0, "BOX_DIRECTION": 1,
               "SPHERE_DIRECTION": 2, "SPHERE_RADIAL": 3}
@@ -136,7 +149,6 @@ class GpuEngine:
         self._self_max_pairs = 0
         self._self_upload_shadow = None
         self._self_upload_totals = (0, 0)
-        self._coop_max_blocks = None
         self._plan_cache = {}
         self.load(world)
 
@@ -389,26 +401,31 @@ class GpuEngine:
         self.zone_blobs, self.zone_offs, self.zone_lens = device.build_blobs(
             ordered, kernels.ZONE_BLOB_GROUPS)[:3]
 
-    def _cooperative_max_blocks(self):
-        if self._coop_max_blocks is None:
-            try:
-                sig = phases.phase_37.signatures[0]
-                defn = phases.phase_37.overloads[sig]
-                cap = int(defn.max_cooperative_grid_blocks(_THREADS))
-                self._coop_max_blocks = max(1, min(cap, _MAX_COOP_BLOCKS))
-            except Exception:
-                return None
-        return self._coop_max_blocks
+    def _grid_sizes(self):
+        program = self.program
+        return {
+            "single": 1,
+            "teams": program.num_teams,
+            "particles": program.num_particles,
+            "colliders": program.num_colliders,
+            "bending": int(program.bending["team"].shape[0]),
+            "collision_edges": int(program.collision_edges["team"].shape[0]),
+            "triangles": program.num_triangle_entries,
+            "self_primitives": max(program.num_self_points, program.num_self_edges,
+                                   program.num_self_triangles),
+            "self_pairs": self._self_max_pairs,
+            "self_contacts": self._self_max_pairs,
+        }
 
-    def _blocks(self):
-        base = (max(self.program.num_particles, self.program.num_teams, 1) + _THREADS - 1) // _THREADS
-        if self._self_max_pairs > 0:
-            cap = self._cooperative_max_blocks()
-            if cap is not None:
-                per = _SELF_PAIRS_PER_THREAD * _THREADS
-                pair_blocks = (self._self_max_pairs + per - 1) // per
-                base = min(max(base, pair_blocks), cap)
-        return base
+    def _blocks_for(self):
+        sizes = self._grid_sizes()
+        missing = set(PHASE_GRID_DOMAIN.values()) - set(sizes)
+        assert not missing, "no grid size for domains %s" % sorted(missing)
+        blocks = {}
+        for domain, size in sizes.items():
+            per_block = _THREADS * _GRID_ITEMS_PER_THREAD.get(domain, 1)
+            blocks[domain] = max(1, (max(int(size), 1) + per_block - 1) // per_block)
+        return blocks
 
     def download_team(self, world, names=None):
         names = names or list(self.team.device.keys())
@@ -460,13 +477,19 @@ class GpuEngine:
         self.scal_f.copy_to_device(f, stream=stream)
         self.scal_i.copy_to_device(i, stream=stream)
 
-    def _plan(self, sub_end):
+    def _flags(self, sub_end):
         total_ct, total_it = self._self_upload_totals
-        key = (sub_end, total_ct > 0, total_it > 0)
+        return {"sub_end": int(sub_end),
+                "self_iterations": int(kernels.SELF_COLLISION_SOLVER_ITERATION),
+                "total_ct": int(total_ct),
+                "total_it": int(total_it)}
+
+    def _plan(self, flags):
+        key = tuple(sorted(flags.items()))
         plan = self._plan_cache.get(key)
         if plan is None:
             plan = []
-            _flatten_plan(PHASE_TREE, 0, 0, key[0], key[1], key[2], plan)
+            _flatten_plan(PHASE_TREE, 0, 0, flags, plan)
             self._plan_cache[key] = plan
         return plan
 
@@ -477,17 +500,17 @@ class GpuEngine:
                 + [self.zone_blobs[group] for group in kernels.ZONE_BLOB_GROUPS]
                 + [self.zone_offs, self.zone_lens])
 
-    def _ensure_graph(self, sub_end, blocks):
-        total_ct, total_it = self._self_upload_totals
+    def _ensure_graph(self, flags, blocks_for):
         pointers = tuple(a.__cuda_array_interface__["data"][0] for a in self._phase_args())
-        key = (sub_end, total_ct > 0, total_it > 0, blocks, pointers)
+        key = (tuple(sorted(flags.items())), tuple(sorted(blocks_for.items())), pointers)
         if self._graph is not None and self._graph_key == key:
             return self._graph
         builder = self.device.create_graph_builder()
         builder.begin_building()
         args = self._phase_args()
-        for kernel, k, sit in self._plan(sub_end):
-            kernel[blocks, _THREADS, builder](*args, int32(k), int32(sit))
+        for name, k, sit in self._plan(flags):
+            blocks = blocks_for[PHASE_GRID_DOMAIN[name]]
+            getattr(phases, name)[blocks, _THREADS, builder](*args, int32(k), int32(sit))
         builder.end_building()
         self._graph = builder.complete()
         self._graph_key = key
@@ -495,7 +518,7 @@ class GpuEngine:
 
     def launch(self, sub_end, frame_globals, stream=0):
         self._upload_scalars(sub_end, frame_globals, stream)
-        self._ensure_graph(sub_end, self._blocks()).launch(stream)
+        self._ensure_graph(self._flags(sub_end), self._blocks_for()).launch(stream)
 
     @staticmethod
     def _sub_end(frame_globals):

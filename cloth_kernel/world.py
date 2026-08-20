@@ -218,18 +218,6 @@ class ChunkArena:
         return self.arrays[name]
 
 
-class GridState:
-    def __init__(self):
-        self.valid = False
-        self.order = None
-        self.sorted_key = None
-        self.sorted_team = None
-        self.segment_start = None
-        self.segment_count = None
-        self.segment_key = None
-        self.segment_team = None
-
-
 class World:
     def __init__(self):
         self.team = np.zeros(1, dtype=TEAM_DTYPE)
@@ -256,8 +244,7 @@ class World:
         self.self_points = ChunkArena(PRIMITIVE_FIELDS, 256)
         self.self_edges = ChunkArena(PRIMITIVE_FIELDS, 256)
         self.self_triangles = ChunkArena(PRIMITIVE_FIELDS, 64)
-        self.grids = {defs.KIND_POINT: GridState(), defs.KIND_EDGE: GridState(),
-                      defs.KIND_TRIANGLE: GridState()}
+        self.grids = {}
         self.contacts = {"EE": None, "PT": None}
         self.buckets_dirty = True
         self.fk_levels = []

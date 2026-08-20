@@ -6,123 +6,71 @@ from numba.cuda import libdevice
 from . import dmath
 from .slots import *
 from .kernels import (
-    SCAL_FRAME_DT,
-    SCAL_SIM_DT,
-    SCAL_TIME_SCALE,
-    SCAL_POWER0,
-    SCAL_POWER1,
-    SCAL_POWER2,
-    SCAL_POWER3,
-    SCAL_MAX_SIM,
-    SCAL_N_ZONES,
-    SCAL_SUB_END,
-    SELF_COLLISION_SCR,
-    SELF_COLLISION_SOLVER_ITERATION,
-    SELF_COLLISION_INTERSECT_DIV,
-    SELF_COLLISION_UNIFORM_GRID_SCALE,
-    SELF_COLLISION_FIXED_MASS,
-    SELF_COLLISION_FRICTION_MASS,
-    SELF_COLLISION_CLOTH_MASS,
-    SELF_COLLISION_POINT_TRIANGLE_ANGLE_COS,
-    SCL_EE_COUNT,
-    SCL_PT_COUNT,
-    SCL_IP_COUNT,
-    SCL_ERROR,
-    SCL_USE_INTERSECT,
-    SCL_FRAME_INDEX,
-    MAX_SIM_COUNT,
-    SCAL_F_LEN,
-    SCAL_I_LEN,
-    WIND_ZONE_SLOTS,
-    ZONE_BOX,
-    ZONE_SPHERE_DIR,
-    ZONE_SPHERE_RADIAL,
-    TELEPORT_RESET,
-    TETHER_STRETCH_LIMIT,
-    TETHER_STIFFNESS_WIDTH,
-    TETHER_VELOCITY_ATTENUATION,
+    ANGLE_ITERATION,
+    BENDING_FIX_INV_MASS,
+    COLLISION_EDGE,
+    DISTANCE_VELOCITY_ATTENUATION,
     EPSILON,
-    WIND_BASE_SPEED,
-    WIND_TURBULENCE_ANGLE,
-    WIND_MAX_TIME,
-    WIND_ZONE_MIN_MAIN,
-    WIND_MIN_SPEED,
-    DEG2RAD,
-    RAD2DEG,
     FORCE_VELOCITY_ADD,
     FORCE_VELOCITY_ADD_WITHOUT_DEPTH,
     FORCE_VELOCITY_CHANGE,
     FORCE_VELOCITY_CHANGE_WITHOUT_DEPTH,
-    BONE_SPRING_FIX_MASS,
-    BONE_CLOTH_FIX_MASS,
-    DISTANCE_HORIZONTAL_STIFFNESS,
-    DISTANCE_VELOCITY_ATTENUATION,
-    VOLUME_SIGN,
-    VOLUME_SCALE,
-    BENDING_FIX_INV_MASS,
-    ONE_SIXTH,
-    TO_FIXED,
-    ANGLE_ITERATION,
-    ANGLE_LIMIT_ROT_RATIO,
-    ANGLE_LIMIT_ATTENUATION,
     FRICTION_MASS,
-    COLLIDER_SPHERE,
-    COLLIDER_CAPSULE,
-    COLLIDER_PLANE,
-    COLLISION_POINT,
-    COLLISION_EDGE,
     INF,
-    MAX_DISTANCE_RATIO_FUTURE_PREDICTION,
-    TEAM_KERNEL_FIELDS,
-    PARTICLE_KERNEL_FIELDS,
-    TRANSFORM_KERNEL_FIELDS,
-    COLLIDER_KERNEL_FIELDS,
-    STATIC_KERNEL_FIELDS,
-    STATIC_CSR_FIELDS,
-    STATIC_DIRECT_FIELDS,
-    PRIMITIVE_KERNEL_FIELDS,
-    SELF_TEAM_KERNEL_FIELDS,
-    SELF_PARTICLE_KERNEL_FIELDS,
-    SELF_STATE_KERNEL_FIELDS,
-    RESIDENT_BLOB_GROUPS,
-    ZONE_BLOB_GROUPS,
-    RESIDENT_BLOB_LAYOUT,
-    ZONE_BLOB_LAYOUT,
-    team_frame_mask,
+    ONE_SIXTH,
+    RAD2DEG,
+    SCAL_FRAME_DT,
+    SCAL_MAX_SIM,
+    SCAL_N_ZONES,
+    SCAL_POWER1,
+    SCAL_POWER2,
+    SCAL_POWER3,
+    SCAL_SIM_DT,
+    SCAL_TIME_SCALE,
+    SCL_EE_COUNT,
+    SCL_ERROR,
+    SCL_FRAME_INDEX,
+    SCL_IP_COUNT,
+    SCL_PT_COUNT,
+    SELF_COLLISION_INTERSECT_DIV,
+    SELF_COLLISION_UNIFORM_GRID_SCALE,
+    TELEPORT_RESET,
+    TO_FIXED,
+    VOLUME_SCALE,
+    VOLUME_SIGN,
+    WIND_MAX_TIME,
+    WIND_MIN_SPEED,
+    WIND_ZONE_MIN_MAIN,
+    WIND_ZONE_SLOTS,
+    ZONE_BOX,
+    ZONE_SPHERE_DIR,
+    ZONE_SPHERE_RADIAL,
     do_advance,
-    _skin_row,
-    do_base_pose,
-    do_tether,
-    do_wind_blend,
-    do_distance_gather,
-    do_step_update,
-    _neg_transform_pose,
-    _neg_transform_point,
-    _shift_pose,
-    _shift_point,
-    _premul_quat,
-    _rotate_vec,
-    do_collider_frame_pre,
-    do_collider_start_step,
-    do_collider_end_step,
-    do_collider_frame_post,
-    do_solve_point,
-    _edge_sphere,
-    _edge_capsule,
-    do_solve_edge,
-    do_particles_frame_pre,
     do_angle_limit,
     do_angle_restoration,
+    do_base_pose,
+    do_collider_end_step,
+    do_collider_frame_post,
+    do_collider_frame_pre,
+    do_collider_start_step,
     do_display_particle,
+    do_distance_gather,
+    do_output_particle,
+    do_particles_frame_pre,
     do_postline_entry,
+    do_self_update_primitive,
+    do_solve_edge,
+    do_solve_point,
+    do_step_update,
+    do_tether,
     do_triangle_normal_tangent,
     do_v2t_owner,
-    do_output_particle,
-    do_self_update_primitive,
+    do_wind_blend,
     self_aabb_overlap,
     self_connection_shared,
     self_ee_geometry,
     self_pt_geometry,
+    team_frame_mask,
 )
 
 
@@ -131,12 +79,7 @@ def phase_00(scal_f, scal_i, blob_u8_s, blob_f32_v3, blob_f32_s, blob_i32_s, blo
     tid = cuda.grid(1)
     bid = cuda.blockIdx.x
     bdim = cuda.blockDim.x
-    c_team = blob_i32_s[offs[S_c_team]:offs[S_c_team] + lens[S_c_team]]
-    p_team = blob_i32_s[offs[S_p_team]:offs[S_p_team] + lens[S_p_team]]
     sc_sync = blob_f32_v22[offs[S_sc_sync]:offs[S_sc_sync] + lens[S_sc_sync]]
-    sfe_team = blob_i32_s[offs[S_sfe_team]:offs[S_sfe_team] + lens[S_sfe_team]]
-    sfp_team = blob_i32_s[offs[S_sfp_team]:offs[S_sfp_team] + lens[S_sfp_team]]
-    sft_team = blob_i32_s[offs[S_sft_team]:offs[S_sft_team] + lens[S_sft_team]]
     t_anchor_inertia = blob_f32_s[offs[S_t_anchor_inertia]:offs[S_t_anchor_inertia] + lens[S_t_anchor_inertia]]
     t_component_world_position = blob_f32_v3[offs[S_t_component_world_position]:offs[S_t_component_world_position] + lens[S_t_component_world_position]]
     t_component_world_rotation = blob_f32_v4[offs[S_t_component_world_rotation]:offs[S_t_component_world_rotation] + lens[S_t_component_world_rotation]]
@@ -159,19 +102,6 @@ def phase_00(scal_f, scal_i, blob_u8_s, blob_f32_v3, blob_f32_s, blob_i32_s, blo
     t_valid = blob_u8_s[offs[S_t_valid]:offs[S_t_valid] + lens[S_t_valid]]
     t_world_inertia = blob_f32_s[offs[S_t_world_inertia]:offs[S_t_world_inertia] + lens[S_t_world_inertia]]
     num_teams = t_enabled.shape[0]
-    num_particles = p_team.shape[0]
-    num_colliders = c_team.shape[0]
-    num_self_points = sfp_team.shape[0]
-    num_self_edges = sfe_team.shape[0]
-    num_self_triangles = sft_team.shape[0]
-    num_teams = t_enabled.shape[0]
-
-    num_particles = p_team.shape[0]
-    num_colliders = c_team.shape[0]
-    num_self_points = sfp_team.shape[0]
-    num_self_edges = sfe_team.shape[0]
-    num_self_triangles = sft_team.shape[0]
-
     if bid == 0:
         i = tid
         while i < num_teams:
@@ -251,10 +181,6 @@ def phase_00(scal_f, scal_i, blob_u8_s, blob_f32_v3, blob_f32_s, blob_i32_s, blo
 def phase_01(scal_f, scal_i, blob_u8_s, blob_f32_v3, blob_f32_s, blob_i32_s, blob_f32_v4, blob_f32_v16, blob_i8_s, blob_f32_m4x4, blob_f64_m4x4, blob_f32_v2, blob_f32_m4x3, blob_i32_v4, blob_f32_m2x3, blob_i32_v2, blob_i32_v3, blob_f32_v22, blob_f64_v3, offs, lens, zone_i32_s, zone_u8_s, zone_f32_s, zone_f32_v3, zone_f64_m4x4, zone_f32_v16, zone_offs, zone_lens, k, sit):
     tid = cuda.grid(1)
     stride = cuda.gridsize(1)
-    fdt = scal_f[SCAL_FRAME_DT]
-    sim_dt = scal_f[SCAL_SIM_DT]
-    global_time_scale = scal_f[SCAL_TIME_SCALE]
-    max_sim_count = scal_i[SCAL_MAX_SIM]
     fdt = scal_f[SCAL_FRAME_DT]
     global_time_scale = scal_f[SCAL_TIME_SCALE]
     max_sim_count = scal_i[SCAL_MAX_SIM]
@@ -1098,7 +1024,6 @@ def phase_03b(scal_f, scal_i, blob_u8_s, blob_f32_v3, blob_f32_s, blob_i32_s, bl
         i += stride
 
 
-
 @cuda.jit(cache=True)
 def phase_04(scal_f, scal_i, blob_u8_s, blob_f32_v3, blob_f32_s, blob_i32_s, blob_f32_v4, blob_f32_v16, blob_i8_s, blob_f32_m4x4, blob_f64_m4x4, blob_f32_v2, blob_f32_m4x3, blob_i32_v4, blob_f32_m2x3, blob_i32_v2, blob_i32_v3, blob_f32_v22, blob_f64_v3, offs, lens, zone_i32_s, zone_u8_s, zone_f32_s, zone_f32_v3, zone_f64_m4x4, zone_f32_v16, zone_offs, zone_lens, k, sit):
     tid = cuda.grid(1)
@@ -1202,15 +1127,6 @@ def phase_05(scal_f, scal_i, blob_u8_s, blob_f32_v3, blob_f32_s, blob_i32_s, blo
 
 
 @cuda.jit(cache=True)
-def phase_06(scal_f, scal_i, blob_u8_s, blob_f32_v3, blob_f32_s, blob_i32_s, blob_f32_v4, blob_f32_v16, blob_i8_s, blob_f32_m4x4, blob_f64_m4x4, blob_f32_v2, blob_f32_m4x3, blob_i32_v4, blob_f32_m2x3, blob_i32_v2, blob_i32_v3, blob_f32_v22, blob_f64_v3, offs, lens, zone_i32_s, zone_u8_s, zone_f32_s, zone_f32_v3, zone_f64_m4x4, zone_f32_v16, zone_offs, zone_lens, k, sit):
-    it_pair_off = blob_i32_s[offs[S_it_pair_off]:offs[S_it_pair_off] + lens[S_it_pair_off]]
-    num_it_slots = it_pair_off.shape[0] - 1
-    total_it = it_pair_off[num_it_slots]
-    num_it_slots = it_pair_off.shape[0] - 1
-    total_it = it_pair_off[num_it_slots]
-
-
-@cuda.jit(cache=True)
 def phase_07(scal_f, scal_i, blob_u8_s, blob_f32_v3, blob_f32_s, blob_i32_s, blob_f32_v4, blob_f32_v16, blob_i8_s, blob_f32_m4x4, blob_f64_m4x4, blob_f32_v2, blob_f32_m4x3, blob_i32_v4, blob_f32_m2x3, blob_i32_v2, blob_i32_v3, blob_f32_v22, blob_f64_v3, offs, lens, zone_i32_s, zone_u8_s, zone_f32_s, zone_f32_v3, zone_f64_m4x4, zone_f32_v16, zone_offs, zone_lens, k, sit):
     tid = cuda.grid(1)
     scl_counts = blob_i32_s[offs[S_scl_counts]:offs[S_scl_counts] + lens[S_scl_counts]]
@@ -1244,10 +1160,10 @@ def phase_08(scal_f, scal_i, blob_u8_s, blob_f32_v3, blob_f32_s, blob_i32_s, blo
     sft_use = blob_u8_s[offs[S_sft_use]:offs[S_sft_use] + lens[S_sft_use]]
     t_self_grid_size = blob_f32_s[offs[S_t_self_grid_size]:offs[S_t_self_grid_size] + lens[S_t_self_grid_size]]
     t_self_max_primitive_size = blob_f32_s[offs[S_t_self_max_primitive_size]:offs[S_t_self_max_primitive_size] + lens[S_t_self_max_primitive_size]]
+    ip_cap = ip_edge.shape[0]
     num_it_slots = it_pair_off.shape[0] - 1
     total_it = it_pair_off[num_it_slots]
     frame_index = scl_counts[SCL_FRAME_INDEX]
-    ip_cap = ip_edge.shape[0]
     g = tid
     while g < total_it:
         lo = int32(0)
@@ -1286,44 +1202,9 @@ def phase_08(scal_f, scal_i, blob_u8_s, blob_f32_v3, blob_f32_s, blob_i32_s, blo
 
 
 @cuda.jit(cache=True)
-def phase_09(scal_f, scal_i, blob_u8_s, blob_f32_v3, blob_f32_s, blob_i32_s, blob_f32_v4, blob_f32_v16, blob_i8_s, blob_f32_m4x4, blob_f64_m4x4, blob_f32_v2, blob_f32_m4x3, blob_i32_v4, blob_f32_m2x3, blob_i32_v2, blob_i32_v3, blob_f32_v22, blob_f64_v3, offs, lens, zone_i32_s, zone_u8_s, zone_f32_s, zone_f32_v3, zone_f64_m4x4, zone_f32_v16, zone_offs, zone_lens, k, sit):
-    angle_pass_offsets = blob_i32_s[offs[S_angle_pass_offsets]:offs[S_angle_pass_offsets] + lens[S_angle_pass_offsets]]
-    baseline_entries = blob_i32_s[offs[S_baseline_entries]:offs[S_baseline_entries] + lens[S_baseline_entries]]
-    fk_yes_offsets = blob_i32_s[offs[S_fk_yes_offsets]:offs[S_fk_yes_offsets] + lens[S_fk_yes_offsets]]
-    st_angle_buffered_particle = blob_i32_s[offs[S_st_angle_buffered_particle]:offs[S_st_angle_buffered_particle] + lens[S_st_angle_buffered_particle]]
-    st_bending_team = blob_i32_s[offs[S_st_bending_team]:offs[S_st_bending_team] + lens[S_st_bending_team]]
-    st_fixed_particle = blob_i32_s[offs[S_st_fixed_particle]:offs[S_st_fixed_particle] + lens[S_st_fixed_particle]]
-    st_motion_particle = blob_i32_s[offs[S_st_motion_particle]:offs[S_st_motion_particle] + lens[S_st_motion_particle]]
-    st_move_particle = blob_i32_s[offs[S_st_move_particle]:offs[S_st_move_particle] + lens[S_st_move_particle]]
-    st_spring_particle = blob_i32_s[offs[S_st_spring_particle]:offs[S_st_spring_particle] + lens[S_st_spring_particle]]
-    st_tether_particle = blob_i32_s[offs[S_st_tether_particle]:offs[S_st_tether_particle] + lens[S_st_tether_particle]]
-    n_tether = st_tether_particle.shape[0]
-    n_move = st_move_particle.shape[0]
-    n_fixed = st_fixed_particle.shape[0]
-    n_spring = st_spring_particle.shape[0]
-    n_motion = st_motion_particle.shape[0]
-    n_bending = st_bending_team.shape[0]
-    n_baseline = baseline_entries.shape[0]
-    num_fk_levels = fk_yes_offsets.shape[0] - 1
-    n_angle_buffered = st_angle_buffered_particle.shape[0]
-    num_angle_passes = angle_pass_offsets.shape[0] - 1
-    n_tether = st_tether_particle.shape[0]
-    n_move = st_move_particle.shape[0]
-    n_fixed = st_fixed_particle.shape[0]
-    n_spring = st_spring_particle.shape[0]
-    n_motion = st_motion_particle.shape[0]
-    n_bending = st_bending_team.shape[0]
-    n_baseline = baseline_entries.shape[0]
-    num_fk_levels = fk_yes_offsets.shape[0] - 1
-    n_angle_buffered = st_angle_buffered_particle.shape[0]
-    num_angle_passes = angle_pass_offsets.shape[0] - 1
-
-
-@cuda.jit(cache=True)
 def phase_10(scal_f, scal_i, blob_u8_s, blob_f32_v3, blob_f32_s, blob_i32_s, blob_f32_v4, blob_f32_v16, blob_i8_s, blob_f32_m4x4, blob_f64_m4x4, blob_f32_v2, blob_f32_m4x3, blob_i32_v4, blob_f32_m2x3, blob_i32_v2, blob_i32_v3, blob_f32_v22, blob_f64_v3, offs, lens, zone_i32_s, zone_u8_s, zone_f32_s, zone_f32_v3, zone_f64_m4x4, zone_f32_v16, zone_offs, zone_lens, k, sit):
     tid = cuda.grid(1)
     stride = cuda.gridsize(1)
-    sim_dt = scal_f[SCAL_SIM_DT]
     _k = k
     sim_dt = scal_f[SCAL_SIM_DT]
     t_angular_velocity = blob_f32_s[offs[S_t_angular_velocity]:offs[S_t_angular_velocity] + lens[S_t_angular_velocity]]
@@ -1469,9 +1350,9 @@ def phase_11(scal_f, scal_i, blob_u8_s, blob_f32_v3, blob_f32_s, blob_i32_s, blo
 def phase_12(scal_f, scal_i, blob_u8_s, blob_f32_v3, blob_f32_s, blob_i32_s, blob_f32_v4, blob_f32_v16, blob_i8_s, blob_f32_m4x4, blob_f64_m4x4, blob_f32_v2, blob_f32_m4x3, blob_i32_v4, blob_f32_m2x3, blob_i32_v2, blob_i32_v3, blob_f32_v22, blob_f64_v3, offs, lens, zone_i32_s, zone_u8_s, zone_f32_s, zone_f32_v3, zone_f64_m4x4, zone_f32_v16, zone_offs, zone_lens, k, sit):
     tid = cuda.grid(1)
     stride = cuda.gridsize(1)
-    sim_dt = scal_f[SCAL_SIM_DT]
-    power2 = scal_f[SCAL_POWER2]
     _k = k
+    power2 = scal_f[SCAL_POWER2]
+    sim_dt = scal_f[SCAL_SIM_DT]
     p_base_positions = blob_f32_v3[offs[S_p_base_positions]:offs[S_p_base_positions] + lens[S_p_base_positions]]
     p_base_rotations = blob_f32_v4[offs[S_p_base_rotations]:offs[S_p_base_rotations] + lens[S_p_base_rotations]]
     p_depth = blob_f32_s[offs[S_p_depth]:offs[S_p_depth] + lens[S_p_depth]]
@@ -1488,8 +1369,6 @@ def phase_12(scal_f, scal_i, blob_u8_s, blob_f32_v3, blob_f32_s, blob_i32_s, blo
     p_velocities = blob_f32_v3[offs[S_p_velocities]:offs[S_p_velocities] + lens[S_p_velocities]]
     p_velocity_positions = blob_f32_v3[offs[S_p_velocity_positions]:offs[S_p_velocity_positions] + lens[S_p_velocity_positions]]
     p_vertex_root_local = blob_i32_s[offs[S_p_vertex_root_local]:offs[S_p_vertex_root_local] + lens[S_p_vertex_root_local]]
-    power2 = scal_f[SCAL_POWER2]
-    sim_dt = scal_f[SCAL_SIM_DT]
     st_move_particle = blob_i32_s[offs[S_st_move_particle]:offs[S_st_move_particle] + lens[S_st_move_particle]]
     st_move_team = blob_i32_s[offs[S_st_move_team]:offs[S_st_move_team] + lens[S_st_move_team]]
     t_cws = blob_f32_v3[offs[S_t_cws]:offs[S_t_cws] + lens[S_t_cws]]
@@ -1526,8 +1405,8 @@ def phase_12(scal_f, scal_i, blob_u8_s, blob_f32_v3, blob_f32_s, blob_i32_s, blo
     t_wind_time = blob_f32_v4[offs[S_t_wind_time]:offs[S_t_wind_time] + lens[S_t_wind_time]]
     t_wind_turbulence = blob_f32_s[offs[S_t_wind_turbulence]:offs[S_t_wind_turbulence] + lens[S_t_wind_turbulence]]
     t_wind_zone_turbulence = blob_f32_v4[offs[S_t_wind_zone_turbulence]:offs[S_t_wind_zone_turbulence] + lens[S_t_wind_zone_turbulence]]
-    num_particles = p_team.shape[0]
     n_move = st_move_particle.shape[0]
+    num_particles = p_team.shape[0]
     p = tid
     while p < num_particles:
         mt = p_team[p]
@@ -1971,8 +1850,8 @@ def phase_16(scal_f, scal_i, blob_u8_s, blob_f32_v3, blob_f32_s, blob_i32_s, blo
 def phase_17(scal_f, scal_i, blob_u8_s, blob_f32_v3, blob_f32_s, blob_i32_s, blob_f32_v4, blob_f32_v16, blob_i8_s, blob_f32_m4x4, blob_f64_m4x4, blob_f32_v2, blob_f32_m4x3, blob_i32_v4, blob_f32_m2x3, blob_i32_v2, blob_i32_v3, blob_f32_v22, blob_f64_v3, offs, lens, zone_i32_s, zone_u8_s, zone_f32_s, zone_f32_v3, zone_f64_m4x4, zone_f32_v16, zone_offs, zone_lens, k, sit):
     tid = cuda.grid(1)
     stride = cuda.gridsize(1)
-    power1 = scal_f[SCAL_POWER1]
     _k = k
+    power1 = scal_f[SCAL_POWER1]
     csr_distance_offsets = blob_i32_s[offs[S_csr_distance_offsets]:offs[S_csr_distance_offsets] + lens[S_csr_distance_offsets]]
     csr_distance_order = blob_i32_s[offs[S_csr_distance_order]:offs[S_csr_distance_order] + lens[S_csr_distance_order]]
     p_attr_move = blob_u8_s[offs[S_p_attr_move]:offs[S_p_attr_move] + lens[S_p_attr_move]]
@@ -1981,7 +1860,6 @@ def phase_17(scal_f, scal_i, blob_u8_s, blob_f32_v3, blob_f32_s, blob_i32_s, blo
     p_friction = blob_f32_s[offs[S_p_friction]:offs[S_p_friction] + lens[S_p_friction]]
     p_next_positions = blob_f32_v3[offs[S_p_next_positions]:offs[S_p_next_positions] + lens[S_p_next_positions]]
     p_team = blob_i32_s[offs[S_p_team]:offs[S_p_team] + lens[S_p_team]]
-    power1 = scal_f[SCAL_POWER1]
     sc_dcorr = blob_f32_v3[offs[S_sc_dcorr]:offs[S_sc_dcorr] + lens[S_sc_dcorr]]
     st_distance_rest = blob_f32_s[offs[S_st_distance_rest]:offs[S_st_distance_rest] + lens[S_st_distance_rest]]
     st_distance_target = blob_i32_s[offs[S_st_distance_target]:offs[S_st_distance_target] + lens[S_st_distance_target]]
@@ -2057,8 +1935,8 @@ def phase_19(scal_f, scal_i, blob_u8_s, blob_f32_v3, blob_f32_s, blob_i32_s, blo
     t_enabled = blob_u8_s[offs[S_t_enabled]:offs[S_t_enabled] + lens[S_t_enabled]]
     t_update_count = blob_i32_s[offs[S_t_update_count]:offs[S_t_update_count] + lens[S_t_update_count]]
     t_valid = blob_u8_s[offs[S_t_valid]:offs[S_t_valid] + lens[S_t_valid]]
-    n_baseline = baseline_entries.shape[0]
     n_angle_buffered = st_angle_buffered_particle.shape[0]
+    n_baseline = baseline_entries.shape[0]
     i = tid
     while i < n_baseline:
         v = baseline_entries[i]
@@ -2128,8 +2006,8 @@ def phase_20(scal_f, scal_i, blob_u8_s, blob_f32_v3, blob_f32_s, blob_i32_s, blo
     tid = cuda.grid(1)
     bid = cuda.blockIdx.x
     bdim = cuda.blockDim.x
-    power3 = scal_f[SCAL_POWER3]
     _k = k
+    power3 = scal_f[SCAL_POWER3]
     angle_pass_offsets = blob_i32_s[offs[S_angle_pass_offsets]:offs[S_angle_pass_offsets] + lens[S_angle_pass_offsets]]
     angle_pass_parents = blob_i32_s[offs[S_angle_pass_parents]:offs[S_angle_pass_parents] + lens[S_angle_pass_parents]]
     angle_pass_vertices = blob_i32_s[offs[S_angle_pass_vertices]:offs[S_angle_pass_vertices] + lens[S_angle_pass_vertices]]
@@ -2144,7 +2022,6 @@ def phase_20(scal_f, scal_i, blob_u8_s, blob_f32_v3, blob_f32_s, blob_i32_s, blo
     p_next_positions = blob_f32_v3[offs[S_p_next_positions]:offs[S_p_next_positions] + lens[S_p_next_positions]]
     p_team = blob_i32_s[offs[S_p_team]:offs[S_p_team] + lens[S_p_team]]
     p_velocity_positions = blob_f32_v3[offs[S_p_velocity_positions]:offs[S_p_velocity_positions] + lens[S_p_velocity_positions]]
-    power3 = scal_f[SCAL_POWER3]
     t_angle_limit_lut = blob_f32_v16[offs[S_t_angle_limit_lut]:offs[S_t_angle_limit_lut] + lens[S_t_angle_limit_lut]]
     t_angle_limit_stiffness = blob_f32_s[offs[S_t_angle_limit_stiffness]:offs[S_t_angle_limit_stiffness] + lens[S_t_angle_limit_stiffness]]
     t_angle_restoration_attenuation = blob_f32_s[offs[S_t_angle_restoration_attenuation]:offs[S_t_angle_restoration_attenuation] + lens[S_t_angle_restoration_attenuation]]
@@ -2218,13 +2095,12 @@ def phase_21(scal_f, scal_i, blob_u8_s, blob_f32_v3, blob_f32_s, blob_i32_s, blo
 def phase_22(scal_f, scal_i, blob_u8_s, blob_f32_v3, blob_f32_s, blob_i32_s, blob_f32_v4, blob_f32_v16, blob_i8_s, blob_f32_m4x4, blob_f64_m4x4, blob_f32_v2, blob_f32_m4x3, blob_i32_v4, blob_f32_m2x3, blob_i32_v2, blob_i32_v3, blob_f32_v22, blob_f64_v3, offs, lens, zone_i32_s, zone_u8_s, zone_f32_s, zone_f32_v3, zone_f64_m4x4, zone_f32_v16, zone_offs, zone_lens, k, sit):
     tid = cuda.grid(1)
     stride = cuda.gridsize(1)
-    power1 = scal_f[SCAL_POWER1]
     _k = k
+    power1 = scal_f[SCAL_POWER1]
     p_attr_move = blob_u8_s[offs[S_p_attr_move]:offs[S_p_attr_move] + lens[S_p_attr_move]]
     p_depth = blob_f32_s[offs[S_p_depth]:offs[S_p_depth] + lens[S_p_depth]]
     p_friction = blob_f32_s[offs[S_p_friction]:offs[S_p_friction] + lens[S_p_friction]]
     p_next_positions = blob_f32_v3[offs[S_p_next_positions]:offs[S_p_next_positions] + lens[S_p_next_positions]]
-    power1 = scal_f[SCAL_POWER1]
     sc_dcorr_fixed = blob_i32_v3[offs[S_sc_dcorr_fixed]:offs[S_sc_dcorr_fixed] + lens[S_sc_dcorr_fixed]]
     sc_dcount = blob_i32_s[offs[S_sc_dcount]:offs[S_sc_dcount] + lens[S_sc_dcount]]
     st_bending_pair = blob_i32_v4[offs[S_st_bending_pair]:offs[S_st_bending_pair] + lens[S_st_bending_pair]]
@@ -2607,8 +2483,8 @@ def phase_27(scal_f, scal_i, blob_u8_s, blob_f32_v3, blob_f32_s, blob_i32_s, blo
 def phase_28(scal_f, scal_i, blob_u8_s, blob_f32_v3, blob_f32_s, blob_i32_s, blob_f32_v4, blob_f32_v16, blob_i8_s, blob_f32_m4x4, blob_f64_m4x4, blob_f32_v2, blob_f32_m4x3, blob_i32_v4, blob_f32_m2x3, blob_i32_v2, blob_i32_v3, blob_f32_v22, blob_f64_v3, offs, lens, zone_i32_s, zone_u8_s, zone_f32_s, zone_f32_v3, zone_f64_m4x4, zone_f32_v16, zone_offs, zone_lens, k, sit):
     tid = cuda.grid(1)
     stride = cuda.gridsize(1)
-    power1 = scal_f[SCAL_POWER1]
     _k = k
+    power1 = scal_f[SCAL_POWER1]
     csr_distance_offsets = blob_i32_s[offs[S_csr_distance_offsets]:offs[S_csr_distance_offsets] + lens[S_csr_distance_offsets]]
     csr_distance_order = blob_i32_s[offs[S_csr_distance_order]:offs[S_csr_distance_order] + lens[S_csr_distance_order]]
     p_attr_move = blob_u8_s[offs[S_p_attr_move]:offs[S_p_attr_move] + lens[S_p_attr_move]]
@@ -2617,7 +2493,6 @@ def phase_28(scal_f, scal_i, blob_u8_s, blob_f32_v3, blob_f32_s, blob_i32_s, blo
     p_friction = blob_f32_s[offs[S_p_friction]:offs[S_p_friction] + lens[S_p_friction]]
     p_next_positions = blob_f32_v3[offs[S_p_next_positions]:offs[S_p_next_positions] + lens[S_p_next_positions]]
     p_team = blob_i32_s[offs[S_p_team]:offs[S_p_team] + lens[S_p_team]]
-    power1 = scal_f[SCAL_POWER1]
     sc_dcorr = blob_f32_v3[offs[S_sc_dcorr]:offs[S_sc_dcorr] + lens[S_sc_dcorr]]
     st_distance_rest = blob_f32_s[offs[S_st_distance_rest]:offs[S_st_distance_rest] + lens[S_st_distance_rest]]
     st_distance_target = blob_i32_s[offs[S_st_distance_target]:offs[S_st_distance_target] + lens[S_st_distance_target]]
@@ -2760,25 +2635,6 @@ def phase_30(scal_f, scal_i, blob_u8_s, blob_f32_v3, blob_f32_s, blob_i32_s, blo
 
 
 @cuda.jit(cache=True)
-def phase_31(scal_f, scal_i, blob_u8_s, blob_f32_v3, blob_f32_s, blob_i32_s, blob_f32_v4, blob_f32_v16, blob_i8_s, blob_f32_m4x4, blob_f64_m4x4, blob_f32_v2, blob_f32_m4x3, blob_i32_v4, blob_f32_m2x3, blob_i32_v2, blob_i32_v3, blob_f32_v22, blob_f64_v3, offs, lens, zone_i32_s, zone_u8_s, zone_f32_s, zone_f32_v3, zone_f64_m4x4, zone_f32_v16, zone_offs, zone_lens, k, sit):
-    ct_pair_off = blob_i32_s[offs[S_ct_pair_off]:offs[S_ct_pair_off] + lens[S_ct_pair_off]]
-    num_ct_slots = ct_pair_off.shape[0] - 1
-    total_ct = ct_pair_off[num_ct_slots]
-    num_ct_slots = ct_pair_off.shape[0] - 1
-    total_ct = ct_pair_off[num_ct_slots]
-
-
-@cuda.jit(cache=True)
-def phase_32(scal_f, scal_i, blob_u8_s, blob_f32_v3, blob_f32_s, blob_i32_s, blob_f32_v4, blob_f32_v16, blob_i8_s, blob_f32_m4x4, blob_f64_m4x4, blob_f32_v2, blob_f32_m4x3, blob_i32_v4, blob_f32_m2x3, blob_i32_v2, blob_i32_v3, blob_f32_v22, blob_f64_v3, offs, lens, zone_i32_s, zone_u8_s, zone_f32_s, zone_f32_v3, zone_f64_m4x4, zone_f32_v16, zone_offs, zone_lens, k, sit):
-    ee_my = blob_i32_s[offs[S_ee_my]:offs[S_ee_my] + lens[S_ee_my]]
-    pt_my = blob_i32_s[offs[S_pt_my]:offs[S_pt_my] + lens[S_pt_my]]
-    ee_cap = ee_my.shape[0]
-    pt_cap = pt_my.shape[0]
-    ee_cap = ee_my.shape[0]
-    pt_cap = pt_my.shape[0]
-
-
-@cuda.jit(cache=True)
 def phase_33(scal_f, scal_i, blob_u8_s, blob_f32_v3, blob_f32_s, blob_i32_s, blob_f32_v4, blob_f32_v16, blob_i8_s, blob_f32_m4x4, blob_f64_m4x4, blob_f32_v2, blob_f32_m4x3, blob_i32_v4, blob_f32_m2x3, blob_i32_v2, blob_i32_v3, blob_f32_v22, blob_f64_v3, offs, lens, zone_i32_s, zone_u8_s, zone_f32_s, zone_f32_v3, zone_f64_m4x4, zone_f32_v16, zone_offs, zone_lens, k, sit):
     tid = cuda.grid(1)
     stride = cuda.gridsize(1)
@@ -2850,8 +2706,8 @@ def phase_34(scal_f, scal_i, blob_u8_s, blob_f32_v3, blob_f32_s, blob_i32_s, blo
     t_use_point = blob_u8_s[offs[S_t_use_point]:offs[S_t_use_point] + lens[S_t_use_point]]
     t_use_triangle = blob_u8_s[offs[S_t_use_triangle]:offs[S_t_use_triangle] + lens[S_t_use_triangle]]
     t_valid = blob_u8_s[offs[S_t_valid]:offs[S_t_valid] + lens[S_t_valid]]
-    num_self_points = sfp_team.shape[0]
     num_self_edges = sfe_team.shape[0]
+    num_self_points = sfp_team.shape[0]
     num_self_triangles = sft_team.shape[0]
     q = tid
     while q < num_self_points:
@@ -2961,10 +2817,10 @@ def phase_37(scal_f, scal_i, blob_u8_s, blob_f32_v3, blob_f32_s, blob_i32_s, blo
     sft_thickness = blob_f32_s[offs[S_sft_thickness]:offs[S_sft_thickness] + lens[S_sft_thickness]]
     sft_use = blob_u8_s[offs[S_sft_use]:offs[S_sft_use] + lens[S_sft_use]]
     t_self_grid_size = blob_f32_s[offs[S_t_self_grid_size]:offs[S_t_self_grid_size] + lens[S_t_self_grid_size]]
-    num_ct_slots = ct_pair_off.shape[0] - 1
-    total_ct = ct_pair_off[num_ct_slots]
     ee_cap = ee_my.shape[0]
+    num_ct_slots = ct_pair_off.shape[0] - 1
     pt_cap = pt_my.shape[0]
+    total_ct = ct_pair_off[num_ct_slots]
     g = tid
     while g < total_ct:
         lo = int32(0)
@@ -3095,13 +2951,9 @@ def phase_39(scal_f, scal_i, blob_u8_s, blob_f32_v3, blob_f32_s, blob_i32_s, blo
     sc_dcorr_fixed = blob_i32_v3[offs[S_sc_dcorr_fixed]:offs[S_sc_dcorr_fixed] + lens[S_sc_dcorr_fixed]]
     sc_dcount = blob_i32_s[offs[S_sc_dcount]:offs[S_sc_dcount] + lens[S_sc_dcount]]
     scl_counts = blob_i32_s[offs[S_scl_counts]:offs[S_scl_counts] + lens[S_scl_counts]]
-    num_particles = p_team.shape[0]
     ee_cap = ee_my.shape[0]
+    num_particles = p_team.shape[0]
     pt_cap = pt_my.shape[0]
-    ee_count2 = scl_counts[SCL_EE_COUNT]
-    ee_lim2 = ee_count2 if ee_count2 < ee_cap else ee_cap
-    pt_count2 = scl_counts[SCL_PT_COUNT]
-    pt_lim2 = pt_count2 if pt_count2 < pt_cap else pt_cap
     ee_count2 = scl_counts[SCL_EE_COUNT]
     ee_lim2 = ee_count2 if ee_count2 < ee_cap else ee_cap
     pt_count2 = scl_counts[SCL_PT_COUNT]
@@ -3321,8 +3173,8 @@ def phase_41(scal_f, scal_i, blob_u8_s, blob_f32_v3, blob_f32_s, blob_i32_s, blo
 def phase_42(scal_f, scal_i, blob_u8_s, blob_f32_v3, blob_f32_s, blob_i32_s, blob_f32_v4, blob_f32_v16, blob_i8_s, blob_f32_m4x4, blob_f64_m4x4, blob_f32_v2, blob_f32_m4x3, blob_i32_v4, blob_f32_m2x3, blob_i32_v2, blob_i32_v3, blob_f32_v22, blob_f64_v3, offs, lens, zone_i32_s, zone_u8_s, zone_f32_s, zone_f32_v3, zone_f64_m4x4, zone_f32_v16, zone_offs, zone_lens, k, sit):
     tid = cuda.grid(1)
     stride = cuda.gridsize(1)
-    sim_dt = scal_f[SCAL_SIM_DT]
     _k = k
+    sim_dt = scal_f[SCAL_SIM_DT]
     p_collision_normals = blob_f32_v3[offs[S_p_collision_normals]:offs[S_p_collision_normals] + lens[S_p_collision_normals]]
     p_depth = blob_f32_s[offs[S_p_depth]:offs[S_p_depth] + lens[S_p_depth]]
     p_friction = blob_f32_s[offs[S_p_friction]:offs[S_p_friction] + lens[S_p_friction]]
@@ -3331,7 +3183,6 @@ def phase_42(scal_f, scal_i, blob_u8_s, blob_f32_v3, blob_f32_s, blob_i32_s, blo
     p_static_friction = blob_f32_s[offs[S_p_static_friction]:offs[S_p_static_friction] + lens[S_p_static_friction]]
     p_velocities = blob_f32_v3[offs[S_p_velocities]:offs[S_p_velocities] + lens[S_p_velocities]]
     p_velocity_positions = blob_f32_v3[offs[S_p_velocity_positions]:offs[S_p_velocity_positions] + lens[S_p_velocity_positions]]
-    sim_dt = scal_f[SCAL_SIM_DT]
     st_move_particle = blob_i32_s[offs[S_st_move_particle]:offs[S_st_move_particle] + lens[S_st_move_particle]]
     st_move_team = blob_i32_s[offs[S_st_move_team]:offs[S_st_move_team] + lens[S_st_move_team]]
     t_angular_velocity = blob_f32_s[offs[S_t_angular_velocity]:offs[S_t_angular_velocity] + lens[S_t_angular_velocity]]
@@ -3475,13 +3326,12 @@ def phase_42(scal_f, scal_i, blob_u8_s, blob_f32_v3, blob_f32_s, blob_i32_s, blo
 def phase_43(scal_f, scal_i, blob_u8_s, blob_f32_v3, blob_f32_s, blob_i32_s, blob_f32_v4, blob_f32_v16, blob_i8_s, blob_f32_m4x4, blob_f64_m4x4, blob_f32_v2, blob_f32_m4x3, blob_i32_v4, blob_f32_m2x3, blob_i32_v2, blob_i32_v3, blob_f32_v22, blob_f64_v3, offs, lens, zone_i32_s, zone_u8_s, zone_f32_s, zone_f32_v3, zone_f64_m4x4, zone_f32_v16, zone_offs, zone_lens, k, sit):
     tid = cuda.grid(1)
     stride = cuda.gridsize(1)
-    sim_dt = scal_f[SCAL_SIM_DT]
     _k = k
+    sim_dt = scal_f[SCAL_SIM_DT]
     p_next_positions = blob_f32_v3[offs[S_p_next_positions]:offs[S_p_next_positions] + lens[S_p_next_positions]]
     p_old_positions = blob_f32_v3[offs[S_p_old_positions]:offs[S_p_old_positions] + lens[S_p_old_positions]]
     p_real_velocities = blob_f32_v3[offs[S_p_real_velocities]:offs[S_p_real_velocities] + lens[S_p_real_velocities]]
     p_team = blob_i32_s[offs[S_p_team]:offs[S_p_team] + lens[S_p_team]]
-    sim_dt = scal_f[SCAL_SIM_DT]
     t_cws = blob_f32_v3[offs[S_t_cws]:offs[S_t_cws] + lens[S_t_cws]]
     t_enabled = blob_u8_s[offs[S_t_enabled]:offs[S_t_enabled] + lens[S_t_enabled]]
     t_update_count = blob_i32_s[offs[S_t_update_count]:offs[S_t_update_count] + lens[S_t_update_count]]
@@ -3615,10 +3465,7 @@ def phase_47(scal_f, scal_i, blob_u8_s, blob_f32_v3, blob_f32_s, blob_i32_s, blo
     p_temp_base_positions = blob_f32_v3[offs[S_p_temp_base_positions]:offs[S_p_temp_base_positions] + lens[S_p_temp_base_positions]]
     p_temp_base_rotations = blob_f32_v4[offs[S_p_temp_base_rotations]:offs[S_p_temp_base_rotations] + lens[S_p_temp_base_rotations]]
     p_vertex_root = blob_i32_s[offs[S_p_vertex_root]:offs[S_p_vertex_root] + lens[S_p_vertex_root]]
-    postline_entry_offsets = blob_i32_s[offs[S_postline_entry_offsets]:offs[S_postline_entry_offsets] + lens[S_postline_entry_offsets]]
-    sim_dt = scal_f[SCAL_SIM_DT]
     st_display_update_move_mask = blob_u8_s[offs[S_st_display_update_move_mask]:offs[S_st_display_update_move_mask] + lens[S_st_display_update_move_mask]]
-    st_triangle_team = blob_i32_s[offs[S_st_triangle_team]:offs[S_st_triangle_team] + lens[S_st_triangle_team]]
     t_blend_weight = blob_f32_s[offs[S_t_blend_weight]:offs[S_t_blend_weight] + lens[S_t_blend_weight]]
     t_cws = blob_f32_v3[offs[S_t_cws]:offs[S_t_cws] + lens[S_t_cws]]
     t_enabled = blob_u8_s[offs[S_t_enabled]:offs[S_t_enabled] + lens[S_t_enabled]]
@@ -3630,10 +3477,6 @@ def phase_47(scal_f, scal_i, blob_u8_s, blob_f32_v3, blob_f32_s, blob_i32_s, blo
     t_time = blob_f32_s[offs[S_t_time]:offs[S_t_time] + lens[S_t_time]]
     t_valid = blob_u8_s[offs[S_t_valid]:offs[S_t_valid] + lens[S_t_valid]]
     num_particles = p_team.shape[0]
-    num_triangles = st_triangle_team.shape[0]
-    num_postline_levels = postline_entry_offsets.shape[0] - 1
-    num_postline_levels = postline_entry_offsets.shape[0] - 1
-    num_triangles = st_triangle_team.shape[0]
     p = tid
     while p < num_particles:
         mt = p_team[p]
@@ -3907,59 +3750,55 @@ def phase_53(scal_f, scal_i, blob_u8_s, blob_f32_v3, blob_f32_s, blob_i32_s, blo
 
 
 PHASE_TABLE = (
-    ('phase_00', (), 27),
-    ('phase_01', (), 20),
-    ('phase_02', (), 13),
-    ('phase_03', (), 65),
-    ('phase_03b', (), 23),
-    ('phase_04', (), 27),
-    ('phase_05', (), 28),
-    ('phase_06', (), 1),
-    ('phase_07', (('if', 'total_it > 0'),), 1),
-    ('phase_08', (('if', 'total_it > 0'),), 22),
-    ('phase_09', (), 10),
-    ('phase_10', (('loop', '_k'),), 55),
-    ('phase_11', (('loop', '_k'),), 29),
-    ('phase_12', (('loop', '_k'),), 54),
-    ('phase_13', (('loop', '_k'),), 19),
-    ('phase_14', (('loop', '_k'),), 20),
-    ('phase_15', (('loop', '_k'),), 11),
-    ('phase_16', (('loop', '_k'),), 12),
-    ('phase_17', (('loop', '_k'),), 21),
-    ('phase_18', (('loop', '_k'),), 8),
-    ('phase_19', (('loop', '_k'),), 18),
-    ('phase_20', (('loop', '_k'),), 27),
-    ('phase_21', (('loop', '_k'),), 3),
-    ('phase_22', (('loop', '_k'),), 18),
-    ('phase_23', (('loop', '_k'),), 9),
-    ('phase_24', (('loop', '_k'),), 28),
-    ('phase_25', (('loop', '_k'),), 5),
-    ('phase_26', (('loop', '_k'),), 26),
-    ('phase_27', (('loop', '_k'),), 13),
-    ('phase_28', (('loop', '_k'),), 21),
-    ('phase_29', (('loop', '_k'),), 8),
-    ('phase_30', (('loop', '_k'),), 19),
-    ('phase_31', (('loop', '_k'),), 1),
-    ('phase_32', (('loop', '_k'), ('if', 'total_ct > 0')), 2),
-    ('phase_33', (('loop', '_k'), ('if', 'total_ct > 0'), ('if', '_k == 0')), 5),
-    ('phase_34', (('loop', '_k'), ('if', 'total_ct > 0'), ('if', '_k == 0')), 49),
-    ('phase_35', (('loop', '_k'), ('if', 'total_ct > 0'), ('if', '_k == 0')), 7),
-    ('phase_36', (('loop', '_k'), ('if', 'total_ct > 0'), ('if', '_k == 0')), 1),
-    ('phase_37', (('loop', '_k'), ('if', 'total_ct > 0'), ('if', '_k == 0')), 44),
-    ('phase_38', (('loop', '_k'), ('if', 'total_ct > 0'), ('else', '_k == 0')), 17),
-    ('phase_39', (('loop', '_k'), ('if', 'total_ct > 0')), 6),
-    ('phase_40', (('loop', '_k'), ('if', 'total_ct > 0'), ('loop', '_sit')), 28),
-    ('phase_41', (('loop', '_k'), ('if', 'total_ct > 0'), ('loop', '_sit')), 8),
-    ('phase_42', (('loop', '_k'),), 24),
-    ('phase_43', (('loop', '_k'),), 9),
-    ('phase_44', (('loop', '_k'),), 10),
-    ('phase_45', (('if', 'total_it > 0'),), 5),
-    ('phase_46', (('if', 'total_it > 0'),), 7),
-    ('phase_47', (), 25),
-    ('phase_48', (), 23),
-    ('phase_49', (), 10),
-    ('phase_50', (), 14),
-    ('phase_51', (), 8),
-    ('phase_52', (), 10),
-    ('phase_53', (), 34),
+    ('phase_00', (), 'single'),
+    ('phase_01', (), 'teams'),
+    ('phase_02', (), 'particles'),
+    ('phase_03', (), 'teams'),
+    ('phase_03b', (), 'teams'),
+    ('phase_04', (), 'particles'),
+    ('phase_05', (), 'colliders'),
+    ('phase_07', (('if', 'total_it > 0'),), 'single'),
+    ('phase_08', (('if', 'total_it > 0'),), 'self_pairs'),
+    ('phase_10', (('loop', '_k'),), 'teams'),
+    ('phase_11', (('loop', '_k'),), 'colliders'),
+    ('phase_12', (('loop', '_k'),), 'particles'),
+    ('phase_13', (('loop', '_k'),), 'particles'),
+    ('phase_14', (('loop', '_k'),), 'single'),
+    ('phase_15', (('loop', '_k'),), 'particles'),
+    ('phase_16', (('loop', '_k'),), 'particles'),
+    ('phase_17', (('loop', '_k'),), 'particles'),
+    ('phase_18', (('loop', '_k'),), 'particles'),
+    ('phase_19', (('loop', '_k'),), 'particles'),
+    ('phase_20', (('loop', '_k'),), 'single'),
+    ('phase_21', (('loop', '_k'),), 'particles'),
+    ('phase_22', (('loop', '_k'),), 'bending'),
+    ('phase_23', (('loop', '_k'),), 'particles'),
+    ('phase_24', (('loop', '_k'),), 'particles'),
+    ('phase_25', (('loop', '_k'),), 'particles'),
+    ('phase_26', (('loop', '_k'),), 'collision_edges'),
+    ('phase_27', (('loop', '_k'),), 'particles'),
+    ('phase_28', (('loop', '_k'),), 'particles'),
+    ('phase_29', (('loop', '_k'),), 'particles'),
+    ('phase_30', (('loop', '_k'),), 'particles'),
+    ('phase_33', (('loop', '_k'), ('if', 'total_ct > 0'), ('if', '_k == 0')), 'teams'),
+    ('phase_34', (('loop', '_k'), ('if', 'total_ct > 0'), ('if', '_k == 0')), 'self_primitives'),
+    ('phase_35', (('loop', '_k'), ('if', 'total_ct > 0'), ('if', '_k == 0')), 'teams'),
+    ('phase_36', (('loop', '_k'), ('if', 'total_ct > 0'), ('if', '_k == 0')), 'single'),
+    ('phase_37', (('loop', '_k'), ('if', 'total_ct > 0'), ('if', '_k == 0')), 'self_pairs'),
+    ('phase_38', (('loop', '_k'), ('if', 'total_ct > 0'), ('else', '_k == 0')), 'self_contacts'),
+    ('phase_39', (('loop', '_k'), ('if', 'total_ct > 0')), 'particles'),
+    ('phase_40', (('loop', '_k'), ('if', 'total_ct > 0'), ('loop', '_sit')), 'self_contacts'),
+    ('phase_41', (('loop', '_k'), ('if', 'total_ct > 0'), ('loop', '_sit')), 'particles'),
+    ('phase_42', (('loop', '_k'),), 'particles'),
+    ('phase_43', (('loop', '_k'),), 'particles'),
+    ('phase_44', (('loop', '_k'),), 'colliders'),
+    ('phase_45', (('if', 'total_it > 0'),), 'particles'),
+    ('phase_46', (('if', 'total_it > 0'),), 'self_contacts'),
+    ('phase_47', (), 'particles'),
+    ('phase_48', (), 'single'),
+    ('phase_49', (), 'triangles'),
+    ('phase_50', (), 'particles'),
+    ('phase_51', (), 'particles'),
+    ('phase_52', (), 'colliders'),
+    ('phase_53', (), 'teams'),
 )
