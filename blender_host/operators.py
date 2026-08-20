@@ -383,6 +383,45 @@ def _collection_of(context, obj):
     return obj.users_collection[0] if obj.users_collection else context.collection
 
 
+def _capsule_pair(context):
+    obj = context.object
+    if obj is None:
+        return None, None
+    settings = collider_geom.settings_of(obj)
+    if settings is not None and settings.is_collider:
+        end = collider_geom.end_object(settings)
+        return (obj, end) if end is not None else (None, None)
+    owner = collider_geom.owner_of(context.scene, obj)
+    if owner is None or collider_geom.end_object(owner.ruri_cloth_physics_collider) is not obj:
+        return None, None
+    return obj, owner
+
+
+class RCP_OT_collider_mirror_ends(bpy.types.Operator):
+    bl_idname = "ruri_cloth_physics.collider_mirror_ends"
+    bl_label = "镜像到另一端"
+    bl_description = ("把当前这个圆左右对称地写到同一根胶囊的另一个圆上: 位置、朝向、半径一起。"
+                      "在起点圆上按就写终点圆, 在终点圆上按就写起点圆, 适合做横跨身体中线的胶囊")
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        source, target = _capsule_pair(context)
+        return source is not None and target is not None
+
+    def execute(self, context):
+        context.view_layer.update()
+        source, target = _capsule_pair(context)
+        if source is None or target is None:
+            return {'CANCELLED'}
+        target.empty_display_size = source.empty_display_size
+        collider_geom.set_world(context.view_layer, target,
+                                _mirror_world(_mirror_space(context, source),
+                                              source.matrix_world))
+        self.report({'INFO'}, "已把 %s 镜像到 %s" % (source.name, target.name))
+        return {'FINISHED'}
+
+
 class RCP_OT_collider_mirror(bpy.types.Operator):
     bl_idname = "ruri_cloth_physics.collider_mirror"
     bl_label = "镜像碰撞体"
@@ -1106,6 +1145,7 @@ _CLASSES = (
     RCP_OT_collider_end_create,
     RCP_OT_collider_attach_bone,
     RCP_OT_collider_detach,
+    RCP_OT_collider_mirror_ends,
     RCP_OT_collider_mirror,
     RCP_OT_colliders_from_selected,
     RCP_OT_collider_reference_add_selected,

@@ -695,8 +695,11 @@ class RCP_PT_collider(bpy.types.Panel):
         box.label(text="半径 = 显示尺寸 × 缩放; 位置就是终点球心", icon='INFO')
         box.prop(obj, "empty_display_size", text="显示尺寸")
         box.prop(obj, "scale", text="缩放")
-        layout.operator("ruri_cloth_physics.collider_mirror", icon='MOD_MIRROR',
-                        text="镜像整根胶囊")
+        row = layout.row(align=True)
+        row.operator("ruri_cloth_physics.collider_mirror_ends", icon='MOD_MIRROR',
+                     text="镜像到起点圆")
+        row.operator("ruri_cloth_physics.collider_mirror", icon='MOD_MIRROR',
+                     text="镜像整根胶囊")
 
     def draw(self, context):
         layout = self.layout
@@ -738,6 +741,8 @@ class RCP_PT_collider(bpy.types.Panel):
                 column.label(text="终点半径 %.4g 米, 两端球心距 %.4g 米"
                                   % (radii[1], (end.matrix_world.translation
                                                 - obj.matrix_world.translation).length))
+                layout.operator("ruri_cloth_physics.collider_mirror_ends", icon='MOD_MIRROR',
+                                text="镜像到终点圆")
 
         if not collider_geom.is_live(obj, context.evaluated_depsgraph_get()):
             layout.label(text="已被'在视图中禁用'或集合排除, 求解器已挂起它(位置会停在原地)",
