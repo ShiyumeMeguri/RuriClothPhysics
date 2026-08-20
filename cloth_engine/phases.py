@@ -3,18 +3,23 @@ import warp as wp
 from ..cloth_kernel import defs as _defs
 from . import dmath
 from . import kernels
-from . import plan
 from . import policy
 from .kernels import EPSILON
+from .kernels import FORCE_VELOCITY_ADD
+from .kernels import FORCE_VELOCITY_ADD_WITHOUT_DEPTH
+from .kernels import FORCE_VELOCITY_CHANGE
+from .kernels import FORCE_VELOCITY_CHANGE_WITHOUT_DEPTH
 from .kernels import RAD2DEG
 from .kernels import SCAL_FRAME_DT
 from .kernels import SCAL_MAX_SIM
 from .kernels import SCAL_N_ZONES
 from .kernels import SCAL_POWER1
+from .kernels import SCAL_POWER2
 from .kernels import SCAL_SIM_DT
 from .kernels import SCAL_TIME_SCALE
 from .kernels import TELEPORT_RESET
 from .kernels import WIND_MAX_TIME
+from .kernels import WIND_MIN_SPEED
 from .kernels import WIND_ZONE_MIN_MAIN
 from .kernels import WIND_ZONE_SLOTS
 from .kernels import ZONE_BOX
@@ -29,107 +34,141 @@ WIND_SLOT_INDICES = wp.types.vector(length=_defs.WIND_ZONE_SLOTS, dtype=wp.int32
 WIND_SLOT_VALUES = wp.types.vector(length=_defs.WIND_ZONE_SLOTS, dtype=wp.float32)
 
 
-@wp.func_native("__syncthreads();")
-def synchronize_block():
-    ...
+@wp.kernel
+def phase_00_resolve_top(sc_sync: wp.array2d(dtype=float),
+                         t_anchor_inertia: wp.array(dtype=float),
+                         t_component_world_position: wp.array2d(dtype=float),
+                         t_component_world_rotation: wp.array2d(dtype=float),
+                         t_enabled: wp.array(dtype=int),
+                         t_frame_old: wp.array(dtype=float),
+                         t_frame_update: wp.array(dtype=float),
+                         t_movement_inertia_smoothing: wp.array(dtype=float),
+                         t_movement_speed_limit: wp.array(dtype=float),
+                         t_now_update: wp.array(dtype=float),
+                         t_old_time: wp.array(dtype=float),
+                         t_old_update: wp.array(dtype=float),
+                         t_rotation_speed_limit: wp.array(dtype=float),
+                         t_sync_target: wp.array(dtype=int),
+                         t_sync_top: wp.array(dtype=int),
+                         t_teleport_distance: wp.array(dtype=float),
+                         t_teleport_mode: wp.array(dtype=int),
+                         t_teleport_rotation: wp.array(dtype=float),
+                         t_time: wp.array(dtype=float),
+                         t_time_scale: wp.array(dtype=float),
+                         t_valid: wp.array(dtype=int),
+                         t_world_inertia: wp.array(dtype=float)):
+    i = wp.tid()
+    if t_enabled[i] != 0:
+        target = t_sync_target[i]
+        if target <= 0 or t_valid[target] == 0 or t_enabled[target] == 0:
+            t_sync_top[i] = 0
+        else:
+            top = target
+            for _hop in range(8):
+                upper = t_sync_target[top]
+                if upper <= 0 or upper == i or t_valid[upper] == 0 or t_enabled[upper] == 0:
+                    break
+                top = upper
+            t_sync_top[i] = top
 
 
-@wp.kernel(grid_stride=False)
-def phase_00(sc_sync: wp.array2d(dtype=float),
-             t_anchor_inertia: wp.array(dtype=float),
-             t_component_world_position: wp.array2d(dtype=float),
-             t_component_world_rotation: wp.array2d(dtype=float),
-             t_enabled: wp.array(dtype=int),
-             t_frame_old: wp.array(dtype=float),
-             t_frame_update: wp.array(dtype=float),
-             t_movement_inertia_smoothing: wp.array(dtype=float),
-             t_movement_speed_limit: wp.array(dtype=float),
-             t_now_update: wp.array(dtype=float),
-             t_old_time: wp.array(dtype=float),
-             t_old_update: wp.array(dtype=float),
-             t_rotation_speed_limit: wp.array(dtype=float),
-             t_sync_target: wp.array(dtype=int),
-             t_sync_top: wp.array(dtype=int),
-             t_teleport_distance: wp.array(dtype=float),
-             t_teleport_mode: wp.array(dtype=int),
-             t_teleport_rotation: wp.array(dtype=float),
-             t_time: wp.array(dtype=float),
-             t_time_scale: wp.array(dtype=float),
-             t_valid: wp.array(dtype=int),
-             t_world_inertia: wp.array(dtype=float)):
-    tid = wp.tid()
-    bdim = wp.block_dim()
-    num_teams = t_enabled.shape[0]
-    i = tid
-    while i < num_teams:
-        if t_enabled[i] != 0:
-            target = t_sync_target[i]
-            if target <= 0 or t_valid[target] == 0 or t_enabled[target] == 0:
-                t_sync_top[i] = 0
-            else:
-                top = target
-                for _hop in range(8):
-                    upper = t_sync_target[top]
-                    if upper <= 0 or upper == i or t_valid[upper] == 0 or t_enabled[upper] == 0:
-                        break
-                    top = upper
-                t_sync_top[i] = top
-        i += bdim
-    synchronize_block()
-    i = tid
-    while i < num_teams:
-        if t_enabled[i] != 0 and t_sync_top[i] > 0:
-            top = t_sync_top[i]
-            sc_sync[i, 0] = t_time[top]
-            sc_sync[i, 1] = t_old_time[top]
-            sc_sync[i, 2] = t_now_update[top]
-            sc_sync[i, 3] = t_old_update[top]
-            sc_sync[i, 4] = t_frame_update[top]
-            sc_sync[i, 5] = t_frame_old[top]
-            sc_sync[i, 6] = t_time_scale[top]
-            sc_sync[i, 7] = t_anchor_inertia[top]
-            sc_sync[i, 8] = t_world_inertia[top]
-            sc_sync[i, 9] = t_movement_inertia_smoothing[top]
-            sc_sync[i, 10] = t_movement_speed_limit[top]
-            sc_sync[i, 11] = t_rotation_speed_limit[top]
-            sc_sync[i, 12] = float(t_teleport_mode[top])
-            sc_sync[i, 13] = t_teleport_distance[top]
-            sc_sync[i, 14] = t_teleport_rotation[top]
-            sc_sync[i, 15] = t_component_world_position[top, 0]
-            sc_sync[i, 16] = t_component_world_position[top, 1]
-            sc_sync[i, 17] = t_component_world_position[top, 2]
-            sc_sync[i, 18] = t_component_world_rotation[top, 0]
-            sc_sync[i, 19] = t_component_world_rotation[top, 1]
-            sc_sync[i, 20] = t_component_world_rotation[top, 2]
-            sc_sync[i, 21] = t_component_world_rotation[top, 3]
-        i += bdim
-    synchronize_block()
-    i = tid
-    while i < num_teams:
-        if t_enabled[i] != 0 and t_sync_top[i] > 0:
-            t_time[i] = sc_sync[i, 0]
-            t_old_time[i] = sc_sync[i, 1]
-            t_now_update[i] = sc_sync[i, 2]
-            t_old_update[i] = sc_sync[i, 3]
-            t_frame_update[i] = sc_sync[i, 4]
-            t_frame_old[i] = sc_sync[i, 5]
-            t_time_scale[i] = sc_sync[i, 6]
-            t_anchor_inertia[i] = sc_sync[i, 7]
-            t_world_inertia[i] = sc_sync[i, 8]
-            t_movement_inertia_smoothing[i] = sc_sync[i, 9]
-            t_movement_speed_limit[i] = sc_sync[i, 10]
-            t_rotation_speed_limit[i] = sc_sync[i, 11]
-            t_teleport_mode[i] = int(sc_sync[i, 12])
-            t_teleport_distance[i] = sc_sync[i, 13]
-            t_teleport_rotation[i] = sc_sync[i, 14]
-            t_component_world_position[i, 0] = sc_sync[i, 15]
-            t_component_world_position[i, 1] = sc_sync[i, 16]
-            t_component_world_position[i, 2] = sc_sync[i, 17]
-            t_component_world_rotation[i, 0] = sc_sync[i, 18]
-            t_component_world_rotation[i, 1] = sc_sync[i, 19]
-            t_component_world_rotation[i, 2] = sc_sync[i, 20]
-            t_component_world_rotation[i, 3] = sc_sync[i, 21]
-        i += bdim
+@wp.kernel
+def phase_00_snapshot(sc_sync: wp.array2d(dtype=float),
+                      t_anchor_inertia: wp.array(dtype=float),
+                      t_component_world_position: wp.array2d(dtype=float),
+                      t_component_world_rotation: wp.array2d(dtype=float),
+                      t_enabled: wp.array(dtype=int),
+                      t_frame_old: wp.array(dtype=float),
+                      t_frame_update: wp.array(dtype=float),
+                      t_movement_inertia_smoothing: wp.array(dtype=float),
+                      t_movement_speed_limit: wp.array(dtype=float),
+                      t_now_update: wp.array(dtype=float),
+                      t_old_time: wp.array(dtype=float),
+                      t_old_update: wp.array(dtype=float),
+                      t_rotation_speed_limit: wp.array(dtype=float),
+                      t_sync_target: wp.array(dtype=int),
+                      t_sync_top: wp.array(dtype=int),
+                      t_teleport_distance: wp.array(dtype=float),
+                      t_teleport_mode: wp.array(dtype=int),
+                      t_teleport_rotation: wp.array(dtype=float),
+                      t_time: wp.array(dtype=float),
+                      t_time_scale: wp.array(dtype=float),
+                      t_valid: wp.array(dtype=int),
+                      t_world_inertia: wp.array(dtype=float)):
+    i = wp.tid()
+    if t_enabled[i] != 0 and t_sync_top[i] > 0:
+        top = t_sync_top[i]
+        sc_sync[i, 0] = t_time[top]
+        sc_sync[i, 1] = t_old_time[top]
+        sc_sync[i, 2] = t_now_update[top]
+        sc_sync[i, 3] = t_old_update[top]
+        sc_sync[i, 4] = t_frame_update[top]
+        sc_sync[i, 5] = t_frame_old[top]
+        sc_sync[i, 6] = t_time_scale[top]
+        sc_sync[i, 7] = t_anchor_inertia[top]
+        sc_sync[i, 8] = t_world_inertia[top]
+        sc_sync[i, 9] = t_movement_inertia_smoothing[top]
+        sc_sync[i, 10] = t_movement_speed_limit[top]
+        sc_sync[i, 11] = t_rotation_speed_limit[top]
+        sc_sync[i, 12] = float(t_teleport_mode[top])
+        sc_sync[i, 13] = t_teleport_distance[top]
+        sc_sync[i, 14] = t_teleport_rotation[top]
+        sc_sync[i, 15] = t_component_world_position[top, 0]
+        sc_sync[i, 16] = t_component_world_position[top, 1]
+        sc_sync[i, 17] = t_component_world_position[top, 2]
+        sc_sync[i, 18] = t_component_world_rotation[top, 0]
+        sc_sync[i, 19] = t_component_world_rotation[top, 1]
+        sc_sync[i, 20] = t_component_world_rotation[top, 2]
+        sc_sync[i, 21] = t_component_world_rotation[top, 3]
+
+
+@wp.kernel
+def phase_00_apply(sc_sync: wp.array2d(dtype=float),
+                   t_anchor_inertia: wp.array(dtype=float),
+                   t_component_world_position: wp.array2d(dtype=float),
+                   t_component_world_rotation: wp.array2d(dtype=float),
+                   t_enabled: wp.array(dtype=int),
+                   t_frame_old: wp.array(dtype=float),
+                   t_frame_update: wp.array(dtype=float),
+                   t_movement_inertia_smoothing: wp.array(dtype=float),
+                   t_movement_speed_limit: wp.array(dtype=float),
+                   t_now_update: wp.array(dtype=float),
+                   t_old_time: wp.array(dtype=float),
+                   t_old_update: wp.array(dtype=float),
+                   t_rotation_speed_limit: wp.array(dtype=float),
+                   t_sync_target: wp.array(dtype=int),
+                   t_sync_top: wp.array(dtype=int),
+                   t_teleport_distance: wp.array(dtype=float),
+                   t_teleport_mode: wp.array(dtype=int),
+                   t_teleport_rotation: wp.array(dtype=float),
+                   t_time: wp.array(dtype=float),
+                   t_time_scale: wp.array(dtype=float),
+                   t_valid: wp.array(dtype=int),
+                   t_world_inertia: wp.array(dtype=float)):
+    i = wp.tid()
+    if t_enabled[i] != 0 and t_sync_top[i] > 0:
+        t_time[i] = sc_sync[i, 0]
+        t_old_time[i] = sc_sync[i, 1]
+        t_now_update[i] = sc_sync[i, 2]
+        t_old_update[i] = sc_sync[i, 3]
+        t_frame_update[i] = sc_sync[i, 4]
+        t_frame_old[i] = sc_sync[i, 5]
+        t_time_scale[i] = sc_sync[i, 6]
+        t_anchor_inertia[i] = sc_sync[i, 7]
+        t_world_inertia[i] = sc_sync[i, 8]
+        t_movement_inertia_smoothing[i] = sc_sync[i, 9]
+        t_movement_speed_limit[i] = sc_sync[i, 10]
+        t_rotation_speed_limit[i] = sc_sync[i, 11]
+        t_teleport_mode[i] = int(sc_sync[i, 12])
+        t_teleport_distance[i] = sc_sync[i, 13]
+        t_teleport_rotation[i] = sc_sync[i, 14]
+        t_component_world_position[i, 0] = sc_sync[i, 15]
+        t_component_world_position[i, 1] = sc_sync[i, 16]
+        t_component_world_position[i, 2] = sc_sync[i, 17]
+        t_component_world_rotation[i, 0] = sc_sync[i, 18]
+        t_component_world_rotation[i, 1] = sc_sync[i, 19]
+        t_component_world_rotation[i, 2] = sc_sync[i, 20]
+        t_component_world_rotation[i, 3] = sc_sync[i, 21]
 
 
 @wp.kernel
@@ -1115,14 +1154,551 @@ def phase_17(k: int,
                                    st_distance_target, st_distance_rest, sc_dcorr)
 
 
+@wp.kernel
+def phase_10(k: int,
+             scal_f: wp.array(dtype=float),
+             t_angular_velocity: wp.array(dtype=float),
+             t_blend_weight: wp.array(dtype=float),
+             t_blend_weight_param: wp.array(dtype=float),
+             t_cws: wp.array2d(dtype=float),
+             t_distance_weight: wp.array(dtype=float),
+             t_enabled: wp.array(dtype=int),
+             t_frame_interpolation: wp.array(dtype=float),
+             t_frame_moving_direction: wp.array2d(dtype=float),
+             t_frame_moving_speed: wp.array(dtype=float),
+             t_frame_old: wp.array(dtype=float),
+             t_frame_world_position: wp.array2d(dtype=float),
+             t_frame_world_rotation: wp.array2d(dtype=float),
+             t_frame_world_scale: wp.array2d(dtype=float),
+             t_gravity: wp.array(dtype=float),
+             t_gravity_direction: wp.array2d(dtype=float),
+             t_gravity_dot: wp.array(dtype=float),
+             t_gravity_falloff: wp.array(dtype=float),
+             t_gravity_ratio: wp.array(dtype=float),
+             t_inertia_rotation: wp.array2d(dtype=float),
+             t_inertia_vector: wp.array2d(dtype=float),
+             t_init_local_gravity_direction: wp.array2d(dtype=float),
+             t_init_scale: wp.array2d(dtype=float),
+             t_local_inertia: wp.array(dtype=float),
+             t_local_movement_speed_limit: wp.array(dtype=float),
+             t_local_rotation_speed_limit: wp.array(dtype=float),
+             t_moving_wind_direction: wp.array2d(dtype=float),
+             t_moving_wind_dirq: wp.array2d(dtype=float),
+             t_moving_wind_main: wp.array(dtype=float),
+             t_moving_wind_time: wp.array(dtype=float),
+             t_negative_scale_direction: wp.array2d(dtype=float),
+             t_now_update: wp.array(dtype=float),
+             t_now_world_position: wp.array2d(dtype=float),
+             t_now_world_rotation: wp.array2d(dtype=float),
+             t_old_frame_world_position: wp.array2d(dtype=float),
+             t_old_frame_world_rotation: wp.array2d(dtype=float),
+             t_old_frame_world_scale: wp.array2d(dtype=float),
+             t_old_world_position: wp.array2d(dtype=float),
+             t_old_world_rotation: wp.array2d(dtype=float),
+             t_rotation_axis: wp.array2d(dtype=float),
+             t_scale_ratio: wp.array(dtype=float),
+             t_stablization_time: wp.array(dtype=float),
+             t_step_move_inertia_ratio: wp.array(dtype=float),
+             t_step_rotation: wp.array2d(dtype=float),
+             t_step_rotation_inertia_ratio: wp.array(dtype=float),
+             t_step_vector: wp.array2d(dtype=float),
+             t_time: wp.array(dtype=float),
+             t_update_count: wp.array(dtype=int),
+             t_valid: wp.array(dtype=int),
+             t_velocity_weight: wp.array(dtype=float),
+             t_wind_count: wp.array(dtype=int),
+             t_wind_frequency: wp.array(dtype=float),
+             t_wind_main: wp.array2d(dtype=float),
+             t_wind_moving: wp.array(dtype=float),
+             t_wind_time: wp.array2d(dtype=float)):
+    i = wp.tid()
+    sim_dt = scal_f[SCAL_SIM_DT]
+    if kernels.team_frame_mask(t_enabled, t_valid, t_cws, i) and t_update_count[i] > k:
+        kernels.do_step_update(i, sim_dt,
+                               t_now_update, t_time, t_frame_old, t_frame_interpolation,
+                               t_now_world_position, t_now_world_rotation,
+                               t_old_world_position, t_old_world_rotation,
+                               t_old_frame_world_position, t_old_frame_world_rotation,
+                               t_old_frame_world_scale, t_frame_world_position,
+                               t_frame_world_rotation, t_frame_world_scale,
+                               t_step_vector, t_step_rotation,
+                               t_step_move_inertia_ratio, t_step_rotation_inertia_ratio,
+                               t_local_inertia, t_local_movement_speed_limit,
+                               t_local_rotation_speed_limit,
+                               t_inertia_vector, t_inertia_rotation,
+                               t_angular_velocity, t_rotation_axis,
+                               t_init_scale, t_scale_ratio,
+                               t_gravity_direction, t_gravity_dot,
+                               t_init_local_gravity_direction, t_negative_scale_direction,
+                               t_gravity, t_gravity_falloff, t_gravity_ratio,
+                               t_velocity_weight, t_stablization_time, t_blend_weight,
+                               t_blend_weight_param, t_distance_weight,
+                               t_wind_moving, t_frame_moving_speed, t_moving_wind_main,
+                               t_frame_moving_direction, t_moving_wind_direction,
+                               t_moving_wind_dirq,
+                               t_wind_main, t_wind_frequency, t_wind_count, t_wind_time,
+                               t_moving_wind_time)
+
+
+@wp.kernel
+def phase_11(k: int,
+             c_active: wp.array(dtype=int),
+             c_frame_pos: wp.array2d(dtype=float),
+             c_frame_radius: wp.array2d(dtype=float),
+             c_frame_rot: wp.array2d(dtype=float),
+             c_frame_tip: wp.array2d(dtype=float),
+             c_kind: wp.array(dtype=int),
+             c_now_pos: wp.array2d(dtype=float),
+             c_now_rot: wp.array2d(dtype=float),
+             c_now_tip: wp.array2d(dtype=float),
+             c_old_frame_pos: wp.array2d(dtype=float),
+             c_old_frame_rot: wp.array2d(dtype=float),
+             c_old_frame_tip: wp.array2d(dtype=float),
+             c_old_pos: wp.array2d(dtype=float),
+             c_old_rot: wp.array2d(dtype=float),
+             c_old_tip: wp.array2d(dtype=float),
+             c_team: wp.array(dtype=int),
+             c_work_aabb_max: wp.array2d(dtype=float),
+             c_work_aabb_min: wp.array2d(dtype=float),
+             c_work_inv_old_rot: wp.array2d(dtype=float),
+             c_work_next_pos: wp.array3d(dtype=float),
+             c_work_old_pos: wp.array3d(dtype=float),
+             c_work_radius: wp.array2d(dtype=float),
+             c_work_rot: wp.array2d(dtype=float),
+             t_cws: wp.array2d(dtype=float),
+             t_enabled: wp.array(dtype=int),
+             t_frame_interpolation: wp.array(dtype=float),
+             t_step_move_inertia_ratio: wp.array(dtype=float),
+             t_step_rotation_inertia_ratio: wp.array(dtype=float),
+             t_update_count: wp.array(dtype=int),
+             t_valid: wp.array(dtype=int)):
+    ci = wp.tid()
+    cm = c_team[ci]
+    if kernels.team_frame_mask(t_enabled, t_valid, t_cws, cm) and t_update_count[cm] > k \
+            and c_active[ci] != 0:
+        kernels.do_collider_start_step(ci, c_team, c_kind,
+                                       c_frame_pos, c_frame_rot, c_frame_tip, c_frame_radius,
+                                       c_old_frame_pos, c_old_frame_rot, c_old_frame_tip,
+                                       c_now_pos, c_now_rot, c_now_tip,
+                                       c_old_pos, c_old_rot, c_old_tip,
+                                       c_work_rot, c_work_inv_old_rot,
+                                       c_work_radius, c_work_old_pos, c_work_next_pos,
+                                       c_work_aabb_min, c_work_aabb_max,
+                                       t_frame_interpolation, t_step_move_inertia_ratio,
+                                       t_step_rotation_inertia_ratio)
+
+
+@wp.kernel
+def phase_12_animate(k: int,
+                     p_base_positions: wp.array2d(dtype=float),
+                     p_base_rotations: wp.array2d(dtype=float),
+                     p_depth: wp.array(dtype=float),
+                     p_friction: wp.array(dtype=float),
+                     p_next_positions: wp.array2d(dtype=float),
+                     p_old_anim_positions: wp.array2d(dtype=float),
+                     p_old_anim_rotations: wp.array2d(dtype=float),
+                     p_old_positions: wp.array2d(dtype=float),
+                     p_positions: wp.array2d(dtype=float),
+                     p_rotations: wp.array2d(dtype=float),
+                     p_step_basic_positions: wp.array2d(dtype=float),
+                     p_step_basic_rotations: wp.array2d(dtype=float),
+                     p_team: wp.array(dtype=int),
+                     p_velocities: wp.array2d(dtype=float),
+                     p_velocity_positions: wp.array2d(dtype=float),
+                     p_vertex_root_local: wp.array(dtype=int),
+                     scal_f: wp.array(dtype=float),
+                     st_move_particle: wp.array(dtype=int),
+                     st_move_team: wp.array(dtype=int),
+                     t_cws: wp.array2d(dtype=float),
+                     t_damping_lut: wp.array2d(dtype=float),
+                     t_depth_inertia: wp.array(dtype=float),
+                     t_enabled: wp.array(dtype=int),
+                     t_force_mode: wp.array(dtype=int),
+                     t_frame_interpolation: wp.array(dtype=float),
+                     t_gravity: wp.array(dtype=float),
+                     t_gravity_direction: wp.array2d(dtype=float),
+                     t_gravity_ratio: wp.array(dtype=float),
+                     t_impact_force: wp.array2d(dtype=float),
+                     t_inertia_rotation: wp.array2d(dtype=float),
+                     t_inertia_vector: wp.array2d(dtype=float),
+                     t_moving_wind_dirq: wp.array2d(dtype=float),
+                     t_moving_wind_main: wp.array(dtype=float),
+                     t_moving_wind_time: wp.array(dtype=float),
+                     t_old_world_position: wp.array2d(dtype=float),
+                     t_scale_ratio: wp.array(dtype=float),
+                     t_step_rotation: wp.array2d(dtype=float),
+                     t_step_vector: wp.array2d(dtype=float),
+                     t_update_count: wp.array(dtype=int),
+                     t_valid: wp.array(dtype=int),
+                     t_velocity_weight: wp.array(dtype=float),
+                     t_wind_blend: wp.array(dtype=float),
+                     t_wind_count: wp.array(dtype=int),
+                     t_wind_depth_weight: wp.array(dtype=float),
+                     t_wind_dirq: wp.array3d(dtype=float),
+                     t_wind_influence: wp.array(dtype=float),
+                     t_wind_main: wp.array2d(dtype=float),
+                     t_wind_moving: wp.array(dtype=float),
+                     t_wind_seed: wp.array(dtype=int),
+                     t_wind_synchronization: wp.array(dtype=float),
+                     t_wind_time: wp.array2d(dtype=float),
+                     t_wind_turbulence: wp.array(dtype=float),
+                     t_wind_zone_turbulence: wp.array2d(dtype=float)):
+    p = wp.tid()
+    mt = p_team[p]
+    if kernels.team_frame_mask(t_enabled, t_valid, t_cws, mt) and t_update_count[mt] > k:
+        t = t_frame_interpolation[mt]
+        bx = dmath.lerp(p_old_anim_positions[p, 0], p_positions[p, 0], t)
+        by = dmath.lerp(p_old_anim_positions[p, 1], p_positions[p, 1], t)
+        bz = dmath.lerp(p_old_anim_positions[p, 2], p_positions[p, 2], t)
+        qx, qy, qz, qw = dmath.quat_slerp(
+            p_old_anim_rotations[p, 0], p_old_anim_rotations[p, 1],
+            p_old_anim_rotations[p, 2], p_old_anim_rotations[p, 3],
+            p_rotations[p, 0], p_rotations[p, 1], p_rotations[p, 2], p_rotations[p, 3], t)
+        p_base_positions[p, 0] = bx
+        p_base_positions[p, 1] = by
+        p_base_positions[p, 2] = bz
+        p_step_basic_positions[p, 0] = bx
+        p_step_basic_positions[p, 1] = by
+        p_step_basic_positions[p, 2] = bz
+        p_base_rotations[p, 0] = qx
+        p_base_rotations[p, 1] = qy
+        p_base_rotations[p, 2] = qz
+        p_base_rotations[p, 3] = qw
+        p_step_basic_rotations[p, 0] = qx
+        p_step_basic_rotations[p, 1] = qy
+        p_step_basic_rotations[p, 2] = qz
+        p_step_basic_rotations[p, 3] = qw
+
+
+@wp.kernel
+def phase_12_force(k: int,
+                   p_base_positions: wp.array2d(dtype=float),
+                   p_base_rotations: wp.array2d(dtype=float),
+                   p_depth: wp.array(dtype=float),
+                   p_friction: wp.array(dtype=float),
+                   p_next_positions: wp.array2d(dtype=float),
+                   p_old_anim_positions: wp.array2d(dtype=float),
+                   p_old_anim_rotations: wp.array2d(dtype=float),
+                   p_old_positions: wp.array2d(dtype=float),
+                   p_positions: wp.array2d(dtype=float),
+                   p_rotations: wp.array2d(dtype=float),
+                   p_step_basic_positions: wp.array2d(dtype=float),
+                   p_step_basic_rotations: wp.array2d(dtype=float),
+                   p_team: wp.array(dtype=int),
+                   p_velocities: wp.array2d(dtype=float),
+                   p_velocity_positions: wp.array2d(dtype=float),
+                   p_vertex_root_local: wp.array(dtype=int),
+                   scal_f: wp.array(dtype=float),
+                   st_move_particle: wp.array(dtype=int),
+                   st_move_team: wp.array(dtype=int),
+                   t_cws: wp.array2d(dtype=float),
+                   t_damping_lut: wp.array2d(dtype=float),
+                   t_depth_inertia: wp.array(dtype=float),
+                   t_enabled: wp.array(dtype=int),
+                   t_force_mode: wp.array(dtype=int),
+                   t_frame_interpolation: wp.array(dtype=float),
+                   t_gravity: wp.array(dtype=float),
+                   t_gravity_direction: wp.array2d(dtype=float),
+                   t_gravity_ratio: wp.array(dtype=float),
+                   t_impact_force: wp.array2d(dtype=float),
+                   t_inertia_rotation: wp.array2d(dtype=float),
+                   t_inertia_vector: wp.array2d(dtype=float),
+                   t_moving_wind_dirq: wp.array2d(dtype=float),
+                   t_moving_wind_main: wp.array(dtype=float),
+                   t_moving_wind_time: wp.array(dtype=float),
+                   t_old_world_position: wp.array2d(dtype=float),
+                   t_scale_ratio: wp.array(dtype=float),
+                   t_step_rotation: wp.array2d(dtype=float),
+                   t_step_vector: wp.array2d(dtype=float),
+                   t_update_count: wp.array(dtype=int),
+                   t_valid: wp.array(dtype=int),
+                   t_velocity_weight: wp.array(dtype=float),
+                   t_wind_blend: wp.array(dtype=float),
+                   t_wind_count: wp.array(dtype=int),
+                   t_wind_depth_weight: wp.array(dtype=float),
+                   t_wind_dirq: wp.array3d(dtype=float),
+                   t_wind_influence: wp.array(dtype=float),
+                   t_wind_main: wp.array2d(dtype=float),
+                   t_wind_moving: wp.array(dtype=float),
+                   t_wind_seed: wp.array(dtype=int),
+                   t_wind_synchronization: wp.array(dtype=float),
+                   t_wind_time: wp.array2d(dtype=float),
+                   t_wind_turbulence: wp.array(dtype=float),
+                   t_wind_zone_turbulence: wp.array2d(dtype=float)):
+    e = wp.tid()
+    power2 = scal_f[SCAL_POWER2]
+    sim_dt = scal_f[SCAL_SIM_DT]
+    mt = st_move_team[e]
+    if kernels.team_frame_mask(t_enabled, t_valid, t_cws, mt) and t_update_count[mt] > k:
+        pmi = st_move_particle[e]
+        depth = p_depth[pmi]
+        ox = p_old_positions[pmi, 0]
+        oy = p_old_positions[pmi, 1]
+        oz = p_old_positions[pmi, 2]
+
+        inertia_depth = t_depth_inertia[mt] * (1.0 - depth * depth)
+        ivx = dmath.lerp(t_inertia_vector[mt, 0], t_step_vector[mt, 0], inertia_depth)
+        ivy = dmath.lerp(t_inertia_vector[mt, 1], t_step_vector[mt, 1], inertia_depth)
+        ivz = dmath.lerp(t_inertia_vector[mt, 2], t_step_vector[mt, 2], inertia_depth)
+        irx, iry, irz, irw = dmath.quat_slerp(
+            t_inertia_rotation[mt, 0], t_inertia_rotation[mt, 1],
+            t_inertia_rotation[mt, 2], t_inertia_rotation[mt, 3],
+            t_step_rotation[mt, 0], t_step_rotation[mt, 1],
+            t_step_rotation[mt, 2], t_step_rotation[mt, 3], inertia_depth)
+        owx = t_old_world_position[mt, 0]
+        owy = t_old_world_position[mt, 1]
+        owz = t_old_world_position[mt, 2]
+        lx = ox - owx
+        ly = oy - owy
+        lz = oz - owz
+        rlx, rly, rlz = dmath.quat_rotate(irx, iry, irz, irw, lx, ly, lz)
+        lx = rlx + ivx
+        ly = rly + ivy
+        lz = rlz + ivz
+        wx = owx + lx
+        wy = owy + ly
+        wz = owz + lz
+        nextx = wx
+        nexty = wy
+        nextz = wz
+        velposx = ox + (wx - ox)
+        velposy = oy + (wy - oy)
+        velposz = oz + (wz - oz)
+
+        vx, vy, vz = dmath.quat_rotate(irx, iry, irz, irw,
+                                       p_velocities[pmi, 0], p_velocities[pmi, 1],
+                                       p_velocities[pmi, 2])
+        vw = t_velocity_weight[mt]
+        vx = vx * vw
+        vy = vy * vw
+        vz = vz * vw
+        damping = dmath.evaluate_team_lut_clamp01(t_damping_lut, mt, depth)
+        damp = dmath.saturate(1.0 - damping * power2)
+        vx = vx * damp
+        vy = vy * damp
+        vz = vz * damp
+
+        fm = t_force_mode[mt]
+        change = (fm == FORCE_VELOCITY_CHANGE) or (fm == FORCE_VELOCITY_CHANGE_WITHOUT_DEPTH)
+        if change:
+            vx = 0.0
+            vy = 0.0
+            vz = 0.0
+
+        g = t_gravity[mt] * t_gravity_ratio[mt]
+        fx = t_gravity_direction[mt, 0] * g
+        fy = t_gravity_direction[mt, 1] * g
+        fz = t_gravity_direction[mt, 2] * g
+        mass = dmath.calc_mass(depth)
+        with_depth = (fm == FORCE_VELOCITY_ADD) or (fm == FORCE_VELOCITY_CHANGE)
+        without_depth = (fm == FORCE_VELOCITY_ADD_WITHOUT_DEPTH) \
+            or (fm == FORCE_VELOCITY_CHANGE_WITHOUT_DEPTH)
+        if with_depth:
+            fx = fx + t_impact_force[mt, 0] / mass
+            fy = fy + t_impact_force[mt, 1] / mass
+            fz = fz + t_impact_force[mt, 2] / mass
+        if without_depth:
+            fx = fx + t_impact_force[mt, 0]
+            fy = fy + t_impact_force[mt, 1]
+            fz = fz + t_impact_force[mt, 2]
+
+        root = float(p_vertex_root_local[pmi])
+        seed = float(t_wind_seed[mt])
+        sync = t_wind_synchronization[mt]
+        wind_position = (seed + 1.0) * 4.19230645 \
+            + root * 0.0023963 * (1.0 - sync) * 100.0
+        blend = t_wind_blend[mt]
+        turbulence_param = t_wind_turbulence[mt]
+        wfx = float(0.0)
+        wfy = float(0.0)
+        wfz = float(0.0)
+        wc = t_wind_count[mt]
+        for s in range(WIND_ZONE_SLOTS):
+            if s < wc:
+                cx, cy, cz = kernels.do_wind_blend(
+                    t_wind_main[mt, s], t_wind_time[mt, s],
+                    t_wind_dirq[mt, s, 0], t_wind_dirq[mt, s, 1],
+                    t_wind_dirq[mt, s, 2], t_wind_dirq[mt, s, 3],
+                    t_wind_zone_turbulence[mt, s], blend, turbulence_param, wind_position)
+                wfx = wfx + cx
+                wfy = wfy + cy
+                wfz = wfz + cz
+        moving_on = t_wind_moving[mt] > WIND_MIN_SPEED
+        if moving_on:
+            mcx, mcy, mcz = kernels.do_wind_blend(
+                t_moving_wind_main[mt], t_moving_wind_time[mt],
+                t_moving_wind_dirq[mt, 0], t_moving_wind_dirq[mt, 1],
+                t_moving_wind_dirq[mt, 2], t_moving_wind_dirq[mt, 3],
+                1.0, blend, turbulence_param, wind_position)
+            wfx = wfx + mcx
+            wfy = wfy + mcy
+            wfz = wfz + mcz
+        influence = t_wind_influence[mt] * (1.0 - p_friction[pmi])
+        depth_scale = depth * depth
+        influence = influence * dmath.lerp(1.0, depth_scale, t_wind_depth_weight[mt])
+        fx = fx + wfx * influence
+        fy = fy + wfy * influence
+        fz = fz + wfz * influence
+
+        sr = t_scale_ratio[mt]
+        fx = fx * sr
+        fy = fy * sr
+        fz = fz * sr
+
+        vx = vx + fx * sim_dt
+        vy = vy + fy * sim_dt
+        vz = vz + fz * sim_dt
+        nextx = nextx + vx * sim_dt
+        nexty = nexty + vy * sim_dt
+        nextz = nextz + vz * sim_dt
+
+        p_velocities[pmi, 0] = vx
+        p_velocities[pmi, 1] = vy
+        p_velocities[pmi, 2] = vz
+        p_next_positions[pmi, 0] = nextx
+        p_next_positions[pmi, 1] = nexty
+        p_next_positions[pmi, 2] = nextz
+        p_velocity_positions[pmi, 0] = velposx
+        p_velocity_positions[pmi, 1] = velposy
+        p_velocity_positions[pmi, 2] = velposz
+
+
+@wp.kernel
+def phase_13_fixed(k: int,
+                   p_base_positions: wp.array2d(dtype=float),
+                   p_base_rotations: wp.array2d(dtype=float),
+                   p_next_positions: wp.array2d(dtype=float),
+                   p_velocity_positions: wp.array2d(dtype=float),
+                   st_fixed_particle: wp.array(dtype=int),
+                   st_fixed_team: wp.array(dtype=int),
+                   st_spring_particle: wp.array(dtype=int),
+                   st_spring_team: wp.array(dtype=int),
+                   t_cws: wp.array2d(dtype=float),
+                   t_enabled: wp.array(dtype=int),
+                   t_normal_axis_vector: wp.array2d(dtype=float),
+                   t_scale_ratio: wp.array(dtype=float),
+                   t_spring_limit_distance: wp.array(dtype=float),
+                   t_spring_noise: wp.array(dtype=float),
+                   t_spring_normal_limit_ratio: wp.array(dtype=float),
+                   t_spring_power: wp.array(dtype=float),
+                   t_time: wp.array(dtype=float),
+                   t_update_count: wp.array(dtype=int),
+                   t_valid: wp.array(dtype=int)):
+    e = wp.tid()
+    ft = st_fixed_team[e]
+    if kernels.team_frame_mask(t_enabled, t_valid, t_cws, ft) and t_update_count[ft] > k:
+        pfi = st_fixed_particle[e]
+        p_next_positions[pfi, 0] = p_base_positions[pfi, 0]
+        p_next_positions[pfi, 1] = p_base_positions[pfi, 1]
+        p_next_positions[pfi, 2] = p_base_positions[pfi, 2]
+        p_velocity_positions[pfi, 0] = p_base_positions[pfi, 0]
+        p_velocity_positions[pfi, 1] = p_base_positions[pfi, 1]
+        p_velocity_positions[pfi, 2] = p_base_positions[pfi, 2]
+
+
+@wp.kernel
+def phase_13_spring(k: int,
+                    p_base_positions: wp.array2d(dtype=float),
+                    p_base_rotations: wp.array2d(dtype=float),
+                    p_next_positions: wp.array2d(dtype=float),
+                    p_velocity_positions: wp.array2d(dtype=float),
+                    st_fixed_particle: wp.array(dtype=int),
+                    st_fixed_team: wp.array(dtype=int),
+                    st_spring_particle: wp.array(dtype=int),
+                    st_spring_team: wp.array(dtype=int),
+                    t_cws: wp.array2d(dtype=float),
+                    t_enabled: wp.array(dtype=int),
+                    t_normal_axis_vector: wp.array2d(dtype=float),
+                    t_scale_ratio: wp.array(dtype=float),
+                    t_spring_limit_distance: wp.array(dtype=float),
+                    t_spring_noise: wp.array(dtype=float),
+                    t_spring_normal_limit_ratio: wp.array(dtype=float),
+                    t_spring_power: wp.array(dtype=float),
+                    t_time: wp.array(dtype=float),
+                    t_update_count: wp.array(dtype=int),
+                    t_valid: wp.array(dtype=int)):
+    e = wp.tid()
+    st = st_spring_team[e]
+    if kernels.team_frame_mask(t_enabled, t_valid, t_cws, st) and t_update_count[st] > k \
+            and t_spring_power[st] > 0.0:
+        psi = st_spring_particle[e]
+        bpx = p_base_positions[psi, 0]
+        bpy = p_base_positions[psi, 1]
+        bpz = p_base_positions[psi, 2]
+        n0 = p_next_positions[psi, 0]
+        n1 = p_next_positions[psi, 1]
+        n2 = p_next_positions[psi, 2]
+        vx = n0 - bpx
+        vy = n1 - bpy
+        vz = n2 - bpz
+        dx, dy, dz = dmath.quat_rotate(
+            p_base_rotations[psi, 0], p_base_rotations[psi, 1],
+            p_base_rotations[psi, 2], p_base_rotations[psi, 3],
+            t_normal_axis_vector[st, 0], t_normal_axis_vector[st, 1],
+            t_normal_axis_vector[st, 2])
+        limit = t_spring_limit_distance[st] * t_scale_ratio[st]
+        clampable = limit > 1.0e-8
+        l = dmath.length3(vx, vy, vz)
+        over = clampable and (l > limit)
+        if over and (l > 1.0e-30):
+            scale = limit / l
+            vx = vx * scale
+            vy = vy * scale
+            vz = vz * scale
+        ratio = t_spring_normal_limit_ratio[st]
+        elliptic = clampable and (ratio < 1.0)
+        ylen = dmath.dot3(dx, dy, dz, vx, vy, vz)
+        vpx = vx - dx * ylen
+        vpy = vy - dy * ylen
+        vpz = vz - dz * ylen
+        xlen = dmath.length3(vpx, vpy, vpz)
+        safe_limit = limit if limit > 1.0e-30 else 1.0
+        tval = dmath.saturate(xlen / safe_limit)
+        y = wp.cos(wp.asin(dmath.clamp1(tval))) * (limit * ratio)
+        exceed = elliptic and (wp.abs(ylen) > y)
+        if exceed:
+            adjust = (wp.abs(ylen) - y) * dmath.fsign(ylen)
+            vx = vx - adjust * dx
+            vy = vy - adjust * dy
+            vz = vz - adjust * dz
+        if not clampable:
+            vx = 0.0
+            vy = 0.0
+            vz = 0.0
+
+        power = t_spring_power[st]
+        noise_param = t_spring_noise[st]
+        if noise_param > 0.0:
+            noise_time = (t_time[st] + float(psi) * 49.6198) * 2.4512 \
+                + (n0 + n1 + n2)
+            noise = wp.sin(noise_time) * (noise_param * 0.6)
+            power = power + power * noise
+            if power < 0.0:
+                power = 0.0
+        vx = vx - vx * power
+        vy = vy - vy * power
+        vz = vz - vz * power
+        p_next_positions[psi, 0] = bpx + vx
+        p_next_positions[psi, 1] = bpy + vy
+        p_next_positions[psi, 2] = bpz + vz
+
+
 PHASE_TABLE = (
-    ("phase_00", phase_00, "team", plan.LAUNCH_SINGLE_BLOCK),
-    ("phase_01", phase_01, "team", plan.LAUNCH_PER_ELEMENT),
-    ("phase_02", phase_02, "particle", plan.LAUNCH_PER_ELEMENT),
-    ("phase_03", phase_03, "team", plan.LAUNCH_PER_ELEMENT),
-    ("phase_03b", phase_03b, "team", plan.LAUNCH_PER_ELEMENT),
-    ("phase_04", phase_04, "particle", plan.LAUNCH_PER_ELEMENT),
-    ("phase_05", phase_05, "collider", plan.LAUNCH_PER_ELEMENT),
-    ("phase_16", phase_16, "tether", plan.LAUNCH_PER_ELEMENT),
-    ("phase_17", phase_17, "particle", plan.LAUNCH_PER_ELEMENT),
+    ("phase_00", ((phase_00_resolve_top, "team"),
+                  (phase_00_snapshot, "team"),
+                  (phase_00_apply, "team"))),
+    ("phase_01", ((phase_01, "team"),)),
+    ("phase_02", ((phase_02, "particle"),)),
+    ("phase_03", ((phase_03, "team"),)),
+    ("phase_03b", ((phase_03b, "team"),)),
+    ("phase_04", ((phase_04, "particle"),)),
+    ("phase_05", ((phase_05, "collider"),)),
+    ("phase_10", ((phase_10, "team"),)),
+    ("phase_11", ((phase_11, "collider"),)),
+    ("phase_12", ((phase_12_animate, "particle"),
+                  (phase_12_force, "update_move"))),
+    ("phase_13", ((phase_13_fixed, "update_fixed"),
+                  (phase_13_spring, "spring"))),
+    ("phase_16", ((phase_16, "tether"),)),
+    ("phase_17", ((phase_17, "particle"),)),
 )

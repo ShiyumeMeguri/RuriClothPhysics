@@ -189,6 +189,22 @@ def uniform_element_counts(fields, element_count):
     return {field_name: element_count for field_name in fields}
 
 
+def adjacent_runs(indices):
+    ordered = sorted(indices)
+    if not ordered:
+        return ()
+    runs = []
+    run_first = ordered[0]
+    run_last = ordered[0]
+    for index in ordered[1:]:
+        if index != run_last + 1:
+            runs.append((run_first, run_last))
+            run_first = index
+        run_last = index
+    runs.append((run_first, run_last))
+    return tuple(runs)
+
+
 class SlabStorage:
     def __init__(self, storage_name, fields, element_counts):
         missing = sorted(set(fields) - set(element_counts))
@@ -276,34 +292,35 @@ class SlabStorage:
     def upload_dirty(self):
         if not self.dirty_indices:
             return 0
-        ordered = sorted(self.dirty_indices)
-        uploaded = len(ordered)
-        run_first = ordered[0]
-        run_last = ordered[0]
-        for index in ordered[1:]:
-            if index != run_last + 1:
-                self._upload_run(run_first, run_last)
-                run_first = index
-            run_last = index
-        self._upload_run(run_first, run_last)
+        uploaded = len(self.dirty_indices)
+        for first_index, last_index in adjacent_runs(self.dirty_indices):
+            self._copy_run(self.device_slab, self.upload_slab, first_index, last_index)
         self.dirty_indices.clear()
         return uploaded
 
-    def _upload_run(self, first_index, last_index):
+    def _run_bytes(self, first_index, last_index):
         first_name = self.field_order[first_index]
         last_name = self.field_order[last_index]
         start = self.byte_offsets[first_name]
         end = self.byte_offsets[last_name] + self.byte_sizes[last_name]
-        if end == start:
-            return
-        wp.copy(self.device_slab, self.upload_slab, start, start, end - start)
+        return start, end - start
 
-    def read(self, field_name):
-        byte_size = self.byte_sizes[field_name]
-        if byte_size > 0:
-            start = self.byte_offsets[field_name]
-            wp.copy(self.download_slab, self.device_slab, start, start, byte_size)
-            wp.synchronize_device(DEVICE)
+    def _copy_run(self, destination, source, first_index, last_index):
+        start, length = self._run_bytes(first_index, last_index)
+        if length == 0:
+            return 0
+        wp.copy(destination, source, start, start, length)
+        return 1
+
+    def download_fields(self, field_names):
+        indices = {self.field_indices[field_name] for field_name in field_names}
+        copies = 0
+        for first_index, last_index in adjacent_runs(indices):
+            copies += self._copy_run(self.download_slab, self.device_slab, first_index,
+                                     last_index)
+        return copies
+
+    def value(self, field_name):
         return self.download_views[field_name].copy()
 
 
@@ -369,8 +386,26 @@ class ClothState:
             uploaded += self.storages[storage_name].upload_dirty()
         return uploaded
 
+    def all_fields(self):
+        return tuple((storage_name, field_name)
+                     for storage_name in STORAGE_NAMES
+                     for field_name in self.storages[storage_name].field_order)
+
+    def read_batch(self, requests):
+        requested = tuple(requests)
+        by_storage = {}
+        for storage_name, field_name in requested:
+            by_storage.setdefault(storage_name, []).append(field_name)
+        copies = 0
+        for storage_name, field_names in by_storage.items():
+            copies += self.storages[storage_name].download_fields(field_names)
+        if copies > 0:
+            wp.synchronize_device(DEVICE)
+        return {(storage_name, field_name): self.storages[storage_name].value(field_name)
+                for storage_name, field_name in requested}
+
     def read(self, storage_name, field_name):
-        return self.storages[storage_name].read(field_name)
+        return self.read_batch(((storage_name, field_name),))[(storage_name, field_name)]
 
     def structure_key(self):
         entries = []

@@ -14,6 +14,7 @@ SLOT_BINDINGS = (
     ("c_input_radii", "collider", "input_radii"),
     ("c_input_rotations", "collider", "input_rotations"),
     ("c_input_tips", "collider", "input_tips"),
+    ("c_kind", "collider", "kind"),
     ("c_now_pos", "collider", "now_positions"),
     ("c_now_rot", "collider", "now_rotations"),
     ("c_now_tip", "collider", "now_tips"),
@@ -24,6 +25,13 @@ SLOT_BINDINGS = (
     ("c_old_rot", "collider", "old_rotations"),
     ("c_old_tip", "collider", "old_tips"),
     ("c_team", "collider", "team"),
+    ("c_work_aabb_max", "collider", "work_aabb_max"),
+    ("c_work_aabb_min", "collider", "work_aabb_min"),
+    ("c_work_inv_old_rot", "collider", "work_inv_old_rot"),
+    ("c_work_next_pos", "collider", "work_next_pos"),
+    ("c_work_old_pos", "collider", "work_old_pos"),
+    ("c_work_radius", "collider", "work_radius"),
+    ("c_work_rot", "collider", "work_rot"),
     ("csr_center_fixed_offsets", "derived", "center_fixed_csr_offsets"),
     ("csr_center_fixed_order", "derived", "center_fixed_csr_order"),
     ("csr_distance_offsets", "derived", "distance_csr_offsets"),
@@ -50,11 +58,13 @@ SLOT_BINDINGS = (
     ("p_skin_weights", "particle", "skin_weights"),
     ("p_static_friction", "particle", "static_friction"),
     ("p_step_basic_positions", "particle", "step_basic_positions"),
+    ("p_step_basic_rotations", "particle", "step_basic_rotations"),
     ("p_team", "particle", "team"),
     ("p_velocities", "particle", "velocities"),
     ("p_velocity_positions", "particle", "velocity_positions"),
     ("p_vertex_bind_pose_rotations", "particle", "vertex_bind_pose_rotations"),
     ("p_vertex_root", "particle", "vertex_root"),
+    ("p_vertex_root_local", "particle", "vertex_root_local"),
     ("sc_dcorr", "derived", "distance_correction"),
     ("sc_sync", "derived", "synchronization_snapshot"),
     ("scal_f", "frame_scalar", "frame_float"),
@@ -62,23 +72,36 @@ SLOT_BINDINGS = (
     ("st_center_fixed_particle", "center_fixed", "particle"),
     ("st_distance_rest", "distance", "rest"),
     ("st_distance_target", "distance", "target"),
+    ("st_fixed_particle", "update_fixed", "particle"),
+    ("st_fixed_team", "update_fixed", "team"),
+    ("st_move_particle", "update_move", "particle"),
+    ("st_move_team", "update_move", "team"),
+    ("st_spring_particle", "spring", "particle"),
+    ("st_spring_team", "spring", "team"),
     ("st_tether_particle", "tether", "particle"),
     ("st_tether_team", "tether", "team"),
     ("t_anchor_component_local_position", "team", "anchor_component_local_position"),
     ("t_anchor_inertia", "team", "anchor_inertia"),
     ("t_anchor_position", "team", "anchor_position"),
     ("t_anchor_rotation", "team", "anchor_rotation"),
+    ("t_angular_velocity", "team", "angular_velocity"),
     ("t_animation_pose_ratio", "team", "animation_pose_ratio"),
     ("t_blend_weight", "team", "blend_weight"),
+    ("t_blend_weight_param", "team", "blend_weight_param"),
     ("t_component_world_position", "team", "component_world_position"),
     ("t_component_world_rotation", "team", "component_world_rotation"),
     ("t_culling_invisible", "team", "culling_invisible"),
     ("t_cws", "team", "component_world_scale"),
+    ("t_damping_lut", "team", "damping_lut"),
+    ("t_depth_inertia", "team", "depth_inertia"),
     ("t_distance_lut", "team", "distance_lut"),
+    ("t_distance_weight", "team", "distance_weight"),
     ("t_enabled", "team", "enabled"),
+    ("t_force_mode", "team", "force_mode"),
     ("t_frame_component_shift_rotation", "team", "frame_component_shift_rotation"),
     ("t_frame_component_shift_vector", "team", "frame_component_shift_vector"),
     ("t_frame_dt", "team", "frame_delta_time"),
+    ("t_frame_interpolation", "team", "frame_interpolation"),
     ("t_frame_moving_direction", "team", "frame_moving_direction"),
     ("t_frame_moving_speed", "team", "frame_moving_speed"),
     ("t_frame_old", "team", "frame_old_time"),
@@ -86,15 +109,31 @@ SLOT_BINDINGS = (
     ("t_frame_world_position", "team", "frame_world_position"),
     ("t_frame_world_rotation", "team", "frame_world_rotation"),
     ("t_frame_world_scale", "team", "frame_world_scale"),
+    ("t_gravity", "team", "gravity"),
+    ("t_gravity_direction", "team", "gravity_direction"),
+    ("t_gravity_dot", "team", "gravity_dot"),
+    ("t_gravity_falloff", "team", "gravity_falloff"),
+    ("t_gravity_ratio", "team", "gravity_ratio"),
     ("t_had_anchor", "team", "had_anchor"),
     ("t_has_anchor", "team", "has_anchor"),
+    ("t_impact_force", "team", "impact_force"),
+    ("t_inertia_rotation", "team", "inertia_rotation"),
     ("t_inertia_shift", "team", "inertia_shift"),
+    ("t_inertia_vector", "team", "inertia_vector"),
+    ("t_init_local_gravity_direction", "team", "init_local_gravity_direction"),
     ("t_init_scale", "team", "init_scale"),
     ("t_is_negative_scale", "team", "is_negative_scale"),
     ("t_is_spring", "team", "is_spring"),
     ("t_keep_teleport_pending", "team", "keep_teleport_pending"),
+    ("t_local_inertia", "team", "local_inertia"),
+    ("t_local_movement_speed_limit", "team", "local_movement_speed_limit"),
+    ("t_local_rotation_speed_limit", "team", "local_rotation_speed_limit"),
     ("t_movement_inertia_smoothing", "team", "movement_inertia_smoothing"),
     ("t_movement_speed_limit", "team", "movement_speed_limit"),
+    ("t_moving_wind_direction", "team", "moving_wind_direction"),
+    ("t_moving_wind_dirq", "team", "moving_wind_dirq"),
+    ("t_moving_wind_main", "team", "moving_wind_main"),
+    ("t_moving_wind_time", "team", "moving_wind_time"),
     ("t_negative_scale_change", "team", "negative_scale_change"),
     ("t_negative_scale_direction", "team", "negative_scale_direction"),
     ("t_negative_scale_matrix", "team", "negative_scale_matrix"),
@@ -102,6 +141,7 @@ SLOT_BINDINGS = (
     ("t_negative_scale_sign", "team", "negative_scale_sign"),
     ("t_negative_scale_teleport", "team", "negative_scale_teleport"),
     ("t_negative_scale_triangle_sign", "team", "negative_scale_triangle_sign"),
+    ("t_normal_axis_vector", "team", "normal_axis_vector"),
     ("t_now_time_scale", "team", "now_time_scale"),
     ("t_now_update", "team", "now_update_time"),
     ("t_now_world_position", "team", "now_world_position"),
@@ -119,12 +159,21 @@ SLOT_BINDINGS = (
     ("t_old_world_position", "team", "old_world_position"),
     ("t_old_world_rotation", "team", "old_world_rotation"),
     ("t_reset_pending", "team", "reset_pending"),
+    ("t_rotation_axis", "team", "rotation_axis"),
     ("t_rotation_speed_limit", "team", "rotation_speed_limit"),
     ("t_running", "team", "running"),
     ("t_scale_ratio", "team", "scale_ratio"),
     ("t_skip_count", "team", "skip_count"),
     ("t_smoothing_velocity", "team", "smoothing_velocity"),
+    ("t_spring_limit_distance", "team", "spring_limit_distance"),
+    ("t_spring_noise", "team", "spring_noise"),
+    ("t_spring_normal_limit_ratio", "team", "spring_normal_limit_ratio"),
+    ("t_spring_power", "team", "spring_power"),
     ("t_stablization_time", "team", "stablization_time"),
+    ("t_step_move_inertia_ratio", "team", "step_move_inertia_ratio"),
+    ("t_step_rotation", "team", "step_rotation"),
+    ("t_step_rotation_inertia_ratio", "team", "step_rotation_inertia_ratio"),
+    ("t_step_vector", "team", "step_vector"),
     ("t_sync_target", "team", "sync_target"),
     ("t_sync_top", "team", "sync_top"),
     ("t_teleport_distance", "team", "teleport_distance"),
@@ -137,12 +186,19 @@ SLOT_BINDINGS = (
     ("t_update_count", "team", "update_count"),
     ("t_valid", "team", "valid"),
     ("t_velocity_weight", "team", "velocity_weight"),
+    ("t_wind_blend", "team", "wind_blend"),
     ("t_wind_count", "team", "wind_count"),
+    ("t_wind_depth_weight", "team", "wind_depth_weight"),
     ("t_wind_direction", "team", "wind_direction"),
     ("t_wind_dirq", "team", "wind_dirq"),
+    ("t_wind_frequency", "team", "wind_frequency"),
     ("t_wind_influence", "team", "wind_influence"),
     ("t_wind_main", "team", "wind_main"),
+    ("t_wind_moving", "team", "wind_moving"),
+    ("t_wind_seed", "team", "wind_seed"),
+    ("t_wind_synchronization", "team", "wind_synchronization"),
     ("t_wind_time", "team", "wind_time"),
+    ("t_wind_turbulence", "team", "wind_turbulence"),
     ("t_wind_zone_id", "team", "wind_zone_id"),
     ("t_wind_zone_turbulence", "team", "wind_zone_turbulence"),
     ("t_world_inertia", "team", "world_inertia"),
@@ -188,40 +244,58 @@ _validate_bindings()
 SLOT_SOURCE = {slot_name: (storage_name, field_name)
                for slot_name, storage_name, field_name in SLOT_BINDINGS}
 
-PHASE_LAUNCH_DOMAIN = {phase_name: launch_domain
-                       for phase_name, _kernel, launch_domain, _launch_strategy
-                       in _phases.PHASE_TABLE}
+PHASE_NAMES = tuple(phase_name for phase_name, _passes in _phases.PHASE_TABLE)
 
-PHASE_LAUNCH_STRATEGY = {phase_name: launch_strategy
-                         for phase_name, _kernel, _launch_domain, launch_strategy
-                         in _phases.PHASE_TABLE}
+PHASE_PASSES = {phase_name: passes for phase_name, passes in _phases.PHASE_TABLE}
 
-PHASE_KERNEL = {phase_name: kernel
-                for phase_name, kernel, _launch_domain, _launch_strategy
-                in _phases.PHASE_TABLE}
+PHASE_LAUNCH_DOMAINS = {phase_name: tuple(launch_domain for _kernel, launch_domain in passes)
+                        for phase_name, passes in _phases.PHASE_TABLE}
 
 
 def argument_names(kernel):
     return tuple(argument.label for argument in kernel.adj.args)
 
 
+def phase_argument_names(phase_name):
+    return argument_names(PHASE_PASSES[phase_name][0][0])
+
+
+def _validate_pass_name(phase_name, kernel_key, pass_count):
+    if pass_count == 1:
+        assert kernel_key == phase_name, \
+            "phase %s runs a single pass so its kernel has to carry the name of the phase, " \
+            "the row carries %s" % (phase_name, kernel_key)
+        return
+    assert kernel_key.startswith(phase_name + "_") and len(kernel_key) > len(phase_name) + 1, \
+        "phase %s runs several passes so every pass kernel has to be named %s_<pass>, the " \
+        "row carries %s" % (phase_name, phase_name, kernel_key)
+
+
 def _validate_phase_table():
     seen = set()
-    for phase_name, kernel, launch_domain, launch_strategy in _phases.PHASE_TABLE:
+    seen_kernels = set()
+    for phase_name, passes in _phases.PHASE_TABLE:
         assert phase_name not in seen, "phase %s is declared twice" % phase_name
         seen.add(phase_name)
-        assert kernel.key == phase_name, \
-            "phase row %s carries the kernel %s, a row must carry the kernel of the same name" \
-            % (phase_name, kernel.key)
-        assert launch_domain in _state.DOMAIN_NAMES, \
-            "phase %s launches over %r which is not a state domain" % (phase_name, launch_domain)
-        assert launch_strategy in _plan.LAUNCH_STRATEGIES, \
-            "phase %s declares the launch strategy %r, only %r are defined" \
-            % (phase_name, launch_strategy, _plan.LAUNCH_STRATEGIES)
-        for name in argument_names(kernel):
-            assert name in SLOT_SOURCE or name in SCALAR_NAMES, \
-                "phase %s takes the argument %s which is neither a bound slot nor a declared " \
-                "scalar" % (phase_name, name)
+        assert passes, \
+            "phase %s declares no pass, a phase is at least one kernel launch" % phase_name
+        signature = argument_names(passes[0][0])
+        for kernel, launch_domain in passes:
+            assert kernel.key not in seen_kernels, \
+                "the kernel %s appears in more than one phase pass" % kernel.key
+            seen_kernels.add(kernel.key)
+            _validate_pass_name(phase_name, kernel.key, len(passes))
+            assert launch_domain in _state.DOMAIN_NAMES, \
+                "phase %s launches a pass over %r which is not a state domain" \
+                % (phase_name, launch_domain)
+            assert argument_names(kernel) == signature, \
+                "phase %s pass %s takes %r while its first pass takes %r, every pass of a " \
+                "phase carries the signature of the reference phase" \
+                % (phase_name, kernel.key, list(argument_names(kernel)), list(signature))
+            for name in argument_names(kernel):
+                assert name in SLOT_SOURCE or name in SCALAR_NAMES, \
+                    "phase %s takes the argument %s which is neither a bound slot nor a " \
+                    "declared scalar" % (phase_name, name)
 
 
 _validate_phase_table()
@@ -241,9 +315,7 @@ def phase_inputs(state, kernel, scalars):
 
 
 def record_phase(plan, state, phase_name, scalars):
-    kernel = PHASE_KERNEL[phase_name]
-    launch_domain = PHASE_LAUNCH_DOMAIN[phase_name]
-    launch_strategy = PHASE_LAUNCH_STRATEGY[phase_name]
-    plan.record(kernel,
-                _plan.launch_dimension(launch_strategy, state.element_count(launch_domain)),
-                phase_inputs(state, kernel, scalars))
+    for kernel, launch_domain in PHASE_PASSES[phase_name]:
+        plan.record(kernel,
+                    _plan.launch_dimension(state.element_count(launch_domain)),
+                    phase_inputs(state, kernel, scalars))

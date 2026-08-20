@@ -11,18 +11,8 @@ LEVEL_STRATEGY_SPLIT = "split"
 LEVEL_STRATEGY_BLOCK = "block"
 LEVEL_STRATEGIES = (LEVEL_STRATEGY_SPLIT, LEVEL_STRATEGY_BLOCK)
 
-LAUNCH_PER_ELEMENT = "per_element"
-LAUNCH_SINGLE_BLOCK = "single_block"
-LAUNCH_STRATEGIES = (LAUNCH_PER_ELEMENT, LAUNCH_SINGLE_BLOCK)
-
-
-def launch_dimension(launch_strategy, element_count):
-    if launch_strategy == LAUNCH_PER_ELEMENT:
-        return (int(element_count),)
-    if launch_strategy == LAUNCH_SINGLE_BLOCK:
-        return (LAUNCH_BLOCK_DIMENSION,)
-    raise ValueError("unknown launch strategy %r, expected one of %r"
-                     % (launch_strategy, LAUNCH_STRATEGIES))
+def launch_dimension(element_count):
+    return (int(element_count),)
 
 
 def _normalize_dimension(dimension):
