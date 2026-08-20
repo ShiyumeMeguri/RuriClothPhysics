@@ -1,8 +1,9 @@
 import warp as wp
 
 from ..cloth_kernel import defs as _defs
+from . import policy
 
-wp.set_module_options({"fuse_fp": False})
+wp.set_module_options(policy.MODULE_OPTIONS)
 
 DEPTH_MASS = wp.constant(float(_defs.DEPTH_MASS))
 FRICTION_MASS = wp.constant(float(_defs.FRICTION_MASS))
