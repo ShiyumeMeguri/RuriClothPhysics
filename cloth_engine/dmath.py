@@ -14,6 +14,16 @@ PI = wp.constant(3.14159265358979)
 
 
 @wp.func
+def negate(x: wp.float32):
+    return x * wp.float32(-1.0)
+
+
+@wp.func
+def negate(x: wp.float64):
+    return x * wp.float64(-1.0)
+
+
+@wp.func
 def fsign(x: float):
     if x > 0.0:
         return 1.0
@@ -102,7 +112,7 @@ def quat_mul(ax: float, ay: float, az: float, aw: float,
 
 @wp.func
 def quat_inverse(x: float, y: float, z: float, w: float):
-    return -x, -y, -z, w
+    return negate(x), negate(y), negate(z), w
 
 
 @wp.func
@@ -133,11 +143,11 @@ def quat_slerp(ax: float, ay: float, az: float, aw: float,
     cz = bz
     cw = bw
     if d < 0.0:
-        cx = -bx
-        cy = -by
-        cz = -bz
-        cw = -bw
-        d = -d
+        cx = negate(bx)
+        cy = negate(by)
+        cz = negate(bz)
+        cw = negate(bw)
+        d = negate(d)
     d = clamp1(d)
     w1 = 1.0 - t
     w2 = t
@@ -161,47 +171,33 @@ def matrix3_to_quat(m00: float, m10: float, m20: float,
                     m01: float, m11: float, m21: float,
                     m02: float, m12: float, m22: float):
     trace = m00 + m11 + m22
-    qx = 0.0
-    qy = 0.0
-    qz = 0.0
-    qw = 1.0
     if trace > 0.0:
         s0 = wp.sqrt(fmax2(trace + 1.0, 0.0)) * 2.0
         s0s = s0
         if s0 <= 1.0e-30:
             s0s = 1.0
-        qx = (m21 - m12) / s0s
-        qy = (m02 - m20) / s0s
-        qz = (m10 - m01) / s0s
-        qw = 0.25 * s0
-    elif m00 >= m11 and m00 >= m22:
+        return quat_normalize((m21 - m12) / s0s, (m02 - m20) / s0s, (m10 - m01) / s0s,
+                              0.25 * s0)
+    if m00 >= m11 and m00 >= m22:
         s1 = wp.sqrt(fmax2(1.0 + m00 - m11 - m22, 0.0)) * 2.0
         s1s = s1
         if s1 <= 1.0e-30:
             s1s = 1.0
-        qx = 0.25 * s1
-        qy = (m01 + m10) / s1s
-        qz = (m02 + m20) / s1s
-        qw = (m21 - m12) / s1s
-    elif m11 >= m22:
+        return quat_normalize(0.25 * s1, (m01 + m10) / s1s, (m02 + m20) / s1s,
+                              (m21 - m12) / s1s)
+    if m11 >= m22:
         s2 = wp.sqrt(fmax2(1.0 + m11 - m00 - m22, 0.0)) * 2.0
         s2s = s2
         if s2 <= 1.0e-30:
             s2s = 1.0
-        qx = (m01 + m10) / s2s
-        qy = 0.25 * s2
-        qz = (m12 + m21) / s2s
-        qw = (m02 - m20) / s2s
-    else:
-        s3 = wp.sqrt(fmax2(1.0 + m22 - m00 - m11, 0.0)) * 2.0
-        s3s = s3
-        if s3 <= 1.0e-30:
-            s3s = 1.0
-        qx = (m02 + m20) / s3s
-        qy = (m12 + m21) / s3s
-        qz = 0.25 * s3
-        qw = (m10 - m01) / s3s
-    return quat_normalize(qx, qy, qz, qw)
+        return quat_normalize((m01 + m10) / s2s, 0.25 * s2, (m12 + m21) / s2s,
+                              (m02 - m20) / s2s)
+    s3 = wp.sqrt(fmax2(1.0 + m22 - m00 - m11, 0.0)) * 2.0
+    s3s = s3
+    if s3 <= 1.0e-30:
+        s3s = 1.0
+    return quat_normalize((m02 + m20) / s3s, (m12 + m21) / s3s, 0.25 * s3,
+                          (m10 - m01) / s3s)
 
 
 @wp.func
@@ -221,8 +217,8 @@ def to_rotation(nx: float, ny: float, nz: float, tx: float, ty: float, tz: float
 @wp.func
 def alt_axis_anti(v1x: float, v1y: float, v1z: float):
     if v1x > v1y and v1x > v1z:
-        return -v1z, 0.0, v1x
-    return 0.0, v1z, -v1y
+        return negate(v1z), 0.0, v1x
+    return 0.0, v1z, negate(v1y)
 
 
 @wp.func
@@ -320,7 +316,7 @@ def closest_pt_segment_segment(p1x: float, p1y: float, p1z: float,
     t = (b * s + f) / safe_e
 
     if t < 0.0:
-        s = saturate(-c / safe_a)
+        s = saturate(negate(c) / safe_a)
     elif t > 1.0:
         s = saturate((b - c) / safe_a)
     if t < 0.0:
@@ -333,7 +329,7 @@ def closest_pt_segment_segment(p1x: float, p1y: float, p1z: float,
         t = saturate(f / safe_e)
     if second:
         t = 0.0
-        s = saturate(-c / safe_a)
+        s = saturate(negate(c) / safe_a)
     if both:
         s = 0.0
         t = 0.0
@@ -556,14 +552,14 @@ def euler_yx(angle_x: float, angle_y: float):
     cx = wp.cos(hx)
     sy = wp.sin(hy)
     cy = wp.cos(hy)
-    return cy * sx, sy * cx, -sy * sx, cy * cx
+    return cy * sx, sy * cx, negate(sy) * sx, cy * cx
 
 
 @wp.func
 def axis_quaternion(ax: float, ay: float, az: float):
     angle_y = wp.atan2(ax, az)
     flat_len = wp.sqrt(ax * ax + az * az)
-    angle_x = wp.atan2(-ay, flat_len)
+    angle_x = wp.atan2(negate(ay), flat_len)
     return euler_yx(angle_x, angle_y)
 
 
@@ -628,7 +624,7 @@ def intersect_point_plane_dist(px: float, py: float, pz: float,
     l = length3(gvx, gvy, gvz)
     inside = (dx * vx + dy * vy + dz * vz) < 0.0
     if inside:
-        return -l, qx - gvx, qy - gvy, qz - gvz
+        return negate(l), qx - gvx, qy - gvy, qz - gvz
     return l, qx, qy, qz
 
 
@@ -792,9 +788,9 @@ def trs_inverse_f64(px: float, py: float, pz: float,
     zero = wp.float64(0.0)
     one = wp.float64(1.0)
     return wp.mat44d(
-        inv0 * r00, inv0 * r10, inv0 * r20, -inv0 * (r00 * tx + r10 * ty + r20 * tz),
-        inv1 * r01, inv1 * r11, inv1 * r21, -inv1 * (r01 * tx + r11 * ty + r21 * tz),
-        inv2 * r02, inv2 * r12, inv2 * r22, -inv2 * (r02 * tx + r12 * ty + r22 * tz),
+        inv0 * r00, inv0 * r10, inv0 * r20, negate(inv0) * (r00 * tx + r10 * ty + r20 * tz),
+        inv1 * r01, inv1 * r11, inv1 * r21, negate(inv1) * (r01 * tx + r11 * ty + r21 * tz),
+        inv2 * r02, inv2 * r12, inv2 * r22, negate(inv2) * (r02 * tx + r12 * ty + r22 * tz),
         zero, zero, zero, one)
 
 

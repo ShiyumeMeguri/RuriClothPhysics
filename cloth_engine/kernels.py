@@ -24,6 +24,12 @@ WIND_BASE_SPEED = wp.constant(float(_defs.WIND_BASE_SPEED))
 WIND_TURBULENCE_ANGLE = wp.constant(float(_defs.WIND_TURBULENCE_ANGLE))
 WIND_MIN_SPEED = wp.constant(float(_defs.WIND_MIN_SPEED))
 DEG2RAD = wp.constant(float(math.pi / 180.0))
+ANGLE_LIMIT_ROT_RATIO = wp.constant(float(_defs.ANGLE_LIMIT_ROTATION_RATIO))
+ANGLE_LIMIT_ATTENUATION = wp.constant(float(_defs.ANGLE_LIMIT_ATTENUATION))
+COLLIDER_SPHERE = wp.constant(int(_defs.COLLIDER_SPHERE))
+COLLIDER_CAPSULE = wp.constant(int(_defs.COLLIDER_CAPSULE))
+MAX_DISTANCE_RATIO_FUTURE_PREDICTION = wp.constant(
+    float(_defs.MAX_DISTANCE_RATIO_FUTURE_PREDICTION))
 
 
 @wp.func
@@ -153,7 +159,7 @@ def _edge_sphere(p0x: float, p0y: float, p0z: float, p1x: float, p1y: float, p1z
     c1x = nx * (b1 * scale)
     c1y = ny * (b1 * scale)
     c1z = nz * (b1 * scale)
-    dist = near_dist if no_contact else -cval
+    dist = near_dist if no_contact else dmath.negate(cval)
     valid = overlap and (not degenerate) and (not miss)
     if not valid:
         dist = wp.inf
@@ -242,7 +248,7 @@ def _edge_capsule(p0x: float, p0y: float, p0z: float, p1x: float, p1y: float, p1
     c1x = nx * (b1 * scale)
     c1y = ny * (b1 * scale)
     c1z = nz * (b1 * scale)
-    dist = near_dist if no_contact else -cval
+    dist = near_dist if no_contact else dmath.negate(cval)
     valid = overlap and (not degenerate) and (not miss)
     if not valid:
         dist = wp.inf
@@ -493,3 +499,1064 @@ def _rotate_vec(arr: wp.array2d(dtype=float), p: int,
     arr[p, 0] = vx
     arr[p, 1] = vy
     arr[p, 2] = vz
+
+
+@wp.func
+def do_advance(i: int, fdt: float, sim_dt: float, max_sim_count: int, global_time_scale: float,
+               time_reset: wp.array(dtype=int),
+               time: wp.array(dtype=float),
+               old_time: wp.array(dtype=float),
+               now_update: wp.array(dtype=float),
+               old_update: wp.array(dtype=float),
+               frame_update: wp.array(dtype=float),
+               frame_old: wp.array(dtype=float),
+               frame_dt: wp.array(dtype=float),
+               time_scale: wp.array(dtype=float),
+               now_time_scale: wp.array(dtype=float),
+               update_count: wp.array(dtype=int),
+               skip_count: wp.array(dtype=int),
+               running: wp.array(dtype=int)):
+    reset = time_reset[i] != 0
+    t_time = 0.0 if reset else time[i]
+    t_now_update = 0.0 if reset else now_update[i]
+    t_old_update = 0.0 if reset else old_update[i]
+    t_frame_update = 0.0 if reset else frame_update[i]
+    t_frame_old = 0.0 if reset else frame_old[i]
+
+    frame_dt[i] = fdt
+    ts = time_scale[i] * global_time_scale
+    now_time_scale[i] = ts
+    add_time = fdt * ts
+    new_time = t_time + add_time
+    interval = new_time - t_now_update
+    uc = int(interval / sim_dt)
+    clamped = uc if uc < max_sim_count else max_sim_count
+    skip = uc - clamped
+    if skip > 0:
+        new_time = new_time - sim_dt * float(skip)
+    guard = (clamped > 0) and (add_time == 0.0)
+    if guard:
+        clamped = int(0)
+        skip = int(0)
+        new_now_update = new_time - sim_dt + 0.0001
+    else:
+        new_now_update = t_now_update
+    updated = clamped > 0
+
+    old_time[i] = t_time
+    time[i] = new_time
+    now_update[i] = new_now_update
+    if updated:
+        frame_old[i] = t_frame_update
+        frame_update[i] = new_time
+        old_update[i] = new_now_update
+    else:
+        frame_old[i] = t_frame_old
+        frame_update[i] = t_frame_update
+        old_update[i] = t_old_update
+    update_count[i] = clamped
+    skip_count[i] = skip
+    running[i] = 1 if updated else 0
+
+
+@wp.func
+def do_particles_frame_pre(p: int, p_team: wp.array(dtype=int),
+                           p_positions: wp.array2d(dtype=float),
+                           p_rotations: wp.array2d(dtype=float),
+                           p_next_positions: wp.array2d(dtype=float),
+                           p_old_positions: wp.array2d(dtype=float),
+                           p_old_rotations: wp.array2d(dtype=float),
+                           p_base_positions: wp.array2d(dtype=float),
+                           p_base_rotations: wp.array2d(dtype=float),
+                           p_old_anim_positions: wp.array2d(dtype=float),
+                           p_old_anim_rotations: wp.array2d(dtype=float),
+                           p_velocity_positions: wp.array2d(dtype=float),
+                           p_display_positions: wp.array2d(dtype=float),
+                           p_velocities: wp.array2d(dtype=float),
+                           p_real_velocities: wp.array2d(dtype=float),
+                           p_friction: wp.array(dtype=float),
+                           p_static_friction: wp.array(dtype=float),
+                           p_collision_normals: wp.array2d(dtype=float),
+                           t_reset_pending: wp.array(dtype=int),
+                           t_neg_teleport: wp.array(dtype=int),
+                           t_neg_matrix: wp.array(dtype=wp.mat44d),
+                           t_inertia_shift: wp.array(dtype=int),
+                           t_shift_vec: wp.array2d(dtype=float),
+                           t_shift_rot: wp.array2d(dtype=float),
+                           t_old_cwp: wp.array2d(dtype=float)):
+    team = p_team[p]
+    if t_reset_pending[team] != 0:
+        for j in range(3):
+            pv = p_positions[p, j]
+            p_next_positions[p, j] = pv
+            p_old_positions[p, j] = pv
+            p_base_positions[p, j] = pv
+            p_old_anim_positions[p, j] = pv
+            p_velocity_positions[p, j] = pv
+            p_display_positions[p, j] = pv
+            p_velocities[p, j] = 0.0
+            p_real_velocities[p, j] = 0.0
+            p_collision_normals[p, j] = 0.0
+        for j in range(4):
+            rv = p_rotations[p, j]
+            p_old_rotations[p, j] = rv
+            p_base_rotations[p, j] = rv
+            p_old_anim_rotations[p, j] = rv
+        p_friction[p] = 0.0
+        p_static_friction[p] = 0.0
+        return
+    neg = t_neg_teleport[team] != 0
+    shift = t_inertia_shift[team] != 0
+    if not (neg or shift):
+        return
+    if neg:
+        m = t_neg_matrix[team]
+        _neg_transform_pose(p_old_positions, p_old_rotations, p, m, 1.0, 1.0)
+        _neg_transform_pose(p_old_anim_positions, p_old_anim_rotations, p, m, 1.0, 1.0)
+        dpx, dpy, dpz = dmath.transform_point(m, p_display_positions[p, 0],
+                                              p_display_positions[p, 1],
+                                              p_display_positions[p, 2])
+        p_display_positions[p, 0] = dpx
+        p_display_positions[p, 1] = dpy
+        p_display_positions[p, 2] = dpz
+        vx, vy, vz = dmath.transform_vector(m, p_velocities[p, 0], p_velocities[p, 1],
+                                            p_velocities[p, 2])
+        p_velocities[p, 0] = vx
+        p_velocities[p, 1] = vy
+        p_velocities[p, 2] = vz
+        rvx, rvy, rvz = dmath.transform_vector(m, p_real_velocities[p, 0],
+                                               p_real_velocities[p, 1],
+                                               p_real_velocities[p, 2])
+        p_real_velocities[p, 0] = rvx
+        p_real_velocities[p, 1] = rvy
+        p_real_velocities[p, 2] = rvz
+    if shift:
+        cpx = t_old_cwp[team, 0]
+        cpy = t_old_cwp[team, 1]
+        cpz = t_old_cwp[team, 2]
+        svx = t_shift_vec[team, 0]
+        svy = t_shift_vec[team, 1]
+        svz = t_shift_vec[team, 2]
+        srx = t_shift_rot[team, 0]
+        sry = t_shift_rot[team, 1]
+        srz = t_shift_rot[team, 2]
+        srw = t_shift_rot[team, 3]
+        _shift_point(p_old_positions, p, cpx, cpy, cpz, svx, svy, svz, srx, sry, srz, srw)
+        _shift_point(p_old_anim_positions, p, cpx, cpy, cpz, svx, svy, svz, srx, sry, srz, srw)
+        _shift_point(p_display_positions, p, cpx, cpy, cpz, svx, svy, svz, srx, sry, srz, srw)
+        _premul_quat(p_old_rotations, p, srx, sry, srz, srw)
+        _premul_quat(p_old_anim_rotations, p, srx, sry, srz, srw)
+        _rotate_vec(p_velocities, p, srx, sry, srz, srw)
+        _rotate_vec(p_real_velocities, p, srx, sry, srz, srw)
+
+
+@wp.func
+def do_collider_frame_pre(ci: int, c_team: wp.array(dtype=int),
+                          c_enabled: wp.array(dtype=int),
+                          c_enabled_prev: wp.array(dtype=int),
+                          c_active: wp.array(dtype=int),
+                          c_input_positions: wp.array2d(dtype=float),
+                          c_input_rotations: wp.array2d(dtype=float),
+                          c_input_tips: wp.array2d(dtype=float),
+                          c_input_radii: wp.array2d(dtype=float),
+                          c_frame_pos: wp.array2d(dtype=float),
+                          c_frame_rot: wp.array2d(dtype=float),
+                          c_frame_tip: wp.array2d(dtype=float),
+                          c_frame_radius: wp.array2d(dtype=float),
+                          c_old_frame_pos: wp.array2d(dtype=float),
+                          c_old_frame_rot: wp.array2d(dtype=float),
+                          c_old_frame_tip: wp.array2d(dtype=float),
+                          c_now_pos: wp.array2d(dtype=float),
+                          c_now_rot: wp.array2d(dtype=float),
+                          c_now_tip: wp.array2d(dtype=float),
+                          c_old_pos: wp.array2d(dtype=float),
+                          c_old_rot: wp.array2d(dtype=float),
+                          c_old_tip: wp.array2d(dtype=float),
+                          t_reset_pending: wp.array(dtype=int),
+                          t_neg_teleport: wp.array(dtype=int),
+                          t_neg_matrix: wp.array(dtype=wp.mat44d),
+                          t_neg_change: wp.array2d(dtype=float),
+                          t_inertia_shift: wp.array(dtype=int),
+                          t_shift_vec: wp.array2d(dtype=float),
+                          t_shift_rot: wp.array2d(dtype=float),
+                          t_old_cwp: wp.array2d(dtype=float)):
+    enabled_now = c_enabled[ci] != 0
+    rising = enabled_now and (c_enabled_prev[ci] == 0)
+    c_active[ci] = 1 if enabled_now else 0
+    c_enabled_prev[ci] = 1 if enabled_now else 0
+    if not enabled_now:
+        return
+    team = c_team[ci]
+    for j in range(3):
+        c_frame_pos[ci, j] = c_input_positions[ci, j]
+        c_frame_tip[ci, j] = c_input_tips[ci, j]
+    for j in range(4):
+        c_frame_rot[ci, j] = c_input_rotations[ci, j]
+    c_frame_radius[ci, 0] = c_input_radii[ci, 0]
+    c_frame_radius[ci, 1] = c_input_radii[ci, 1]
+    reset = (t_reset_pending[team] != 0) or rising
+    if reset:
+        for j in range(3):
+            fp = c_frame_pos[ci, j]
+            c_old_frame_pos[ci, j] = fp
+            c_now_pos[ci, j] = fp
+            c_old_pos[ci, j] = fp
+            ft = c_frame_tip[ci, j]
+            c_old_frame_tip[ci, j] = ft
+            c_now_tip[ci, j] = ft
+            c_old_tip[ci, j] = ft
+        for j in range(4):
+            fr = c_frame_rot[ci, j]
+            c_old_frame_rot[ci, j] = fr
+            c_now_rot[ci, j] = fr
+            c_old_rot[ci, j] = fr
+        return
+    if t_neg_teleport[team] != 0:
+        m = t_neg_matrix[team]
+        f1 = t_neg_change[team, 1]
+        f2 = t_neg_change[team, 2]
+        _neg_transform_pose(c_old_frame_pos, c_old_frame_rot, ci, m, f1, f2)
+        _neg_transform_pose(c_now_pos, c_now_rot, ci, m, f1, f2)
+        _neg_transform_pose(c_old_pos, c_old_rot, ci, m, f1, f2)
+        _neg_transform_point(c_old_frame_tip, ci, m)
+        _neg_transform_point(c_now_tip, ci, m)
+        _neg_transform_point(c_old_tip, ci, m)
+    if t_inertia_shift[team] != 0:
+        cpx = t_old_cwp[team, 0]
+        cpy = t_old_cwp[team, 1]
+        cpz = t_old_cwp[team, 2]
+        svx = t_shift_vec[team, 0]
+        svy = t_shift_vec[team, 1]
+        svz = t_shift_vec[team, 2]
+        srx = t_shift_rot[team, 0]
+        sry = t_shift_rot[team, 1]
+        srz = t_shift_rot[team, 2]
+        srw = t_shift_rot[team, 3]
+        _shift_pose(c_old_frame_pos, c_old_frame_rot, ci, cpx, cpy, cpz, svx, svy, svz,
+                    srx, sry, srz, srw)
+        _shift_pose(c_now_pos, c_now_rot, ci, cpx, cpy, cpz, svx, svy, svz, srx, sry, srz, srw)
+        _shift_pose(c_old_pos, c_old_rot, ci, cpx, cpy, cpz, svx, svy, svz, srx, sry, srz, srw)
+        _shift_point(c_old_frame_tip, ci, cpx, cpy, cpz, svx, svy, svz, srx, sry, srz, srw)
+        _shift_point(c_now_tip, ci, cpx, cpy, cpz, svx, svy, svz, srx, sry, srz, srw)
+        _shift_point(c_old_tip, ci, cpx, cpy, cpz, svx, svy, svz, srx, sry, srz, srw)
+
+
+@wp.func
+def do_collider_start_step(ci: int, c_team: wp.array(dtype=int), c_kind: wp.array(dtype=int),
+                           c_frame_pos: wp.array2d(dtype=float),
+                           c_frame_rot: wp.array2d(dtype=float),
+                           c_frame_tip: wp.array2d(dtype=float),
+                           c_frame_radius: wp.array2d(dtype=float),
+                           c_old_frame_pos: wp.array2d(dtype=float),
+                           c_old_frame_rot: wp.array2d(dtype=float),
+                           c_old_frame_tip: wp.array2d(dtype=float),
+                           c_now_pos: wp.array2d(dtype=float),
+                           c_now_rot: wp.array2d(dtype=float),
+                           c_now_tip: wp.array2d(dtype=float),
+                           c_old_pos: wp.array2d(dtype=float),
+                           c_old_rot: wp.array2d(dtype=float),
+                           c_old_tip: wp.array2d(dtype=float),
+                           c_work_rot: wp.array2d(dtype=float),
+                           c_work_inv_old_rot: wp.array2d(dtype=float),
+                           c_work_radius: wp.array2d(dtype=float),
+                           c_work_old_pos: wp.array3d(dtype=float),
+                           c_work_next_pos: wp.array3d(dtype=float),
+                           c_work_aabb_min: wp.array2d(dtype=float),
+                           c_work_aabb_max: wp.array2d(dtype=float),
+                           t_frame_interp: wp.array(dtype=float),
+                           t_step_mir: wp.array(dtype=float),
+                           t_step_rir: wp.array(dtype=float)):
+    team = c_team[ci]
+    t = t_frame_interp[team]
+    posx = dmath.lerp(c_old_frame_pos[ci, 0], c_frame_pos[ci, 0], t)
+    posy = dmath.lerp(c_old_frame_pos[ci, 1], c_frame_pos[ci, 1], t)
+    posz = dmath.lerp(c_old_frame_pos[ci, 2], c_frame_pos[ci, 2], t)
+    tipx = dmath.lerp(c_old_frame_tip[ci, 0], c_frame_tip[ci, 0], t)
+    tipy = dmath.lerp(c_old_frame_tip[ci, 1], c_frame_tip[ci, 1], t)
+    tipz = dmath.lerp(c_old_frame_tip[ci, 2], c_frame_tip[ci, 2], t)
+    rotx, roty, rotz, rotw = dmath.quat_slerp(
+        c_old_frame_rot[ci, 0], c_old_frame_rot[ci, 1], c_old_frame_rot[ci, 2],
+        c_old_frame_rot[ci, 3],
+        c_frame_rot[ci, 0], c_frame_rot[ci, 1], c_frame_rot[ci, 2], c_frame_rot[ci, 3], t)
+    c_now_pos[ci, 0] = posx
+    c_now_pos[ci, 1] = posy
+    c_now_pos[ci, 2] = posz
+    c_now_tip[ci, 0] = tipx
+    c_now_tip[ci, 1] = tipy
+    c_now_tip[ci, 2] = tipz
+    c_now_rot[ci, 0] = rotx
+    c_now_rot[ci, 1] = roty
+    c_now_rot[ci, 2] = rotz
+    c_now_rot[ci, 3] = rotw
+    mir = t_step_mir[team]
+    rir = t_step_rir[team]
+    opx = dmath.lerp(c_old_pos[ci, 0], posx, mir)
+    opy = dmath.lerp(c_old_pos[ci, 1], posy, mir)
+    opz = dmath.lerp(c_old_pos[ci, 2], posz, mir)
+    otx = dmath.lerp(c_old_tip[ci, 0], tipx, mir)
+    oty = dmath.lerp(c_old_tip[ci, 1], tipy, mir)
+    otz = dmath.lerp(c_old_tip[ci, 2], tipz, mir)
+    orx, ory, orz, orw = dmath.quat_slerp(
+        c_old_rot[ci, 0], c_old_rot[ci, 1], c_old_rot[ci, 2], c_old_rot[ci, 3],
+        rotx, roty, rotz, rotw, rir)
+    c_old_pos[ci, 0] = opx
+    c_old_pos[ci, 1] = opy
+    c_old_pos[ci, 2] = opz
+    c_old_tip[ci, 0] = otx
+    c_old_tip[ci, 1] = oty
+    c_old_tip[ci, 2] = otz
+    c_old_rot[ci, 0] = orx
+    c_old_rot[ci, 1] = ory
+    c_old_rot[ci, 2] = orz
+    c_old_rot[ci, 3] = orw
+    c_work_rot[ci, 0] = rotx
+    c_work_rot[ci, 1] = roty
+    c_work_rot[ci, 2] = rotz
+    c_work_rot[ci, 3] = rotw
+    iox, ioy, ioz, iow = dmath.quat_inverse(orx, ory, orz, orw)
+    c_work_inv_old_rot[ci, 0] = iox
+    c_work_inv_old_rot[ci, 1] = ioy
+    c_work_inv_old_rot[ci, 2] = ioz
+    c_work_inv_old_rot[ci, 3] = iow
+    kind = c_kind[ci]
+    if kind == COLLIDER_SPHERE:
+        radius = c_frame_radius[ci, 0]
+        c_work_radius[ci, 0] = radius
+        c_work_radius[ci, 1] = radius
+        c_work_old_pos[ci, 0, 0] = opx
+        c_work_old_pos[ci, 0, 1] = opy
+        c_work_old_pos[ci, 0, 2] = opz
+        c_work_next_pos[ci, 0, 0] = posx
+        c_work_next_pos[ci, 0, 1] = posy
+        c_work_next_pos[ci, 0, 2] = posz
+        c_work_aabb_min[ci, 0] = dmath.fmin2(opx, posx) - radius
+        c_work_aabb_min[ci, 1] = dmath.fmin2(opy, posy) - radius
+        c_work_aabb_min[ci, 2] = dmath.fmin2(opz, posz) - radius
+        c_work_aabb_max[ci, 0] = dmath.fmax2(opx, posx) + radius
+        c_work_aabb_max[ci, 1] = dmath.fmax2(opy, posy) + radius
+        c_work_aabb_max[ci, 2] = dmath.fmax2(opz, posz) + radius
+    elif kind == COLLIDER_CAPSULE:
+        start_radius = c_frame_radius[ci, 0]
+        end_radius = c_frame_radius[ci, 1]
+        sox = opx
+        soy = opy
+        soz = opz
+        eox = otx
+        eoy = oty
+        eoz = otz
+        snx = posx
+        sny = posy
+        snz = posz
+        enx = tipx
+        eny = tipy
+        enz = tipz
+        c_work_radius[ci, 0] = start_radius
+        c_work_radius[ci, 1] = end_radius
+        c_work_old_pos[ci, 0, 0] = sox
+        c_work_old_pos[ci, 0, 1] = soy
+        c_work_old_pos[ci, 0, 2] = soz
+        c_work_old_pos[ci, 1, 0] = eox
+        c_work_old_pos[ci, 1, 1] = eoy
+        c_work_old_pos[ci, 1, 2] = eoz
+        c_work_next_pos[ci, 0, 0] = snx
+        c_work_next_pos[ci, 0, 1] = sny
+        c_work_next_pos[ci, 0, 2] = snz
+        c_work_next_pos[ci, 1, 0] = enx
+        c_work_next_pos[ci, 1, 1] = eny
+        c_work_next_pos[ci, 1, 2] = enz
+        c_work_aabb_min[ci, 0] = dmath.fmin2(dmath.fmin2(sox, snx) - start_radius,
+                                             dmath.fmin2(eox, enx) - end_radius)
+        c_work_aabb_min[ci, 1] = dmath.fmin2(dmath.fmin2(soy, sny) - start_radius,
+                                             dmath.fmin2(eoy, eny) - end_radius)
+        c_work_aabb_min[ci, 2] = dmath.fmin2(dmath.fmin2(soz, snz) - start_radius,
+                                             dmath.fmin2(eoz, enz) - end_radius)
+        c_work_aabb_max[ci, 0] = dmath.fmax2(dmath.fmax2(sox, snx) + start_radius,
+                                             dmath.fmax2(eox, enx) + end_radius)
+        c_work_aabb_max[ci, 1] = dmath.fmax2(dmath.fmax2(soy, sny) + start_radius,
+                                             dmath.fmax2(eoy, eny) + end_radius)
+        c_work_aabb_max[ci, 2] = dmath.fmax2(dmath.fmax2(soz, snz) + start_radius,
+                                             dmath.fmax2(eoz, enz) + end_radius)
+    else:
+        nx, ny, nz = dmath.quat_rotate(rotx, roty, rotz, rotw, 0.0, 0.0, 1.0)
+        c_work_old_pos[ci, 0, 0] = nx
+        c_work_old_pos[ci, 0, 1] = ny
+        c_work_old_pos[ci, 0, 2] = nz
+        c_work_next_pos[ci, 0, 0] = posx
+        c_work_next_pos[ci, 0, 1] = posy
+        c_work_next_pos[ci, 0, 2] = posz
+        c_work_aabb_min[ci, 0] = -wp.inf
+        c_work_aabb_min[ci, 1] = -wp.inf
+        c_work_aabb_min[ci, 2] = -wp.inf
+        c_work_aabb_max[ci, 0] = wp.inf
+        c_work_aabb_max[ci, 1] = wp.inf
+        c_work_aabb_max[ci, 2] = wp.inf
+
+
+@wp.func
+def do_collider_end_step(ci: int, c_now_pos: wp.array2d(dtype=float),
+                         c_now_rot: wp.array2d(dtype=float),
+                         c_now_tip: wp.array2d(dtype=float),
+                         c_old_pos: wp.array2d(dtype=float),
+                         c_old_rot: wp.array2d(dtype=float),
+                         c_old_tip: wp.array2d(dtype=float)):
+    for j in range(3):
+        c_old_pos[ci, j] = c_now_pos[ci, j]
+        c_old_tip[ci, j] = c_now_tip[ci, j]
+    for j in range(4):
+        c_old_rot[ci, j] = c_now_rot[ci, j]
+
+
+@wp.func
+def do_collider_frame_post(ci: int, c_frame_pos: wp.array2d(dtype=float),
+                           c_frame_rot: wp.array2d(dtype=float),
+                           c_frame_tip: wp.array2d(dtype=float),
+                           c_old_frame_pos: wp.array2d(dtype=float),
+                           c_old_frame_rot: wp.array2d(dtype=float),
+                           c_old_frame_tip: wp.array2d(dtype=float)):
+    for j in range(3):
+        c_old_frame_pos[ci, j] = c_frame_pos[ci, j]
+        c_old_frame_tip[ci, j] = c_frame_tip[ci, j]
+    for j in range(4):
+        c_old_frame_rot[ci, j] = c_frame_rot[ci, j]
+
+
+@wp.func
+def self_aabb_overlap(a_min: wp.array2d(dtype=float), a_max: wp.array2d(dtype=float), i: int,
+                      b_min: wp.array2d(dtype=float), b_max: wp.array2d(dtype=float), j: int):
+    return (a_min[i, 0] <= b_max[j, 0] and a_max[i, 0] >= b_min[j, 0]
+            and a_min[i, 1] <= b_max[j, 1] and a_max[i, 1] >= b_min[j, 1]
+            and a_min[i, 2] <= b_max[j, 2] and a_max[i, 2] >= b_min[j, 2])
+
+
+@wp.func
+def self_connection_shared(a_particles: wp.array2d(dtype=int), i: int,
+                           b_particles: wp.array2d(dtype=int), j: int):
+    for x in range(3):
+        pa = a_particles[i, x]
+        if pa >= 0:
+            for y in range(3):
+                pb = b_particles[j, y]
+                if pb >= 0 and pa == pb:
+                    return True
+    return False
+
+
+@wp.func
+def do_angle_limit(v: int, p: int, vt: int, c_inv: float, p_inv: float, p_move: bool,
+                   p_next_positions: wp.array2d(dtype=float),
+                   p_velocity_positions: wp.array2d(dtype=float),
+                   p_albuf_rotation: wp.array2d(dtype=float),
+                   p_albuf_local_pos: wp.array2d(dtype=float),
+                   p_albuf_local_rot: wp.array2d(dtype=float),
+                   p_albuf_length: wp.array(dtype=float),
+                   p_depth: wp.array(dtype=float),
+                   t_angle_limit_lut: wp.array2d(dtype=float),
+                   t_angle_limit_stiffness: wp.array(dtype=float)):
+    prx = p_albuf_rotation[p, 0]
+    pry = p_albuf_rotation[p, 1]
+    prz = p_albuf_rotation[p, 2]
+    prw = p_albuf_rotation[p, 3]
+    lpx = p_albuf_local_pos[v, 0]
+    lpy = p_albuf_local_pos[v, 1]
+    lpz = p_albuf_local_pos[v, 2]
+    lrx = p_albuf_local_rot[v, 0]
+    lry = p_albuf_local_rot[v, 1]
+    lrz = p_albuf_local_rot[v, 2]
+    lrw = p_albuf_local_rot[v, 3]
+    cpx = p_next_positions[v, 0]
+    cpy = p_next_positions[v, 1]
+    cpz = p_next_positions[v, 2]
+    ppx = p_next_positions[p, 0]
+    ppy = p_next_positions[p, 1]
+    ppz = p_next_positions[p, 2]
+    vvx = cpx - ppx
+    vvy = cpy - ppy
+    vvz = cpz - ppz
+    vlen = dmath.length3(vvx, vvy, vvz)
+    skip1 = vlen < EPSILON
+    tvx, tvy, tvz = dmath.quat_rotate(prx, pry, prz, prw, lpx, lpy, lpz)
+    tvlen = dmath.length3(tvx, tvy, tvz)
+    snap = (not skip1) and (tvlen < EPSILON)
+    if snap:
+        p_velocity_positions[v, 0] = p_velocity_positions[v, 0] + (ppx - cpx)
+        p_velocity_positions[v, 1] = p_velocity_positions[v, 1] + (ppy - cpy)
+        p_velocity_positions[v, 2] = p_velocity_positions[v, 2] + (ppz - cpz)
+        p_next_positions[v, 0] = ppx
+        p_next_positions[v, 1] = ppy
+        p_next_positions[v, 2] = ppz
+        sqx, sqy, sqz, sqw = dmath.quat_mul(prx, pry, prz, prw, lrx, lry, lrz, lrw)
+        p_albuf_rotation[v, 0] = sqx
+        p_albuf_rotation[v, 1] = sqy
+        p_albuf_rotation[v, 2] = sqz
+        p_albuf_rotation[v, 3] = sqw
+        cpx = ppx
+        cpy = ppy
+        cpz = ppz
+    work = (not skip1) and (not snap)
+    safe_vlen = vlen if vlen > 1.0e-30 else 1.0
+    uvx = vvx / safe_vlen
+    uvy = vvy / safe_vlen
+    uvz = vvz / safe_vlen
+    safe_tvlen = tvlen if tvlen > 1.0e-30 else 1.0
+    utvx = tvx / safe_tvlen
+    utvy = tvy / safe_tvlen
+    utvz = tvz / safe_tvlen
+    blen = p_albuf_length[v]
+    vlen2 = dmath.lerp(vlen, blen, 0.5)
+    work = work and (blen >= EPSILON) and (vlen2 >= EPSILON)
+    vsx = uvx * vlen2
+    vsy = uvy * vlen2
+    vsz = uvz * vlen2
+    ang = dmath.angle_between(vsx, vsy, vsz, utvx, utvy, utvz)
+    max_angle = DEG2RAD * dmath.evaluate_team_lut(t_angle_limit_lut, vt, p_depth[v])
+    over = ang > max_angle
+    recovery = dmath.lerp(ang, max_angle, t_angle_limit_stiffness[vt])
+    clx, cly, clz = dmath.clamp_angle_vector(vsx, vsy, vsz, utvx, utvy, utvz, recovery)
+    if over and work:
+        rvx = clx
+        rvy = cly
+        rvz = clz
+    else:
+        rvx = vsx
+        rvy = vsy
+        rvz = vsz
+    rpx = ppx + vsx * ANGLE_LIMIT_ROT_RATIO
+    rpy = ppy + vsy * ANGLE_LIMIT_ROT_RATIO
+    rpz = ppz + vsz * ANGLE_LIMIT_ROT_RATIO
+    pfx = rpx - rvx * ANGLE_LIMIT_ROT_RATIO
+    pfy = rpy - rvy * ANGLE_LIMIT_ROT_RATIO
+    pfz = rpz - rvz * ANGLE_LIMIT_ROT_RATIO
+    cfx = rpx + rvx * (1.0 - ANGLE_LIMIT_ROT_RATIO)
+    cfy = rpy + rvy * (1.0 - ANGLE_LIMIT_ROT_RATIO)
+    cfz = rpz + rvz * (1.0 - ANGLE_LIMIT_ROT_RATIO)
+    if work:
+        paddx = (pfx - ppx) * p_inv
+        paddy = (pfy - ppy) * p_inv
+        paddz = (pfz - ppz) * p_inv
+        caddx = (cfx - cpx) * c_inv
+        caddy = (cfy - cpy) * c_inv
+        caddz = (cfz - cpz) * c_inv
+    else:
+        paddx = 0.0
+        paddy = 0.0
+        paddz = 0.0
+        caddx = 0.0
+        caddy = 0.0
+        caddz = 0.0
+    cpx = cpx + caddx
+    cpy = cpy + caddy
+    cpz = cpz + caddz
+    p_next_positions[v, 0] = cpx
+    p_next_positions[v, 1] = cpy
+    p_next_positions[v, 2] = cpz
+    p_velocity_positions[v, 0] = p_velocity_positions[v, 0] + caddx * ANGLE_LIMIT_ATTENUATION
+    p_velocity_positions[v, 1] = p_velocity_positions[v, 1] + caddy * ANGLE_LIMIT_ATTENUATION
+    p_velocity_positions[v, 2] = p_velocity_positions[v, 2] + caddz * ANGLE_LIMIT_ATTENUATION
+    if work and p_move:
+        ppx = ppx + paddx
+        ppy = ppy + paddy
+        ppz = ppz + paddz
+        p_next_positions[p, 0] = ppx
+        p_next_positions[p, 1] = ppy
+        p_next_positions[p, 2] = ppz
+        p_velocity_positions[p, 0] = p_velocity_positions[p, 0] \
+            + paddx * ANGLE_LIMIT_ATTENUATION
+        p_velocity_positions[p, 1] = p_velocity_positions[p, 1] \
+            + paddy * ANGLE_LIMIT_ATTENUATION
+        p_velocity_positions[p, 2] = p_velocity_positions[p, 2] \
+            + paddz * ANGLE_LIMIT_ATTENUATION
+    v3x = cpx - ppx
+    v3y = cpy - ppy
+    v3z = cpz - ppz
+    vlen3 = dmath.length3(v3x, v3y, v3z)
+    fix_ok = work and (vlen3 >= EPSILON)
+    safe_v3 = vlen3 if vlen3 > 1.0e-30 else 1.0
+    uv3x = v3x / safe_v3
+    uv3y = v3y / safe_v3
+    uv3z = v3z / safe_v3
+    nrx, nry, nrz, nrw = dmath.quat_mul(prx, pry, prz, prw, lrx, lry, lrz, lrw)
+    qx, qy, qz, qw = dmath.from_to_rotation(utvx, utvy, utvz, uv3x, uv3y, uv3z, 1.0, True)
+    frx, fry, frz, frw = dmath.quat_mul(qx, qy, qz, qw, nrx, nry, nrz, nrw)
+    if fix_ok:
+        p_albuf_rotation[v, 0] = frx
+        p_albuf_rotation[v, 1] = fry
+        p_albuf_rotation[v, 2] = frz
+        p_albuf_rotation[v, 3] = frw
+
+
+@wp.func
+def do_angle_restoration(v: int, p: int, vt: int, c_inv: float, p_inv: float, p_move: bool,
+                         rot_ratio: float, power3: float,
+                         p_next_positions: wp.array2d(dtype=float),
+                         p_velocity_positions: wp.array2d(dtype=float),
+                         p_albuf_restore: wp.array2d(dtype=float),
+                         p_depth: wp.array(dtype=float),
+                         t_angle_restoration_lut: wp.array2d(dtype=float),
+                         t_angle_restoration_attenuation: wp.array(dtype=float),
+                         t_angle_restoration_gravity_falloff: wp.array(dtype=float),
+                         t_gravity_dot: wp.array(dtype=float)):
+    stiff = dmath.evaluate_team_lut_clamp01(t_angle_restoration_lut, vt, p_depth[v])
+    stiff = dmath.saturate(stiff * power3)
+    gfo = dmath.lerp(1.0 - t_angle_restoration_gravity_falloff[vt], 1.0, t_gravity_dot[vt])
+    stiff = stiff * gfo
+    r_attn = t_angle_restoration_attenuation[vt]
+    cpx = p_next_positions[v, 0]
+    cpy = p_next_positions[v, 1]
+    cpz = p_next_positions[v, 2]
+    ppx = p_next_positions[p, 0]
+    ppy = p_next_positions[p, 1]
+    ppz = p_next_positions[p, 2]
+    tvx = p_albuf_restore[v, 0]
+    tvy = p_albuf_restore[v, 1]
+    tvz = p_albuf_restore[v, 2]
+    tvlen = dmath.length3(tvx, tvy, tvz)
+    snap = tvlen < EPSILON
+    if snap:
+        p_velocity_positions[v, 0] = p_velocity_positions[v, 0] + (ppx - cpx)
+        p_velocity_positions[v, 1] = p_velocity_positions[v, 1] + (ppy - cpy)
+        p_velocity_positions[v, 2] = p_velocity_positions[v, 2] + (ppz - cpz)
+        p_next_positions[v, 0] = ppx
+        p_next_positions[v, 1] = ppy
+        p_next_positions[v, 2] = ppz
+        cpx = ppx
+        cpy = ppy
+        cpz = ppz
+    vvx = cpx - ppx
+    vvy = cpy - ppy
+    vvz = cpz - ppz
+    vlen = dmath.length3(vvx, vvy, vvz)
+    work = (not snap) and (vlen >= EPSILON)
+    safe_vlen = vlen if vlen > 1.0e-30 else 1.0
+    uvx = vvx / safe_vlen
+    uvy = vvy / safe_vlen
+    uvz = vvz / safe_vlen
+    safe_tvlen = tvlen if tvlen > 1.0e-30 else 1.0
+    utvx = tvx / safe_tvlen
+    utvy = tvy / safe_tvlen
+    utvz = tvz / safe_tvlen
+    rqx, rqy, rqz, rqw = dmath.from_to_rotation(uvx, uvy, uvz, utvx, utvy, utvz, stiff, True)
+    rvx, rvy, rvz = dmath.quat_rotate(rqx, rqy, rqz, rqw, vvx, vvy, vvz)
+    rpx = ppx + vvx * rot_ratio
+    rpy = ppy + vvy * rot_ratio
+    rpz = ppz + vvz * rot_ratio
+    pfx = rpx - rvx * rot_ratio
+    pfy = rpy - rvy * rot_ratio
+    pfz = rpz - rvz * rot_ratio
+    cfx = rpx + rvx * (1.0 - rot_ratio)
+    cfy = rpy + rvy * (1.0 - rot_ratio)
+    cfz = rpz + rvz * (1.0 - rot_ratio)
+    if work:
+        paddx = (pfx - ppx) * p_inv
+        paddy = (pfy - ppy) * p_inv
+        paddz = (pfz - ppz) * p_inv
+        caddx = (cfx - cpx) * c_inv
+        caddy = (cfy - cpy) * c_inv
+        caddz = (cfz - cpz) * c_inv
+    else:
+        paddx = 0.0
+        paddy = 0.0
+        paddz = 0.0
+        caddx = 0.0
+        caddy = 0.0
+        caddz = 0.0
+    p_next_positions[v, 0] = cpx + caddx
+    p_next_positions[v, 1] = cpy + caddy
+    p_next_positions[v, 2] = cpz + caddz
+    p_velocity_positions[v, 0] = p_velocity_positions[v, 0] + caddx * r_attn
+    p_velocity_positions[v, 1] = p_velocity_positions[v, 1] + caddy * r_attn
+    p_velocity_positions[v, 2] = p_velocity_positions[v, 2] + caddz * r_attn
+    if work and p_move:
+        p_next_positions[p, 0] = ppx + paddx
+        p_next_positions[p, 1] = ppy + paddy
+        p_next_positions[p, 2] = ppz + paddz
+        p_velocity_positions[p, 0] = p_velocity_positions[p, 0] + paddx * r_attn
+        p_velocity_positions[p, 1] = p_velocity_positions[p, 1] + paddy * r_attn
+        p_velocity_positions[p, 2] = p_velocity_positions[p, 2] + paddz * r_attn
+
+
+@wp.func
+def do_display_particle(p: int, mt: int, sim_dt: float,
+                        p_positions: wp.array2d(dtype=float),
+                        p_rotations: wp.array2d(dtype=float),
+                        p_old_positions: wp.array2d(dtype=float),
+                        p_real_velocities: wp.array2d(dtype=float),
+                        p_display_positions: wp.array2d(dtype=float),
+                        p_vertex_root: wp.array(dtype=int),
+                        p_old_anim_positions: wp.array2d(dtype=float),
+                        p_old_anim_rotations: wp.array2d(dtype=float),
+                        p_temp_base_positions: wp.array2d(dtype=float),
+                        p_temp_base_rotations: wp.array2d(dtype=float),
+                        st_update_move_mask: wp.array(dtype=int),
+                        t_now_update: wp.array(dtype=float),
+                        t_old_time: wp.array(dtype=float),
+                        t_time: wp.array(dtype=float),
+                        t_blend_weight: wp.array(dtype=float),
+                        t_running: wp.array(dtype=int),
+                        t_is_negative_scale: wp.array(dtype=int),
+                        t_negative_scale_direction: wp.array2d(dtype=float)):
+    snap_px = p_positions[p, 0]
+    snap_py = p_positions[p, 1]
+    snap_pz = p_positions[p, 2]
+    snap_rx = p_rotations[p, 0]
+    snap_ry = p_rotations[p, 1]
+    snap_rz = p_rotations[p, 2]
+    snap_rw = p_rotations[p, 3]
+    fx = snap_px
+    fy = snap_py
+    fz = snap_pz
+    if st_update_move_mask[p] != 0:
+        sdt = sim_dt
+        fposx = p_old_positions[p, 0] + p_real_velocities[p, 0] * sdt
+        fposy = p_old_positions[p, 1] + p_real_velocities[p, 1] * sdt
+        fposz = p_old_positions[p, 2] + p_real_velocities[p, 2] * sdt
+        interval = (t_now_update[mt] + sdt) - t_old_time[mt]
+        if interval > 0.0:
+            tval = (t_time[mt] - t_old_time[mt]) / interval
+        else:
+            tval = 0.0
+        fposx = dmath.lerp(p_display_positions[p, 0], fposx, tval)
+        fposy = dmath.lerp(p_display_positions[p, 1], fposy, tval)
+        fposz = dmath.lerp(p_display_positions[p, 2], fposz, tval)
+        root = p_vertex_root[p]
+        if root >= 0:
+            rpx = p_positions[root, 0]
+            rpy = p_positions[root, 1]
+            rpz = p_positions[root, 2]
+            original_dist = dmath.length3(rpx - snap_px, rpy - snap_py, rpz - snap_pz)
+            clamp_dist = original_dist * MAX_DISTANCE_RATIO_FUTURE_PREDICTION
+            vx, vy, vz = dmath.clamp_vector(fposx - rpx, fposy - rpy, fposz - rpz, clamp_dist)
+            fposx = rpx + vx
+            fposy = rpy + vy
+            fposz = rpz + vz
+        p_display_positions[p, 0] = fposx
+        p_display_positions[p, 1] = fposy
+        p_display_positions[p, 2] = fposz
+        blend = t_blend_weight[mt]
+        fx = dmath.lerp(snap_px, fposx, blend)
+        fy = dmath.lerp(snap_py, fposy, blend)
+        fz = dmath.lerp(snap_pz, fposz, blend)
+        p_positions[p, 0] = fx
+        p_positions[p, 1] = fy
+        p_positions[p, 2] = fz
+    else:
+        p_display_positions[p, 0] = snap_px
+        p_display_positions[p, 1] = snap_py
+        p_display_positions[p, 2] = snap_pz
+    if t_running[mt] != 0:
+        p_old_anim_positions[p, 0] = snap_px
+        p_old_anim_positions[p, 1] = snap_py
+        p_old_anim_positions[p, 2] = snap_pz
+        p_old_anim_rotations[p, 0] = snap_rx
+        p_old_anim_rotations[p, 1] = snap_ry
+        p_old_anim_rotations[p, 2] = snap_rz
+        p_old_anim_rotations[p, 3] = snap_rw
+    qx = snap_rx
+    qy = snap_ry
+    qz = snap_rz
+    qw = snap_rw
+    if t_is_negative_scale[mt] != 0:
+        ndy = t_negative_scale_direction[mt, 1]
+        ndz = t_negative_scale_direction[mt, 2]
+        nnx, nny, nnz = dmath.quat_to_normal(snap_rx, snap_ry, snap_rz, snap_rw)
+        nnx = nnx * ndy
+        nny = nny * ndy
+        nnz = nnz * ndy
+        ttx, tty, ttz = dmath.quat_to_tangent(snap_rx, snap_ry, snap_rz, snap_rw)
+        ttx = ttx * ndz
+        tty = tty * ndz
+        ttz = ttz * ndz
+        qx, qy, qz, qw = dmath.look_rotation(ttx, tty, ttz, nnx, nny, nnz)
+        p_rotations[p, 0] = qx
+        p_rotations[p, 1] = qy
+        p_rotations[p, 2] = qz
+        p_rotations[p, 3] = qw
+    p_temp_base_positions[p, 0] = fx
+    p_temp_base_positions[p, 1] = fy
+    p_temp_base_positions[p, 2] = fz
+    p_temp_base_rotations[p, 0] = qx
+    p_temp_base_rotations[p, 1] = qy
+    p_temp_base_rotations[p, 2] = qz
+    p_temp_base_rotations[p, 3] = qw
+
+
+@wp.func
+def do_postline_entry(entry: int, et: int, ch_start: int, ch_end: int,
+                      postline_child_vertices: wp.array(dtype=int),
+                      p_positions: wp.array2d(dtype=float),
+                      p_rotations: wp.array2d(dtype=float),
+                      p_temp_base_positions: wp.array2d(dtype=float),
+                      p_temp_base_rotations: wp.array2d(dtype=float),
+                      p_vertex_local_positions: wp.array2d(dtype=float),
+                      p_vertex_local_rotations: wp.array2d(dtype=float),
+                      p_attr_invalid: wp.array(dtype=int),
+                      p_attr_zero_distance: wp.array(dtype=int),
+                      p_attr_move: wp.array(dtype=int),
+                      p_team: wp.array(dtype=int),
+                      t_rotational_interpolation: wp.array(dtype=float),
+                      t_root_rotation: wp.array(dtype=float),
+                      t_blend_weight: wp.array(dtype=float),
+                      t_animation_pose_ratio: wp.array(dtype=float),
+                      t_negative_scale_direction: wp.array2d(dtype=float),
+                      t_negative_scale_quaternion: wp.array2d(dtype=float)):
+    rx = p_rotations[entry, 0]
+    ry = p_rotations[entry, 1]
+    rz = p_rotations[entry, 2]
+    rw = p_rotations[entry, 3]
+    posx = p_positions[entry, 0]
+    posy = p_positions[entry, 1]
+    posz = p_positions[entry, 2]
+    bpx = p_temp_base_positions[entry, 0]
+    bpy = p_temp_base_positions[entry, 1]
+    bpz = p_temp_base_positions[entry, 2]
+    brx = p_temp_base_rotations[entry, 0]
+    bry = p_temp_base_rotations[entry, 1]
+    brz = p_temp_base_rotations[entry, 2]
+    brw = p_temp_base_rotations[entry, 3]
+    bix, biy, biz, biw = dmath.quat_inverse(brx, bry, brz, brw)
+    owner_valid = p_attr_invalid[entry] == 0
+    ctvx = wp.float64(0.0)
+    ctvy = wp.float64(0.0)
+    ctvz = wp.float64(0.0)
+    cvx = wp.float64(0.0)
+    cvy = wp.float64(0.0)
+    cvz = wp.float64(0.0)
+    has_children = ch_end > ch_start
+    for k in range(ch_start, ch_end):
+        c = postline_child_vertices[k]
+        ct = p_team[c]
+        anime_ratio = t_animation_pose_ratio[ct]
+        ndx = t_negative_scale_direction[ct, 0]
+        ndy = t_negative_scale_direction[ct, 1]
+        ndz = t_negative_scale_direction[ct, 2]
+        nqx = t_negative_scale_quaternion[ct, 0]
+        nqy = t_negative_scale_quaternion[ct, 1]
+        nqz = t_negative_scale_quaternion[ct, 2]
+        nqw = t_negative_scale_quaternion[ct, 3]
+        clpx, clpy, clpz = dmath.quat_rotate(
+            bix, biy, biz, biw, p_temp_base_positions[c, 0] - bpx,
+            p_temp_base_positions[c, 1] - bpy, p_temp_base_positions[c, 2] - bpz)
+        clrx, clry, clrz, clrw = dmath.quat_mul(
+            bix, biy, biz, biw, p_temp_base_rotations[c, 0], p_temp_base_rotations[c, 1],
+            p_temp_base_rotations[c, 2], p_temp_base_rotations[c, 3])
+        lposx = dmath.lerp(p_vertex_local_positions[c, 0] * ndx, clpx, anime_ratio)
+        lposy = dmath.lerp(p_vertex_local_positions[c, 1] * ndy, clpy, anime_ratio)
+        lposz = dmath.lerp(p_vertex_local_positions[c, 2] * ndz, clpz, anime_ratio)
+        lrx, lry, lrz, lrw = dmath.quat_slerp(
+            p_vertex_local_rotations[c, 0] * nqx, p_vertex_local_rotations[c, 1] * nqy,
+            p_vertex_local_rotations[c, 2] * nqz, p_vertex_local_rotations[c, 3] * nqw,
+            clrx, clry, clrz, clrw, anime_ratio)
+        is_c0 = p_attr_zero_distance[c] != 0
+        if is_c0:
+            tvx = 0.0
+            tvy = 0.0
+            tvz = 0.0
+        else:
+            tvx, tvy, tvz = dmath.quat_rotate(rx, ry, rz, rw, lposx, lposy, lposz)
+        c_move = p_attr_move[c] != 0
+        vx = p_positions[c, 0] - posx
+        vy = p_positions[c, 1] - posy
+        vz = p_positions[c, 2] - posz
+        if c_move:
+            contx = vx
+            conty = vy
+            contz = vz
+        else:
+            contx = tvx
+            conty = tvy
+            contz = tvz
+        if owner_valid:
+            ctvx += wp.float64(tvx)
+            ctvy += wp.float64(tvy)
+            ctvz += wp.float64(tvz)
+            cvx += wp.float64(contx)
+            cvy += wp.float64(conty)
+            cvz += wp.float64(contz)
+            if c_move:
+                crx, cry, crz, crw = dmath.quat_mul(rx, ry, rz, rw, lrx, lry, lrz, lrw)
+                if not is_c0:
+                    qfx, qfy, qfz, qfw = dmath.from_to_rotation(tvx, tvy, tvz, vx, vy, vz,
+                                                                1.0, False)
+                    crx, cry, crz, crw = dmath.quat_mul(qfx, qfy, qfz, qfw, crx, cry, crz, crw)
+                p_rotations[c, 0] = crx
+                p_rotations[c, 1] = cry
+                p_rotations[c, 2] = crz
+                p_rotations[c, 3] = crw
+    if has_children and owner_valid:
+        ctv32x = wp.float32(ctvx)
+        ctv32y = wp.float32(ctvy)
+        ctv32z = wp.float32(ctvz)
+        cv32x = wp.float32(cvx)
+        cv32y = wp.float32(cvy)
+        cv32z = wp.float32(cvz)
+        zero = (dmath.length3(ctv32x, ctv32y, ctv32z) < 1e-8) \
+            or (dmath.length3(cv32x, cv32y, cv32z) < 1e-8)
+        if not zero:
+            if p_attr_move[entry] != 0:
+                t_ratio = t_rotational_interpolation[et]
+            else:
+                t_ratio = t_root_rotation[et]
+            cqx, cqy, cqz, cqw = dmath.from_to_rotation(ctv32x, ctv32y, ctv32z,
+                                                        cv32x, cv32y, cv32z, t_ratio, False)
+            rx, ry, rz, rw = dmath.quat_mul(cqx, cqy, cqz, cqw, rx, ry, rz, rw)
+    rx, ry, rz, rw = dmath.quat_slerp(brx, bry, brz, brw, rx, ry, rz, rw, t_blend_weight[et])
+    p_rotations[entry, 0] = rx
+    p_rotations[entry, 1] = ry
+    p_rotations[entry, 2] = rz
+    p_rotations[entry, 3] = rw
+
+
+@wp.func
+def do_triangle_normal_tangent(tri: int, tt_team: int,
+                               st_triangle_particles: wp.array2d(dtype=int),
+                               p_positions: wp.array2d(dtype=float),
+                               p_uv: wp.array2d(dtype=float),
+                               t_negative_scale_triangle_sign: wp.array2d(dtype=float),
+                               tri_normal_f64: wp.array2d(dtype=wp.float64),
+                               tri_tangent_f64: wp.array2d(dtype=wp.float64)):
+    i0 = st_triangle_particles[tri, 0]
+    i1 = st_triangle_particles[tri, 1]
+    i2 = st_triangle_particles[tri, 2]
+    p0x = p_positions[i0, 0]
+    p0y = p_positions[i0, 1]
+    p0z = p_positions[i0, 2]
+    p1x = p_positions[i1, 0]
+    p1y = p_positions[i1, 1]
+    p1z = p_positions[i1, 2]
+    p2x = p_positions[i2, 0]
+    p2y = p_positions[i2, 1]
+    p2z = p_positions[i2, 2]
+    cx, cy, cz = dmath.cross3(p1x - p0x, p1y - p0y, p1z - p0z,
+                              p2x - p0x, p2y - p0y, p2z - p0z)
+    lc = dmath.length3(cx, cy, cz)
+    if lc > EPSILON:
+        nnx = cx / lc
+        nny = cy / lc
+        nnz = cz / lc
+    else:
+        nnx = cx
+        nny = cy
+        nnz = cz
+    ts0 = t_negative_scale_triangle_sign[tt_team, 0]
+    tri_normal_f64[tri, 0] = wp.float64(nnx) * wp.float64(ts0)
+    tri_normal_f64[tri, 1] = wp.float64(nny) * wp.float64(ts0)
+    tri_normal_f64[tri, 2] = wp.float64(nnz) * wp.float64(ts0)
+    q0x = wp.float64(p0x)
+    q0y = wp.float64(p0y)
+    q0z = wp.float64(p0z)
+    dbax = wp.float64(p1x) - q0x
+    dbay = wp.float64(p1y) - q0y
+    dbaz = wp.float64(p1z) - q0z
+    dcax = wp.float64(p2x) - q0x
+    dcay = wp.float64(p2y) - q0y
+    dcaz = wp.float64(p2z) - q0z
+    uv0x = wp.float64(p_uv[i0, 0])
+    uv0y = wp.float64(p_uv[i0, 1])
+    tbax = wp.float64(p_uv[i1, 0]) - uv0x
+    tbay = wp.float64(p_uv[i1, 1]) - uv0y
+    tcax = wp.float64(p_uv[i2, 0]) - uv0x
+    tcay = wp.float64(p_uv[i2, 1]) - uv0y
+    area = tbax * tcay - tbay * tcax
+    if area == wp.float64(0.0):
+        area = wp.float64(1.0)
+    delta = wp.float64(-1.0) / area
+    tanx = (dbax * tcay + dcax * dmath.negate(tbay)) * delta
+    tany = (dbay * tcay + dcay * dmath.negate(tbay)) * delta
+    tanz = (dbaz * tcay + dcaz * dmath.negate(tbay)) * delta
+    ltan = wp.sqrt(tanx * tanx + tany * tany + tanz * tanz)
+    if ltan > wp.float64(1e-30):
+        tanx = tanx / ltan
+        tany = tany / ltan
+        tanz = tanz / ltan
+    ts1 = t_negative_scale_triangle_sign[tt_team, 1]
+    tri_tangent_f64[tri, 0] = tanx * wp.float64(ts1)
+    tri_tangent_f64[tri, 1] = tany * wp.float64(ts1)
+    tri_tangent_f64[tri, 2] = tanz * wp.float64(ts1)
+
+
+@wp.func
+def do_v2t_owner(p: int, mt: int, seg0: int, seg1: int,
+                 csr_v2t_order: wp.array(dtype=int),
+                 st_v2t_triangle: wp.array(dtype=int),
+                 st_v2t_flip_normal: wp.array(dtype=float),
+                 st_v2t_flip_tangent: wp.array(dtype=float),
+                 tri_normal_f64: wp.array2d(dtype=wp.float64),
+                 tri_tangent_f64: wp.array2d(dtype=wp.float64),
+                 p_rotations: wp.array2d(dtype=float),
+                 p_normal_adjustment_rotations: wp.array2d(dtype=float),
+                 t_negative_scale_quaternion: wp.array2d(dtype=float)):
+    norx = wp.float64(0.0)
+    nory = wp.float64(0.0)
+    norz = wp.float64(0.0)
+    tanx = wp.float64(0.0)
+    tany = wp.float64(0.0)
+    tanz = wp.float64(0.0)
+    for k in range(seg0, seg1):
+        row = csr_v2t_order[k]
+        tri = st_v2t_triangle[row]
+        fn = wp.float64(st_v2t_flip_normal[row])
+        ft = wp.float64(st_v2t_flip_tangent[row])
+        norx += tri_normal_f64[tri, 0] * fn
+        nory += tri_normal_f64[tri, 1] * fn
+        norz += tri_normal_f64[tri, 2] * fn
+        tanx += tri_tangent_f64[tri, 0] * ft
+        tany += tri_tangent_f64[tri, 1] * ft
+        tanz += tri_tangent_f64[tri, 2] * ft
+    ln = wp.sqrt(norx * norx + nory * nory + norz * norz)
+    lt = wp.sqrt(tanx * tanx + tany * tany + tanz * tanz)
+    ok = (ln > wp.float64(1e-6)) and (lt > wp.float64(1e-6))
+    if ln > wp.float64(1e-30):
+        nnx = norx / ln
+        nny = nory / ln
+        nnz = norz / ln
+    else:
+        nnx = norx
+        nny = nory
+        nnz = norz
+    if lt > wp.float64(1e-30):
+        ntx = tanx / lt
+        nty = tany / lt
+        ntz = tanz / lt
+    else:
+        ntx = tanx
+        nty = tany
+        ntz = tanz
+    d = nnx * ntx + nny * nty + nnz * ntz
+    if d == wp.float64(1.0) or d == wp.float64(-1.0):
+        ok = False
+    bx = nny * ntz - nnz * nty
+    by = nnz * ntx - nnx * ntz
+    bz = nnx * nty - nny * ntx
+    bl = wp.sqrt(bx * bx + by * by + bz * bz)
+    if bl > wp.float64(1e-30):
+        bx = bx / bl
+        by = by / bl
+        bz = bz / bl
+    rrx, rry, rrz, rrw = dmath.look_rotation(wp.float32(bx), wp.float32(by), wp.float32(bz),
+                                             wp.float32(nnx), wp.float32(nny), wp.float32(nnz))
+    nax = p_normal_adjustment_rotations[p, 0] * t_negative_scale_quaternion[mt, 0]
+    nay = p_normal_adjustment_rotations[p, 1] * t_negative_scale_quaternion[mt, 1]
+    naz = p_normal_adjustment_rotations[p, 2] * t_negative_scale_quaternion[mt, 2]
+    naw = p_normal_adjustment_rotations[p, 3] * t_negative_scale_quaternion[mt, 3]
+    frx, fry, frz, frw = dmath.quat_mul(rrx, rry, rrz, rrw, nax, nay, naz, naw)
+    if ok:
+        p_rotations[p, 0] = frx
+        p_rotations[p, 1] = fry
+        p_rotations[p, 2] = frz
+        p_rotations[p, 3] = frw
+
+
+@wp.func
+def do_output_particle(p: int, mt: int, p_rotations: wp.array2d(dtype=float),
+                       p_vertex_to_transform_rotations: wp.array2d(dtype=float),
+                       t_negative_scale_quaternion: wp.array2d(dtype=float),
+                       p_out_rotations: wp.array2d(dtype=float)):
+    vqx = p_vertex_to_transform_rotations[p, 0] * t_negative_scale_quaternion[mt, 0]
+    vqy = p_vertex_to_transform_rotations[p, 1] * t_negative_scale_quaternion[mt, 1]
+    vqz = p_vertex_to_transform_rotations[p, 2] * t_negative_scale_quaternion[mt, 2]
+    vqw = p_vertex_to_transform_rotations[p, 3] * t_negative_scale_quaternion[mt, 3]
+    ox, oy, oz, ow = dmath.quat_mul(p_rotations[p, 0], p_rotations[p, 1], p_rotations[p, 2],
+                                    p_rotations[p, 3], vqx, vqy, vqz, vqw)
+    p_out_rotations[p, 0] = ox
+    p_out_rotations[p, 1] = oy
+    p_out_rotations[p, 2] = oz
+    p_out_rotations[p, 3] = ow
