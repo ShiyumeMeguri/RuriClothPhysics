@@ -1,5 +1,3 @@
-import math
-
 import warp as wp
 
 from ..cloth_kernel import defs as _defs
@@ -27,15 +25,15 @@ WIND_MAX_TIME = wp.constant(float(_defs.WIND_MAX_TIME))
 SELF_COLLISION_SCR = wp.constant(float(_defs.SELF_COLLISION_SCR))
 SELF_COLLISION_POINT_TRIANGLE_ANGLE_COS = wp.constant(
     float(_defs.SELF_COLLISION_POINT_TRIANGLE_ANGLE_COS))
-SCL_USE_INTERSECT = wp.constant(int(4))
-DEG2RAD = wp.constant(float(math.pi / 180.0))
-RAD2DEG = wp.constant(float(180.0 / math.pi))
+SCL_USE_INTERSECT = wp.constant(int(_defs.SCL_USE_INTERSECT))
+DEG2RAD = wp.constant(float(_defs.DEG2RAD))
+RAD2DEG = wp.constant(float(_defs.RAD2DEG))
 ANGLE_LIMIT_ROT_RATIO = wp.constant(float(_defs.ANGLE_LIMIT_ROTATION_RATIO))
 ANGLE_LIMIT_ATTENUATION = wp.constant(float(_defs.ANGLE_LIMIT_ATTENUATION))
 COLLIDER_SPHERE = wp.constant(int(_defs.COLLIDER_SPHERE))
 COLLIDER_CAPSULE = wp.constant(int(_defs.COLLIDER_CAPSULE))
 COLLISION_POINT = wp.constant(int(_defs.COLLISION_POINT))
-TO_FIXED = wp.constant(float(1.0e6))
+TO_FIXED = wp.constant(float(_defs.TO_FIXED))
 MAX_DISTANCE_RATIO_FUTURE_PREDICTION = wp.constant(
     float(_defs.MAX_DISTANCE_RATIO_FUTURE_PREDICTION))
 
