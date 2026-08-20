@@ -4,11 +4,12 @@ from numba import cuda, int32
 
 from cloth_kernel import defs as _defs
 
+from ..cloth_kernel.program import build_program
+
 from . import device
 from . import kernels
 from . import phases
 from . import staging
-from .program import build_program
 
 
 def _phase_tree(entries, depth):

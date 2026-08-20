@@ -23,6 +23,7 @@ WARP_DTYPE_TABLE = {
     ("int32", (4,)): (wp.vec4i, ()),
     ("int8", ()): (wp.int8, ()),
     ("bool", ()): (wp.uint8, ()),
+    ("bool", (3,)): (wp.vec3ub, ()),
     ("int64", ()): (wp.int64, ()),
 }
 
@@ -54,12 +55,40 @@ def _fields_from_specification_map(specification_map):
     return fields
 
 
-DOMAIN_FIELDS = {
-    "team": _fields_from_structured_dtype(_world.TEAM_DTYPE),
-    "particle": _fields_from_specification_map(_world.PARTICLE_FIELDS),
-    "transform": _fields_from_specification_map(_world.TRANSFORM_FIELDS),
-    "collider": _fields_from_specification_map(_world.COLLIDER_FIELDS),
-}
+DOMAIN_SPECIFICATION_TABLE = (
+    ("particle", _world.PARTICLE_FIELDS),
+    ("transform", _world.TRANSFORM_FIELDS),
+    ("collider", _world.COLLIDER_FIELDS),
+    ("distance", _world.DISTANCE_FIELDS),
+    ("bending", _world.BENDING_FIELDS),
+    ("tether", _world.INDEX_FIELDS),
+    ("motion", _world.INDEX_FIELDS),
+    ("update_move", _world.INDEX_FIELDS),
+    ("update_fixed", _world.INDEX_FIELDS),
+    ("spring", _world.INDEX_FIELDS),
+    ("collision_process", _world.INDEX_FIELDS),
+    ("center_fixed", _world.INDEX_FIELDS),
+    ("angle_buffered", _world.INDEX_FIELDS),
+    ("edges", _world.EDGE_FIELDS),
+    ("collision_edges", _world.EDGE_FIELDS),
+    ("triangles", _world.TRIANGLE_FIELDS),
+    ("v2t", _world.V2T_FIELDS),
+    ("point_pairs", _world.PAIR_POINT_FIELDS),
+    ("edge_pairs", _world.PAIR_EDGE_FIELDS),
+    ("self_points", _world.PRIMITIVE_FIELDS),
+    ("self_edges", _world.PRIMITIVE_FIELDS),
+    ("self_triangles", _world.PRIMITIVE_FIELDS),
+)
+
+
+def _domain_fields_table():
+    table = {"team": _fields_from_structured_dtype(_world.TEAM_DTYPE)}
+    for domain_name, specification_map in DOMAIN_SPECIFICATION_TABLE:
+        table[domain_name] = _fields_from_specification_map(specification_map)
+    return table
+
+
+DOMAIN_FIELDS = _domain_fields_table()
 
 DOMAIN_NAMES = tuple(DOMAIN_FIELDS.keys())
 
@@ -68,10 +97,16 @@ def _aligned(value):
     return (value + FIELD_ALIGNMENT - 1) // FIELD_ALIGNMENT * FIELD_ALIGNMENT
 
 
+def _field_pointer(slab, offset):
+    if slab.ptr is None:
+        return None
+    return slab.ptr + offset
+
+
 class DomainStorage:
     def __init__(self, domain_name, fields, element_count):
-        if element_count < 1:
-            raise ValueError("domain %r requires a positive element count, got %d"
+        if element_count < 0:
+            raise ValueError("domain %r requires a non negative element count, got %d"
                              % (domain_name, element_count))
         self.domain_name = domain_name
         self.element_count = element_count
@@ -108,15 +143,16 @@ class DomainStorage:
             shape = self.array_shapes[field_name]
             warp_dtype = self.warp_dtypes[field_name]
             device_array = wp.array(
-                ptr=self.device_slab.ptr + offset, dtype=warp_dtype, shape=shape, device=DEVICE)
+                ptr=_field_pointer(self.device_slab, offset), dtype=warp_dtype, shape=shape,
+                device=DEVICE)
             device_array._backing_slab = self.device_slab
             self.device_arrays[field_name] = device_array
             upload_array = wp.array(
-                ptr=self.upload_slab.ptr + offset, dtype=warp_dtype, shape=shape, device="cpu",
-                pinned=True)
+                ptr=_field_pointer(self.upload_slab, offset), dtype=warp_dtype, shape=shape,
+                device="cpu", pinned=True)
             download_array = wp.array(
-                ptr=self.download_slab.ptr + offset, dtype=warp_dtype, shape=shape, device="cpu",
-                pinned=True)
+                ptr=_field_pointer(self.download_slab, offset), dtype=warp_dtype, shape=shape,
+                device="cpu", pinned=True)
             upload_view = upload_array.numpy()
             download_view = download_array.numpy()
             if upload_view.nbytes != self.byte_sizes[field_name]:
