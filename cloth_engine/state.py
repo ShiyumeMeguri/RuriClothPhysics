@@ -1,6 +1,7 @@
 import numpy as np
 import warp as wp
 
+from ..cloth_kernel import program as _program
 from ..cloth_kernel import world as _world
 
 DEVICE = "cuda:0"
@@ -9,22 +10,33 @@ FIELD_ALIGNMENT = 16
 
 WARP_DTYPE_TABLE = {
     ("float32", ()): (wp.float32, ()),
-    ("float32", (2,)): (wp.vec2, ()),
-    ("float32", (3,)): (wp.vec3, ()),
-    ("float32", (4,)): (wp.vec4, ()),
+    ("float32", (2,)): (wp.float32, (2,)),
+    ("float32", (3,)): (wp.float32, (3,)),
+    ("float32", (4,)): (wp.float32, (4,)),
     ("float32", (16,)): (wp.float32, (16,)),
+    ("float32", (22,)): (wp.float32, (22,)),
+    ("float32", (2, 3)): (wp.float32, (2, 3)),
     ("float32", (4, 3)): (wp.float32, (4, 3)),
     ("float32", (4, 4)): (wp.float32, (4, 4)),
-    ("float32", (2, 3)): (wp.float32, (2, 3)),
+    ("float64", (3,)): (wp.float64, (3,)),
     ("float64", (4, 4)): (wp.mat44d, ()),
     ("int32", ()): (wp.int32, ()),
-    ("int32", (2,)): (wp.vec2i, ()),
-    ("int32", (3,)): (wp.vec3i, ()),
-    ("int32", (4,)): (wp.vec4i, ()),
-    ("int8", ()): (wp.int8, ()),
-    ("bool", ()): (wp.uint8, ()),
-    ("bool", (3,)): (wp.vec3ub, ()),
+    ("int32", (2,)): (wp.int32, (2,)),
+    ("int32", (3,)): (wp.int32, (3,)),
+    ("int32", (4,)): (wp.int32, (4,)),
+    ("int8", ()): (wp.int32, ()),
+    ("uint8", ()): (wp.int32, ()),
+    ("bool", ()): (wp.int32, ()),
+    ("bool", (3,)): (wp.int32, (3,)),
     ("int64", ()): (wp.int64, ()),
+}
+
+WARP_SCALAR_BYTES = {
+    wp.float32: 4,
+    wp.float64: 8,
+    wp.int32: 4,
+    wp.int64: 8,
+    wp.mat44d: 128,
 }
 
 
@@ -92,6 +104,17 @@ DOMAIN_FIELDS = _domain_fields_table()
 
 DOMAIN_NAMES = tuple(DOMAIN_FIELDS.keys())
 
+DERIVED_STORAGE_NAME = "derived"
+
+DERIVED_FIELDS = dict(_program.DERIVED_PLANE_FIELDS)
+
+DERIVED_PLANE_NAMES = _program.DERIVED_PLANE_NAMES
+
+STORAGE_NAMES = DOMAIN_NAMES + (DERIVED_STORAGE_NAME,)
+
+STORAGE_FIELDS = dict(DOMAIN_FIELDS)
+STORAGE_FIELDS[DERIVED_STORAGE_NAME] = DERIVED_FIELDS
+
 
 def _aligned(value):
     return (value + FIELD_ALIGNMENT - 1) // FIELD_ALIGNMENT * FIELD_ALIGNMENT
@@ -103,13 +126,22 @@ def _field_pointer(slab, offset):
     return slab.ptr + offset
 
 
-class DomainStorage:
-    def __init__(self, domain_name, fields, element_count):
-        if element_count < 0:
-            raise ValueError("domain %r requires a non negative element count, got %d"
-                             % (domain_name, element_count))
-        self.domain_name = domain_name
-        self.element_count = element_count
+def uniform_element_counts(fields, element_count):
+    return {field_name: element_count for field_name in fields}
+
+
+class SlabStorage:
+    def __init__(self, storage_name, fields, element_counts):
+        missing = sorted(set(fields) - set(element_counts))
+        if missing:
+            raise ValueError("storage %r has no element count for fields %r"
+                             % (storage_name, missing))
+        unknown = sorted(set(element_counts) - set(fields))
+        if unknown:
+            raise ValueError("storage %r was given element counts for undeclared fields %r"
+                             % (storage_name, unknown))
+        self.storage_name = storage_name
+        self.element_counts = {}
         self.field_order = []
         self.field_indices = {}
         self.byte_offsets = {}
@@ -118,10 +150,15 @@ class DomainStorage:
         self.warp_dtypes = {}
         cursor = 0
         for field_name, (numpy_dtype, inner_shape) in fields.items():
+            element_count = int(element_counts[field_name])
+            if element_count < 0:
+                raise ValueError("storage %r field %r requires a non negative element count, "
+                                 "got %d" % (storage_name, field_name, element_count))
             warp_dtype, trailing_shape = warp_dtype_for(numpy_dtype, inner_shape)
-            item_size_in_bytes = numpy_dtype.itemsize
-            for extent in inner_shape:
+            item_size_in_bytes = WARP_SCALAR_BYTES[warp_dtype]
+            for extent in trailing_shape:
                 item_size_in_bytes *= extent
+            self.element_counts[field_name] = element_count
             self.field_indices[field_name] = len(self.field_order)
             self.field_order.append(field_name)
             self.byte_offsets[field_name] = cursor
@@ -157,9 +194,10 @@ class DomainStorage:
             download_view = download_array.numpy()
             if upload_view.nbytes != self.byte_sizes[field_name]:
                 raise TypeError(
-                    "warp dtype mapping for %s.%s occupies %d bytes but the numpy specification "
-                    "occupies %d bytes"
-                    % (domain_name, field_name, upload_view.nbytes, self.byte_sizes[field_name]))
+                    "warp dtype mapping for %s.%s occupies %d bytes but the field layout "
+                    "reserves %d bytes"
+                    % (storage_name, field_name, upload_view.nbytes,
+                       self.byte_sizes[field_name]))
             self.upload_views[field_name] = upload_view
             self.download_views[field_name] = download_view
         self.dirty_indices = set()
@@ -169,10 +207,10 @@ class DomainStorage:
         incoming = np.asarray(values)
         if incoming.shape != view.shape:
             raise ValueError("%s.%s expects shape %r, got %r"
-                             % (self.domain_name, field_name, view.shape, incoming.shape))
+                             % (self.storage_name, field_name, view.shape, incoming.shape))
         if incoming.dtype != view.dtype:
             raise TypeError("%s.%s expects dtype %s, got %s"
-                            % (self.domain_name, field_name, view.dtype, incoming.dtype))
+                            % (self.storage_name, field_name, view.dtype, incoming.dtype))
         view[...] = incoming
         self.dirty_indices.add(self.field_indices[field_name])
 
@@ -197,63 +235,80 @@ class DomainStorage:
         last_name = self.field_order[last_index]
         start = self.byte_offsets[first_name]
         end = self.byte_offsets[last_name] + self.byte_sizes[last_name]
+        if end == start:
+            return
         wp.copy(self.device_slab, self.upload_slab, start, start, end - start)
 
     def read(self, field_name):
-        start = self.byte_offsets[field_name]
-        wp.copy(self.download_slab, self.device_slab, start, start, self.byte_sizes[field_name])
-        wp.synchronize_device(DEVICE)
+        byte_size = self.byte_sizes[field_name]
+        if byte_size > 0:
+            start = self.byte_offsets[field_name]
+            wp.copy(self.download_slab, self.device_slab, start, start, byte_size)
+            wp.synchronize_device(DEVICE)
         return self.download_views[field_name].copy()
 
 
 class ClothState:
-    def __init__(self, element_counts):
-        missing = set(DOMAIN_NAMES) - set(element_counts)
+    def __init__(self, element_counts, derived_plane_counts):
+        missing = sorted(set(DOMAIN_NAMES) - set(element_counts))
         if missing:
-            raise ValueError("element counts missing for domains %r" % (sorted(missing),))
-        unknown = set(element_counts) - set(DOMAIN_NAMES)
+            raise ValueError("element counts missing for domains %r" % (missing,))
+        unknown = sorted(set(element_counts) - set(DOMAIN_NAMES))
         if unknown:
-            raise ValueError("element counts given for unknown domains %r" % (sorted(unknown),))
+            raise ValueError("element counts given for unknown domains %r" % (unknown,))
         self.storages = {}
         for domain_name in DOMAIN_NAMES:
-            self.storages[domain_name] = DomainStorage(
-                domain_name, DOMAIN_FIELDS[domain_name], int(element_counts[domain_name]))
+            self.storages[domain_name] = SlabStorage(
+                domain_name, DOMAIN_FIELDS[domain_name],
+                uniform_element_counts(DOMAIN_FIELDS[domain_name],
+                                       int(element_counts[domain_name])))
+        self.domain_element_counts = {domain_name: int(element_counts[domain_name])
+                                      for domain_name in DOMAIN_NAMES}
+        self.storages[DERIVED_STORAGE_NAME] = SlabStorage(
+            DERIVED_STORAGE_NAME, DERIVED_FIELDS, dict(derived_plane_counts))
 
     def element_count(self, domain_name):
-        return self.storages[domain_name].element_count
+        return self.domain_element_counts[domain_name]
 
-    def field_names(self, domain_name):
-        return tuple(self.storages[domain_name].field_order)
+    def plane_element_count(self, storage_name, field_name):
+        return self.storages[storage_name].element_counts[field_name]
 
-    def array(self, domain_name, field_name):
-        return self.storages[domain_name].device_arrays[field_name]
+    def field_names(self, storage_name):
+        return tuple(self.storages[storage_name].field_order)
 
-    def arrays(self, domain_name):
-        return self.storages[domain_name].device_arrays
+    def array(self, storage_name, field_name):
+        return self.storages[storage_name].device_arrays[field_name]
 
-    def warp_dtype(self, domain_name, field_name):
-        return self.storages[domain_name].warp_dtypes[field_name]
+    def arrays(self, storage_name):
+        return self.storages[storage_name].device_arrays
 
-    def value_specification(self, domain_name, field_name):
-        view = self.storages[domain_name].upload_views[field_name]
+    def warp_dtype(self, storage_name, field_name):
+        return self.storages[storage_name].warp_dtypes[field_name]
+
+    def value_specification(self, storage_name, field_name):
+        view = self.storages[storage_name].upload_views[field_name]
         return (view.dtype, view.shape)
 
-    def write(self, domain_name, field_name, values):
-        self.storages[domain_name].write(field_name, values)
+    def write(self, storage_name, field_name, values):
+        self.storages[storage_name].write(field_name, values)
 
     def flush(self):
         uploaded = 0
-        for domain_name in DOMAIN_NAMES:
-            uploaded += self.storages[domain_name].upload_dirty()
+        for storage_name in STORAGE_NAMES:
+            uploaded += self.storages[storage_name].upload_dirty()
         return uploaded
 
-    def read(self, domain_name, field_name):
-        return self.storages[domain_name].read(field_name)
+    def read(self, storage_name, field_name):
+        return self.storages[storage_name].read(field_name)
 
     def structure_key(self):
-        return tuple((domain_name, self.storages[domain_name].element_count)
-                     for domain_name in DOMAIN_NAMES)
+        domains = tuple((domain_name, self.domain_element_counts[domain_name])
+                        for domain_name in DOMAIN_NAMES)
+        planes = tuple((plane_name,
+                        self.storages[DERIVED_STORAGE_NAME].element_counts[plane_name])
+                       for plane_name in DERIVED_PLANE_NAMES)
+        return domains + planes
 
     def total_size_in_bytes(self):
-        return sum(self.storages[domain_name].total_size_in_bytes
-                   for domain_name in DOMAIN_NAMES)
+        return sum(self.storages[storage_name].total_size_in_bytes
+                   for storage_name in STORAGE_NAMES)

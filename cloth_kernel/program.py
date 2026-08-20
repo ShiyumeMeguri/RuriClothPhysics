@@ -1,6 +1,83 @@
 import numpy as np
 
 I4 = np.int32
+F4 = np.float32
+F8 = np.float64
+U1 = np.uint8
+
+DERIVED_SOURCE_CSR_OFFSETS = "csr_offsets"
+DERIVED_SOURCE_CSR_ORDER = "csr_order"
+DERIVED_SOURCE_ATTRIBUTE = "attribute"
+DERIVED_SOURCE_SCRATCH = "scratch"
+
+DERIVED_SOURCE_KINDS = (DERIVED_SOURCE_CSR_OFFSETS, DERIVED_SOURCE_CSR_ORDER,
+                        DERIVED_SOURCE_ATTRIBUTE, DERIVED_SOURCE_SCRATCH)
+
+DERIVED_PLANE_SPECIFICATION = (
+    ("distance_csr_offsets", DERIVED_SOURCE_CSR_OFFSETS, "distance_csr", I4, ()),
+    ("distance_csr_order", DERIVED_SOURCE_CSR_ORDER, "distance_csr", I4, ()),
+    ("point_pair_csr_offsets", DERIVED_SOURCE_CSR_OFFSETS, "point_pair_csr", I4, ()),
+    ("point_pair_csr_order", DERIVED_SOURCE_CSR_ORDER, "point_pair_csr", I4, ()),
+    ("edge_pair_csr_offsets", DERIVED_SOURCE_CSR_OFFSETS, "edge_pair_csr", I4, ()),
+    ("edge_pair_csr_order", DERIVED_SOURCE_CSR_ORDER, "edge_pair_csr", I4, ()),
+    ("center_fixed_csr_offsets", DERIVED_SOURCE_CSR_OFFSETS, "center_fixed_csr", I4, ()),
+    ("center_fixed_csr_order", DERIVED_SOURCE_CSR_ORDER, "center_fixed_csr", I4, ()),
+    ("v2t_csr_offsets", DERIVED_SOURCE_CSR_OFFSETS, "v2t_csr", I4, ()),
+    ("v2t_csr_order", DERIVED_SOURCE_CSR_ORDER, "v2t_csr", I4, ()),
+    ("fk_yes_offsets", DERIVED_SOURCE_ATTRIBUTE, "fk_yes_offsets", I4, ()),
+    ("fk_yes", DERIVED_SOURCE_ATTRIBUTE, "fk_yes", I4, ()),
+    ("fk_yes_parent", DERIVED_SOURCE_ATTRIBUTE, "fk_yes_parent", I4, ()),
+    ("fk_no_offsets", DERIVED_SOURCE_ATTRIBUTE, "fk_no_offsets", I4, ()),
+    ("fk_no", DERIVED_SOURCE_ATTRIBUTE, "fk_no", I4, ()),
+    ("baseline_entries", DERIVED_SOURCE_ATTRIBUTE, "baseline_entries", I4, ()),
+    ("angle_pass_offsets", DERIVED_SOURCE_ATTRIBUTE, "angle_pass_offsets", I4, ()),
+    ("angle_pass_vertices", DERIVED_SOURCE_ATTRIBUTE, "angle_pass_vertices", I4, ()),
+    ("angle_pass_parents", DERIVED_SOURCE_ATTRIBUTE, "angle_pass_parents", I4, ()),
+    ("postline_entry_offsets", DERIVED_SOURCE_ATTRIBUTE, "postline_entry_offsets", I4, ()),
+    ("postline_entry_vertices", DERIVED_SOURCE_ATTRIBUTE, "postline_entry_vertices", I4, ()),
+    ("postline_child_offsets", DERIVED_SOURCE_ATTRIBUTE, "postline_child_offsets", I4, ()),
+    ("postline_child_vertices", DERIVED_SOURCE_ATTRIBUTE, "postline_child_vertices", I4, ()),
+    ("display_update_move_mask", DERIVED_SOURCE_ATTRIBUTE, "display_update_move_mask", U1, ()),
+    ("distance_correction", DERIVED_SOURCE_SCRATCH, "num_particles", F4, (3,)),
+    ("distance_correction_fixed", DERIVED_SOURCE_SCRATCH, "num_particles", I4, (3,)),
+    ("distance_count", DERIVED_SOURCE_SCRATCH, "num_particles", I4, ()),
+    ("collision_friction_fixed", DERIVED_SOURCE_SCRATCH, "num_particles", I4, ()),
+    ("collision_normal_fixed", DERIVED_SOURCE_SCRATCH, "num_particles", I4, (3,)),
+    ("synchronization_snapshot", DERIVED_SOURCE_SCRATCH, "num_teams", F4, (22,)),
+    ("triangle_normal_double", DERIVED_SOURCE_SCRATCH, "num_triangle_entries", F8, (3,)),
+    ("triangle_tangent_double", DERIVED_SOURCE_SCRATCH, "num_triangle_entries", F8, (3,)),
+)
+
+
+def _validate_derived_specification():
+    seen = set()
+    for row in DERIVED_PLANE_SPECIFICATION:
+        assert len(row) == 5, \
+            "a derived plane row declares name, source kind, source key, scalar type and " \
+            "inner shape, got %r" % (row,)
+        plane_name, source_kind, source_key, scalar_type, inner_shape = row
+        assert isinstance(plane_name, str) and plane_name, \
+            "a derived plane row must name the plane, got %r" % (plane_name,)
+        assert plane_name not in seen, \
+            "derived plane %s is declared twice" % plane_name
+        seen.add(plane_name)
+        assert source_kind in DERIVED_SOURCE_KINDS, \
+            "derived plane %s declares source kind %r, only %r are defined" \
+            % (plane_name, source_kind, DERIVED_SOURCE_KINDS)
+        assert isinstance(source_key, str) and source_key, \
+            "derived plane %s must name the program attribute it comes from" % plane_name
+        assert isinstance(inner_shape, tuple), \
+            "derived plane %s must declare its inner shape as a tuple, got %r" \
+            % (plane_name, inner_shape)
+        np.dtype(scalar_type)
+
+
+_validate_derived_specification()
+
+DERIVED_PLANE_NAMES = tuple(row[0] for row in DERIVED_PLANE_SPECIFICATION)
+
+DERIVED_PLANE_FIELDS = {row[0]: (np.dtype(row[3]), row[4])
+                        for row in DERIVED_PLANE_SPECIFICATION}
 
 
 class CsrTable:
@@ -201,7 +278,67 @@ def build_program(world):
         _flatten_postline(program.postline_levels, program.postline_level_csr)
     program.display_update_move_mask = _build_update_move_mask(
         program.update_move["particle"], n_particles)
+    _assert_derived_specification_covers(program)
     return program
+
+
+def _derived_scratch_plane(program, source_key, scalar_type, inner_shape):
+    element_count = getattr(program, source_key)
+    assert isinstance(element_count, int), \
+        "scratch plane source %s must name an integer program count, got %r" \
+        % (source_key, element_count)
+    return np.zeros((element_count,) + inner_shape, dtype=scalar_type)
+
+
+def _derived_plane_values(program, source_kind, source_key, scalar_type, inner_shape):
+    if source_kind == DERIVED_SOURCE_SCRATCH:
+        return _derived_scratch_plane(program, source_key, scalar_type, inner_shape)
+    if source_kind == DERIVED_SOURCE_CSR_OFFSETS:
+        return getattr(program, source_key).offsets
+    if source_kind == DERIVED_SOURCE_CSR_ORDER:
+        return getattr(program, source_key).order
+    return getattr(program, source_key)
+
+
+def derived_planes(program):
+    planes = {}
+    for plane_name, source_kind, source_key, scalar_type, inner_shape in \
+            DERIVED_PLANE_SPECIFICATION:
+        values = np.ascontiguousarray(
+            _derived_plane_values(program, source_kind, source_key, scalar_type, inner_shape))
+        assert values.dtype == np.dtype(scalar_type), \
+            "derived plane %s is declared as %s but the program produced %s" \
+            % (plane_name, np.dtype(scalar_type), values.dtype)
+        assert values.shape[1:] == inner_shape, \
+            "derived plane %s is declared with inner shape %r but the program produced %r" \
+            % (plane_name, inner_shape, values.shape[1:])
+        planes[plane_name] = values
+    return planes
+
+
+def derived_plane_counts(program):
+    return {plane_name: int(values.shape[0])
+            for plane_name, values in derived_planes(program).items()}
+
+
+def _assert_derived_specification_covers(program):
+    declared_csr = set()
+    declared_attributes = set()
+    for _plane_name, source_kind, source_key, _scalar_type, _inner_shape in \
+            DERIVED_PLANE_SPECIFICATION:
+        if source_kind in (DERIVED_SOURCE_CSR_OFFSETS, DERIVED_SOURCE_CSR_ORDER):
+            declared_csr.add(source_key)
+        elif source_kind == DERIVED_SOURCE_ATTRIBUTE:
+            declared_attributes.add(source_key)
+    for attribute_name, attribute_value in vars(program).items():
+        if isinstance(attribute_value, CsrTable):
+            assert attribute_name in declared_csr, \
+                "the program builds the compressed row table %s but no derived plane row " \
+                "declares it, every derived table needs a plane declaration" % attribute_name
+        elif isinstance(attribute_value, np.ndarray):
+            assert attribute_name in declared_attributes, \
+                "the program builds the array %s but no derived plane row declares it, " \
+                "every derived table needs a plane declaration" % attribute_name
 
 
 def _compute_self_capacities(program, world):
