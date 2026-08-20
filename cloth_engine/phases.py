@@ -4,6 +4,7 @@ from ..cloth_kernel import defs as _defs
 from . import dmath
 from . import kernels
 from . import policy
+from .kernels import DISTANCE_VELOCITY_ATTENUATION
 from .kernels import EPSILON
 from .kernels import FORCE_VELOCITY_ADD
 from .kernels import FORCE_VELOCITY_ADD_WITHOUT_DEPTH
@@ -1683,22 +1684,308 @@ def phase_13_spring(k: int,
         p_next_positions[psi, 2] = bpz + vz
 
 
+@wp.kernel
+def phase_14_yes(level: int,
+                 k: int,
+                 fk_no: wp.array(dtype=int),
+                 fk_no_offsets: wp.array(dtype=int),
+                 fk_yes: wp.array(dtype=int),
+                 fk_yes_offsets: wp.array(dtype=int),
+                 fk_yes_parent: wp.array(dtype=int),
+                 p_step_basic_positions: wp.array2d(dtype=float),
+                 p_step_basic_rotations: wp.array2d(dtype=float),
+                 p_team: wp.array(dtype=int),
+                 p_vertex_local_positions: wp.array2d(dtype=float),
+                 p_vertex_local_rotations: wp.array2d(dtype=float),
+                 t_animation_pose_ratio: wp.array(dtype=float),
+                 t_cws: wp.array2d(dtype=float),
+                 t_enabled: wp.array(dtype=int),
+                 t_init_scale: wp.array2d(dtype=float),
+                 t_is_negative_scale: wp.array(dtype=int),
+                 t_negative_scale_direction: wp.array2d(dtype=float),
+                 t_negative_scale_quaternion: wp.array2d(dtype=float),
+                 t_scale_ratio: wp.array(dtype=float),
+                 t_update_count: wp.array(dtype=int),
+                 t_valid: wp.array(dtype=int)):
+    ys = fk_yes_offsets[level]
+    ye = fk_yes_offsets[level + 1]
+    i = ys + wp.tid()
+    if i < ye:
+        v = fk_yes[i]
+        vt = p_team[v]
+        if kernels.team_frame_mask(t_enabled, t_valid, t_cws, vt) and t_update_count[vt] > k \
+                and t_animation_pose_ratio[vt] <= 0.99:
+            par = fk_yes_parent[i]
+            sr = t_scale_ratio[vt]
+            scx = t_init_scale[vt, 0] * sr
+            scy = t_init_scale[vt, 1] * sr
+            scz = t_init_scale[vt, 2] * sr
+            lsx = (p_vertex_local_positions[v, 0] * t_negative_scale_direction[vt, 0]) * scx
+            lsy = (p_vertex_local_positions[v, 1] * t_negative_scale_direction[vt, 1]) * scy
+            lsz = (p_vertex_local_positions[v, 2] * t_negative_scale_direction[vt, 2]) * scz
+            prx = p_step_basic_rotations[par, 0]
+            pry = p_step_basic_rotations[par, 1]
+            prz = p_step_basic_rotations[par, 2]
+            prw = p_step_basic_rotations[par, 3]
+            rx, ry, rz = dmath.quat_rotate(prx, pry, prz, prw, lsx, lsy, lsz)
+            p_step_basic_positions[v, 0] = rx + p_step_basic_positions[par, 0]
+            p_step_basic_positions[v, 1] = ry + p_step_basic_positions[par, 1]
+            p_step_basic_positions[v, 2] = rz + p_step_basic_positions[par, 2]
+            lrx = p_vertex_local_rotations[v, 0] * t_negative_scale_quaternion[vt, 0]
+            lry = p_vertex_local_rotations[v, 1] * t_negative_scale_quaternion[vt, 1]
+            lrz = p_vertex_local_rotations[v, 2] * t_negative_scale_quaternion[vt, 2]
+            lrw = p_vertex_local_rotations[v, 3] * t_negative_scale_quaternion[vt, 3]
+            qx, qy, qz, qw = dmath.quat_mul(prx, pry, prz, prw, lrx, lry, lrz, lrw)
+            p_step_basic_rotations[v, 0] = qx
+            p_step_basic_rotations[v, 1] = qy
+            p_step_basic_rotations[v, 2] = qz
+            p_step_basic_rotations[v, 3] = qw
+
+
+@wp.kernel
+def phase_14_no(level: int,
+                k: int,
+                fk_no: wp.array(dtype=int),
+                fk_no_offsets: wp.array(dtype=int),
+                fk_yes: wp.array(dtype=int),
+                fk_yes_offsets: wp.array(dtype=int),
+                fk_yes_parent: wp.array(dtype=int),
+                p_step_basic_positions: wp.array2d(dtype=float),
+                p_step_basic_rotations: wp.array2d(dtype=float),
+                p_team: wp.array(dtype=int),
+                p_vertex_local_positions: wp.array2d(dtype=float),
+                p_vertex_local_rotations: wp.array2d(dtype=float),
+                t_animation_pose_ratio: wp.array(dtype=float),
+                t_cws: wp.array2d(dtype=float),
+                t_enabled: wp.array(dtype=int),
+                t_init_scale: wp.array2d(dtype=float),
+                t_is_negative_scale: wp.array(dtype=int),
+                t_negative_scale_direction: wp.array2d(dtype=float),
+                t_negative_scale_quaternion: wp.array2d(dtype=float),
+                t_scale_ratio: wp.array(dtype=float),
+                t_update_count: wp.array(dtype=int),
+                t_valid: wp.array(dtype=int)):
+    ns = fk_no_offsets[level]
+    ne = fk_no_offsets[level + 1]
+    i = ns + wp.tid()
+    if i < ne:
+        v = fk_no[i]
+        vt = p_team[v]
+        if kernels.team_frame_mask(t_enabled, t_valid, t_cws, vt) and t_update_count[vt] > k \
+                and t_animation_pose_ratio[vt] <= 0.99 \
+                and t_is_negative_scale[vt] != 0:
+            rox = p_step_basic_rotations[v, 0]
+            roy = p_step_basic_rotations[v, 1]
+            roz = p_step_basic_rotations[v, 2]
+            row = p_step_basic_rotations[v, 3]
+            nx, ny, nz = dmath.quat_to_normal(rox, roy, roz, row)
+            dy = t_negative_scale_direction[vt, 1]
+            dz = t_negative_scale_direction[vt, 2]
+            nnx = nx * dy
+            nny = ny * dy
+            nnz = nz * dy
+            tx, ty, tz = dmath.quat_to_tangent(rox, roy, roz, row)
+            ttx = tx * dz
+            tty = ty * dz
+            ttz = tz * dz
+            lqx, lqy, lqz, lqw = dmath.look_rotation(ttx, tty, ttz, nnx, nny, nnz)
+            p_step_basic_rotations[v, 0] = lqx
+            p_step_basic_rotations[v, 1] = lqy
+            p_step_basic_rotations[v, 2] = lqz
+            p_step_basic_rotations[v, 3] = lqw
+
+
+@wp.kernel
+def phase_15(k: int,
+             baseline_entries: wp.array(dtype=int),
+             p_base_positions: wp.array2d(dtype=float),
+             p_base_rotations: wp.array2d(dtype=float),
+             p_step_basic_positions: wp.array2d(dtype=float),
+             p_step_basic_rotations: wp.array2d(dtype=float),
+             p_team: wp.array(dtype=int),
+             t_animation_pose_ratio: wp.array(dtype=float),
+             t_cws: wp.array2d(dtype=float),
+             t_enabled: wp.array(dtype=int),
+             t_update_count: wp.array(dtype=int),
+             t_valid: wp.array(dtype=int)):
+    i = wp.tid()
+    v = baseline_entries[i]
+    vt = p_team[v]
+    apr = t_animation_pose_ratio[vt]
+    if kernels.team_frame_mask(t_enabled, t_valid, t_cws, vt) and t_update_count[vt] > k \
+            and apr <= 0.99 and apr > EPSILON:
+        p_step_basic_positions[v, 0] = dmath.lerp(p_step_basic_positions[v, 0],
+                                                  p_base_positions[v, 0], apr)
+        p_step_basic_positions[v, 1] = dmath.lerp(p_step_basic_positions[v, 1],
+                                                  p_base_positions[v, 1], apr)
+        p_step_basic_positions[v, 2] = dmath.lerp(p_step_basic_positions[v, 2],
+                                                  p_base_positions[v, 2], apr)
+        qx, qy, qz, qw = dmath.quat_slerp(
+            p_step_basic_rotations[v, 0], p_step_basic_rotations[v, 1],
+            p_step_basic_rotations[v, 2], p_step_basic_rotations[v, 3],
+            p_base_rotations[v, 0], p_base_rotations[v, 1],
+            p_base_rotations[v, 2], p_base_rotations[v, 3], apr)
+        p_step_basic_rotations[v, 0] = qx
+        p_step_basic_rotations[v, 1] = qy
+        p_step_basic_rotations[v, 2] = qz
+        p_step_basic_rotations[v, 3] = qw
+
+
+@wp.kernel
+def phase_18(k: int,
+             p_next_positions: wp.array2d(dtype=float),
+             p_team: wp.array(dtype=int),
+             p_velocity_positions: wp.array2d(dtype=float),
+             sc_dcorr: wp.array2d(dtype=float),
+             t_cws: wp.array2d(dtype=float),
+             t_enabled: wp.array(dtype=int),
+             t_update_count: wp.array(dtype=int),
+             t_valid: wp.array(dtype=int)):
+    p = wp.tid()
+    mt = p_team[p]
+    if kernels.team_frame_mask(t_enabled, t_valid, t_cws, mt) and t_update_count[mt] > k:
+        p_next_positions[p, 0] = p_next_positions[p, 0] + sc_dcorr[p, 0]
+        p_next_positions[p, 1] = p_next_positions[p, 1] + sc_dcorr[p, 1]
+        p_next_positions[p, 2] = p_next_positions[p, 2] + sc_dcorr[p, 2]
+        p_velocity_positions[p, 0] = (p_velocity_positions[p, 0]
+                                      + sc_dcorr[p, 0] * DISTANCE_VELOCITY_ATTENUATION)
+        p_velocity_positions[p, 1] = (p_velocity_positions[p, 1]
+                                      + sc_dcorr[p, 1] * DISTANCE_VELOCITY_ATTENUATION)
+        p_velocity_positions[p, 2] = (p_velocity_positions[p, 2]
+                                      + sc_dcorr[p, 2] * DISTANCE_VELOCITY_ATTENUATION)
+
+
+@wp.kernel
+def phase_19_baseline(k: int,
+                      baseline_entries: wp.array(dtype=int),
+                      p_albuf_length: wp.array(dtype=float),
+                      p_albuf_local_pos: wp.array2d(dtype=float),
+                      p_albuf_local_rot: wp.array2d(dtype=float),
+                      p_albuf_restore: wp.array2d(dtype=float),
+                      p_albuf_rotation: wp.array2d(dtype=float),
+                      p_next_positions: wp.array2d(dtype=float),
+                      p_step_basic_positions: wp.array2d(dtype=float),
+                      p_step_basic_rotations: wp.array2d(dtype=float),
+                      p_team: wp.array(dtype=int),
+                      p_vertex_parent: wp.array(dtype=int),
+                      st_angle_buffered_particle: wp.array(dtype=int),
+                      t_angle_use_limit: wp.array(dtype=int),
+                      t_angle_use_restoration: wp.array(dtype=int),
+                      t_cws: wp.array2d(dtype=float),
+                      t_enabled: wp.array(dtype=int),
+                      t_update_count: wp.array(dtype=int),
+                      t_valid: wp.array(dtype=int)):
+    i = wp.tid()
+    v = baseline_entries[i]
+    vt = p_team[v]
+    if kernels.team_frame_mask(t_enabled, t_valid, t_cws, vt) and t_update_count[vt] > k \
+            and (t_angle_use_limit[vt] != 0 or t_angle_use_restoration[vt] != 0):
+        p_albuf_rotation[v, 0] = p_step_basic_rotations[v, 0]
+        p_albuf_rotation[v, 1] = p_step_basic_rotations[v, 1]
+        p_albuf_rotation[v, 2] = p_step_basic_rotations[v, 2]
+        p_albuf_rotation[v, 3] = p_step_basic_rotations[v, 3]
+
+
+@wp.kernel
+def phase_19_buffered(k: int,
+                      baseline_entries: wp.array(dtype=int),
+                      p_albuf_length: wp.array(dtype=float),
+                      p_albuf_local_pos: wp.array2d(dtype=float),
+                      p_albuf_local_rot: wp.array2d(dtype=float),
+                      p_albuf_restore: wp.array2d(dtype=float),
+                      p_albuf_rotation: wp.array2d(dtype=float),
+                      p_next_positions: wp.array2d(dtype=float),
+                      p_step_basic_positions: wp.array2d(dtype=float),
+                      p_step_basic_rotations: wp.array2d(dtype=float),
+                      p_team: wp.array(dtype=int),
+                      p_vertex_parent: wp.array(dtype=int),
+                      st_angle_buffered_particle: wp.array(dtype=int),
+                      t_angle_use_limit: wp.array(dtype=int),
+                      t_angle_use_restoration: wp.array(dtype=int),
+                      t_cws: wp.array2d(dtype=float),
+                      t_enabled: wp.array(dtype=int),
+                      t_update_count: wp.array(dtype=int),
+                      t_valid: wp.array(dtype=int)):
+    i = wp.tid()
+    v = st_angle_buffered_particle[i]
+    vt = p_team[v]
+    if kernels.team_frame_mask(t_enabled, t_valid, t_cws, vt) and t_update_count[vt] > k \
+            and (t_angle_use_limit[vt] != 0 or t_angle_use_restoration[vt] != 0):
+        par = p_vertex_parent[v]
+        bvx = p_step_basic_positions[v, 0] - p_step_basic_positions[par, 0]
+        bvy = p_step_basic_positions[v, 1] - p_step_basic_positions[par, 1]
+        bvz = p_step_basic_positions[v, 2] - p_step_basic_positions[par, 2]
+        if t_angle_use_limit[vt] != 0:
+            dvx = p_next_positions[v, 0] - p_next_positions[par, 0]
+            dvy = p_next_positions[v, 1] - p_next_positions[par, 1]
+            dvz = p_next_positions[v, 2] - p_next_positions[par, 2]
+            avlen = dmath.length3(dvx, dvy, dvz)
+            bvlen = dmath.length3(bvx, bvy, bvz)
+            if avlen < EPSILON or bvlen < EPSILON:
+                p_albuf_length[v] = 0.0
+                p_albuf_local_pos[v, 0] = 0.0
+                p_albuf_local_pos[v, 1] = 0.0
+                p_albuf_local_pos[v, 2] = 0.0
+                p_albuf_local_rot[v, 0] = 0.0
+                p_albuf_local_rot[v, 1] = 0.0
+                p_albuf_local_rot[v, 2] = 0.0
+                p_albuf_local_rot[v, 3] = 1.0
+            else:
+                safe_bv = bvlen if bvlen > 1.0e-30 else 1.0
+                dirx = bvx / safe_bv
+                diry = bvy / safe_bv
+                dirz = bvz / safe_bv
+                ipx, ipy, ipz, ipw = dmath.quat_inverse(
+                    p_step_basic_rotations[par, 0], p_step_basic_rotations[par, 1],
+                    p_step_basic_rotations[par, 2], p_step_basic_rotations[par, 3])
+                lpx, lpy, lpz = dmath.quat_rotate(ipx, ipy, ipz, ipw, dirx, diry, dirz)
+                lrx, lry, lrz, lrw = dmath.quat_mul(
+                    ipx, ipy, ipz, ipw,
+                    p_step_basic_rotations[v, 0], p_step_basic_rotations[v, 1],
+                    p_step_basic_rotations[v, 2], p_step_basic_rotations[v, 3])
+                p_albuf_length[v] = avlen
+                p_albuf_local_pos[v, 0] = lpx
+                p_albuf_local_pos[v, 1] = lpy
+                p_albuf_local_pos[v, 2] = lpz
+                p_albuf_local_rot[v, 0] = lrx
+                p_albuf_local_rot[v, 1] = lry
+                p_albuf_local_rot[v, 2] = lrz
+                p_albuf_local_rot[v, 3] = lrw
+        if t_angle_use_restoration[vt] != 0:
+            p_albuf_restore[v, 0] = bvx
+            p_albuf_restore[v, 1] = bvy
+            p_albuf_restore[v, 2] = bvz
+
+
+PHASE_LAUNCH_ONCE = "once"
+PHASE_LAUNCH_PER_LEVEL = "per_level"
+
+PHASE_LAUNCH_RULES = (PHASE_LAUNCH_ONCE, PHASE_LAUNCH_PER_LEVEL)
+
+LEVEL_SCALAR_NAME = "level"
+
 PHASE_TABLE = (
-    ("phase_00", ((phase_00_resolve_top, "team"),
-                  (phase_00_snapshot, "team"),
-                  (phase_00_apply, "team"))),
-    ("phase_01", ((phase_01, "team"),)),
-    ("phase_02", ((phase_02, "particle"),)),
-    ("phase_03", ((phase_03, "team"),)),
-    ("phase_03b", ((phase_03b, "team"),)),
-    ("phase_04", ((phase_04, "particle"),)),
-    ("phase_05", ((phase_05, "collider"),)),
-    ("phase_10", ((phase_10, "team"),)),
-    ("phase_11", ((phase_11, "collider"),)),
-    ("phase_12", ((phase_12_animate, "particle"),
-                  (phase_12_force, "update_move"))),
-    ("phase_13", ((phase_13_fixed, "update_fixed"),
-                  (phase_13_spring, "spring"))),
-    ("phase_16", ((phase_16, "tether"),)),
-    ("phase_17", ((phase_17, "particle"),)),
+    ("phase_00", PHASE_LAUNCH_ONCE, ((phase_00_resolve_top, "t_enabled"),
+                                     (phase_00_snapshot, "t_enabled"),
+                                     (phase_00_apply, "t_enabled"))),
+    ("phase_01", PHASE_LAUNCH_ONCE, ((phase_01, "t_enabled"),)),
+    ("phase_02", PHASE_LAUNCH_ONCE, ((phase_02, "p_team"),)),
+    ("phase_03", PHASE_LAUNCH_ONCE, ((phase_03, "t_enabled"),)),
+    ("phase_03b", PHASE_LAUNCH_ONCE, ((phase_03b, "t_enabled"),)),
+    ("phase_04", PHASE_LAUNCH_ONCE, ((phase_04, "p_team"),)),
+    ("phase_05", PHASE_LAUNCH_ONCE, ((phase_05, "c_team"),)),
+    ("phase_10", PHASE_LAUNCH_ONCE, ((phase_10, "t_enabled"),)),
+    ("phase_11", PHASE_LAUNCH_ONCE, ((phase_11, "c_team"),)),
+    ("phase_12", PHASE_LAUNCH_ONCE, ((phase_12_animate, "p_team"),
+                                     (phase_12_force, "st_move_particle"))),
+    ("phase_13", PHASE_LAUNCH_ONCE, ((phase_13_fixed, "st_fixed_particle"),
+                                     (phase_13_spring, "st_spring_particle"))),
+    ("phase_14", PHASE_LAUNCH_PER_LEVEL, ((phase_14_yes, "fk_yes", "fk_yes_offsets"),
+                                          (phase_14_no, "fk_no", "fk_no_offsets"))),
+    ("phase_15", PHASE_LAUNCH_ONCE, ((phase_15, "baseline_entries"),)),
+    ("phase_16", PHASE_LAUNCH_ONCE, ((phase_16, "st_tether_particle"),)),
+    ("phase_17", PHASE_LAUNCH_ONCE, ((phase_17, "p_team"),)),
+    ("phase_18", PHASE_LAUNCH_ONCE, ((phase_18, "p_team"),)),
+    ("phase_19", PHASE_LAUNCH_ONCE, ((phase_19_baseline, "baseline_entries"),
+                                     (phase_19_buffered, "st_angle_buffered_particle"))),
 )

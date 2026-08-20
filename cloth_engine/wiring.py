@@ -3,6 +3,7 @@ from . import plan as _plan
 from . import state as _state
 
 SLOT_BINDINGS = (
+    ("baseline_entries", "derived", "baseline_entries"),
     ("c_active", "collider", "active"),
     ("c_enabled", "collider", "enabled"),
     ("c_enabled_prev", "collider", "enabled_prev"),
@@ -36,6 +37,16 @@ SLOT_BINDINGS = (
     ("csr_center_fixed_order", "derived", "center_fixed_csr_order"),
     ("csr_distance_offsets", "derived", "distance_csr_offsets"),
     ("csr_distance_order", "derived", "distance_csr_order"),
+    ("fk_no", "derived", "fk_no"),
+    ("fk_no_offsets", "derived", "fk_no_offsets"),
+    ("fk_yes", "derived", "fk_yes"),
+    ("fk_yes_offsets", "derived", "fk_yes_offsets"),
+    ("fk_yes_parent", "derived", "fk_yes_parent"),
+    ("p_albuf_length", "particle", "albuf_length"),
+    ("p_albuf_local_pos", "particle", "albuf_local_pos"),
+    ("p_albuf_local_rot", "particle", "albuf_local_rot"),
+    ("p_albuf_restore", "particle", "albuf_restore"),
+    ("p_albuf_rotation", "particle", "albuf_rotation"),
     ("p_attr_move", "particle", "attr_move"),
     ("p_base_positions", "particle", "base_positions"),
     ("p_base_rotations", "particle", "base_rotations"),
@@ -63,12 +74,16 @@ SLOT_BINDINGS = (
     ("p_velocities", "particle", "velocities"),
     ("p_velocity_positions", "particle", "velocity_positions"),
     ("p_vertex_bind_pose_rotations", "particle", "vertex_bind_pose_rotations"),
+    ("p_vertex_local_positions", "particle", "vertex_local_positions"),
+    ("p_vertex_local_rotations", "particle", "vertex_local_rotations"),
+    ("p_vertex_parent", "particle", "vertex_parent"),
     ("p_vertex_root", "particle", "vertex_root"),
     ("p_vertex_root_local", "particle", "vertex_root_local"),
     ("sc_dcorr", "derived", "distance_correction"),
     ("sc_sync", "derived", "synchronization_snapshot"),
     ("scal_f", "frame_scalar", "frame_float"),
     ("scal_i", "frame_scalar", "frame_int"),
+    ("st_angle_buffered_particle", "angle_buffered", "particle"),
     ("st_center_fixed_particle", "center_fixed", "particle"),
     ("st_distance_rest", "distance", "rest"),
     ("st_distance_target", "distance", "target"),
@@ -84,6 +99,8 @@ SLOT_BINDINGS = (
     ("t_anchor_inertia", "team", "anchor_inertia"),
     ("t_anchor_position", "team", "anchor_position"),
     ("t_anchor_rotation", "team", "anchor_rotation"),
+    ("t_angle_use_limit", "team", "angle_use_limit"),
+    ("t_angle_use_restoration", "team", "angle_use_restoration"),
     ("t_angular_velocity", "team", "angular_velocity"),
     ("t_animation_pose_ratio", "team", "animation_pose_ratio"),
     ("t_blend_weight", "team", "blend_weight"),
@@ -219,6 +236,8 @@ SLOT_BINDINGS = (
 
 SCALAR_NAMES = ("k",)
 
+LAUNCH_SCALAR_NAMES = (_phases.LEVEL_SCALAR_NAME,)
+
 
 def _validate_bindings():
     seen = set()
@@ -244,12 +263,24 @@ _validate_bindings()
 SLOT_SOURCE = {slot_name: (storage_name, field_name)
                for slot_name, storage_name, field_name in SLOT_BINDINGS}
 
-PHASE_NAMES = tuple(phase_name for phase_name, _passes in _phases.PHASE_TABLE)
+PHASE_NAMES = tuple(phase_name for phase_name, _rule, _passes in _phases.PHASE_TABLE)
 
-PHASE_PASSES = {phase_name: passes for phase_name, passes in _phases.PHASE_TABLE}
+PHASE_LAUNCH_RULE = {phase_name: rule
+                     for phase_name, rule, _passes in _phases.PHASE_TABLE}
 
-PHASE_LAUNCH_DOMAINS = {phase_name: tuple(launch_domain for _kernel, launch_domain in passes)
-                        for phase_name, passes in _phases.PHASE_TABLE}
+PHASE_PASSES = {phase_name: passes for phase_name, _rule, passes in _phases.PHASE_TABLE}
+
+PHASE_KERNELS = {phase_name: tuple(row[0] for row in passes)
+                 for phase_name, passes in PHASE_PASSES.items()}
+
+PHASE_LAUNCH_SLOTS = {phase_name: tuple(row[1] for row in passes)
+                      for phase_name, passes in PHASE_PASSES.items()}
+
+PHASE_LEVEL_SLOTS = {phase_name: tuple(row[2] for row in passes)
+                     for phase_name, passes in PHASE_PASSES.items()
+                     if PHASE_LAUNCH_RULE[phase_name] == _phases.PHASE_LAUNCH_PER_LEVEL}
+
+PASS_WIDTH = {_phases.PHASE_LAUNCH_ONCE: 2, _phases.PHASE_LAUNCH_PER_LEVEL: 3}
 
 
 def argument_names(kernel):
@@ -257,7 +288,7 @@ def argument_names(kernel):
 
 
 def phase_argument_names(phase_name):
-    return argument_names(PHASE_PASSES[phase_name][0][0])
+    return argument_names(PHASE_KERNELS[phase_name][0])
 
 
 def _validate_pass_name(phase_name, kernel_key, pass_count):
@@ -271,34 +302,94 @@ def _validate_pass_name(phase_name, kernel_key, pass_count):
         "row carries %s" % (phase_name, phase_name, kernel_key)
 
 
+def _validate_pass_slots(phase_name, rule, row, names):
+    for slot_name in row[1:]:
+        assert slot_name in SLOT_SOURCE, \
+            "phase %s launches a pass over %r which is not a bound slot" \
+            % (phase_name, slot_name)
+        assert slot_name in names, \
+            "phase %s launches a pass over %r but the kernel %s does not take that slot, a " \
+            "launch extent comes from an array the pass itself reads" \
+            % (phase_name, slot_name, row[0].key)
+    if rule == _phases.PHASE_LAUNCH_PER_LEVEL:
+        assert names[0] == _phases.LEVEL_SCALAR_NAME, \
+            "phase %s runs one launch per level so the kernel %s has to take %s as its first " \
+            "argument, it takes %s" \
+            % (phase_name, row[0].key, _phases.LEVEL_SCALAR_NAME, names[0])
+        return
+    assert _phases.LEVEL_SCALAR_NAME not in names, \
+        "phase %s runs one launch per pass so the kernel %s must not take %s" \
+        % (phase_name, row[0].key, _phases.LEVEL_SCALAR_NAME)
+
+
 def _validate_phase_table():
     seen = set()
     seen_kernels = set()
-    for phase_name, passes in _phases.PHASE_TABLE:
+    for phase_name, rule, passes in _phases.PHASE_TABLE:
         assert phase_name not in seen, "phase %s is declared twice" % phase_name
         seen.add(phase_name)
+        assert rule in _phases.PHASE_LAUNCH_RULES, \
+            "phase %s declares the launch rule %r, only %r are defined" \
+            % (phase_name, rule, _phases.PHASE_LAUNCH_RULES)
         assert passes, \
             "phase %s declares no pass, a phase is at least one kernel launch" % phase_name
         signature = argument_names(passes[0][0])
-        for kernel, launch_domain in passes:
+        for row in passes:
+            assert len(row) == PASS_WIDTH[rule], \
+                "phase %s runs under the launch rule %r so every pass row carries %d entries, " \
+                "the row carries %d" % (phase_name, rule, PASS_WIDTH[rule], len(row))
+            kernel = row[0]
             assert kernel.key not in seen_kernels, \
                 "the kernel %s appears in more than one phase pass" % kernel.key
             seen_kernels.add(kernel.key)
             _validate_pass_name(phase_name, kernel.key, len(passes))
-            assert launch_domain in _state.DOMAIN_NAMES, \
-                "phase %s launches a pass over %r which is not a state domain" \
-                % (phase_name, launch_domain)
-            assert argument_names(kernel) == signature, \
+            names = argument_names(kernel)
+            assert names == signature, \
                 "phase %s pass %s takes %r while its first pass takes %r, every pass of a " \
                 "phase carries the signature of the reference phase" \
-                % (phase_name, kernel.key, list(argument_names(kernel)), list(signature))
-            for name in argument_names(kernel):
-                assert name in SLOT_SOURCE or name in SCALAR_NAMES, \
+                % (phase_name, kernel.key, list(names), list(signature))
+            for name in names:
+                assert (name in SLOT_SOURCE or name in SCALAR_NAMES
+                        or name in LAUNCH_SCALAR_NAMES), \
                     "phase %s takes the argument %s which is neither a bound slot nor a " \
                     "declared scalar" % (phase_name, name)
+            _validate_pass_slots(phase_name, rule, row, names)
 
 
 _validate_phase_table()
+
+
+def slot_extent(state, slot_name):
+    storage_name, field_name = SLOT_SOURCE[slot_name]
+    return state.plane_element_count(storage_name, field_name)
+
+
+def phase_level_count(state, phase_name):
+    declared = set()
+    for _kernel, _entries_slot, offsets_slot in PHASE_PASSES[phase_name]:
+        declared.add(slot_extent(state, offsets_slot) - 1)
+    assert len(declared) == 1, \
+        "phase %s runs its passes over the same levels so every offset plane holds the same " \
+        "number of levels, the state holds %r" % (phase_name, sorted(declared))
+    level_count = declared.pop()
+    assert level_count >= 0, \
+        "phase %s reads a level offset plane of %d elements, a level offset plane holds one " \
+        "element more than the number of levels" % (phase_name, level_count + 1)
+    return level_count
+
+
+def phase_launches(state, phase_name):
+    passes = PHASE_PASSES[phase_name]
+    if PHASE_LAUNCH_RULE[phase_name] == _phases.PHASE_LAUNCH_ONCE:
+        return tuple((kernel, _plan.launch_dimension(slot_extent(state, slot_name)), {})
+                     for kernel, slot_name in passes)
+    launches = []
+    for level in range(phase_level_count(state, phase_name)):
+        for kernel, entries_slot, _offsets_slot in passes:
+            launches.append((kernel,
+                             _plan.launch_dimension(slot_extent(state, entries_slot)),
+                             {_phases.LEVEL_SCALAR_NAME: level}))
+    return tuple(launches)
 
 
 def phase_inputs(state, kernel, scalars):
@@ -315,7 +406,7 @@ def phase_inputs(state, kernel, scalars):
 
 
 def record_phase(plan, state, phase_name, scalars):
-    for kernel, launch_domain in PHASE_PASSES[phase_name]:
-        plan.record(kernel,
-                    _plan.launch_dimension(state.element_count(launch_domain)),
-                    phase_inputs(state, kernel, scalars))
+    for kernel, dimension, launch_scalars in phase_launches(state, phase_name):
+        supplied = dict(scalars)
+        supplied.update(launch_scalars)
+        plan.record(kernel, dimension, phase_inputs(state, kernel, supplied))
