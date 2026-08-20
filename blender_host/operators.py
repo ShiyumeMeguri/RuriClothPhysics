@@ -153,10 +153,11 @@ def _make_collider(context, collection, name, shape, location, radius):
     return empty
 
 
-def _make_capsule(context, collection, name, start_location, end_location, radius):
-    empty = _make_collider(context, collection, name, 'CAPSULE', start_location, radius)
-    end = _link_empty(context, collection, name + ".end", collider_geom.END_DISPLAY_TYPE,
-                      radius, end_location)
+def _make_capsule(context, collection, base, start_location, end_location, radius):
+    empty = _make_collider(context, collection, collider_geom.collider_name('CAPSULE', base),
+                           'CAPSULE', start_location, radius)
+    end = _link_empty(context, collection, collider_geom.end_name(base),
+                      collider_geom.END_DISPLAY_TYPE, radius, end_location)
     empty.ruri_cloth_physics_collider.end_object = end
     return empty, end
 
@@ -200,14 +201,15 @@ class RCP_OT_collider_create(bpy.types.Operator):
             tail = head.copy()
             tail.z += 0.2
             radius = 0.05
-            base = "碰撞体"
+            base = ""
         parts = []
         if self.shape == 'CAPSULE':
-            empty, end = _make_capsule(context, collection, base + ".胶囊", head, tail, radius)
+            empty, end = _make_capsule(context, collection, base, head, tail, radius)
             parts = [empty, end]
         else:
             center = head if self.shape == 'PLANE' else (head + tail) * 0.5
-            empty = _make_collider(context, collection, base + ".碰撞体", self.shape,
+            empty = _make_collider(context, collection,
+                                   collider_geom.collider_name(self.shape, base), self.shape,
                                    center, radius)
             parts = [empty]
         if pose_bone is not None:
@@ -269,7 +271,8 @@ class RCP_OT_collider_end_create(bpy.types.Operator):
         settings = obj.ruri_cloth_physics_collider
         offset = mathutils.Vector((0.0, 0.0, max(obj.empty_display_size, 0.001) * 4.0))
         collection = obj.users_collection[0] if obj.users_collection else context.collection
-        end = _link_empty(context, collection, obj.name + ".end", collider_geom.END_DISPLAY_TYPE,
+        end = _link_empty(context, collection, collider_geom.end_name(collider_geom.base_name(obj)),
+                          collider_geom.END_DISPLAY_TYPE,
                           obj.empty_display_size, obj.matrix_world.translation + offset)
         constraint = collider_geom.bone_constraint(obj)
         if constraint is not None and constraint.target is not None:
@@ -413,7 +416,8 @@ class RCP_OT_collider_mirror(bpy.types.Operator):
         if end is None or end is source_end or end is target or collider_geom.is_collider(end):
             end = collider_geom.new_empty(
                 _collection_of(context, target),
-                collider_geom.flip_side_name(source_end.name) or (target.name + ".end"),
+                collider_geom.flip_side_name(source_end.name)
+                or collider_geom.end_name(collider_geom.base_name(target)),
                 collider_geom.END_DISPLAY_TYPE, source_end.empty_display_size)
             target_settings.end_object = end
         return end
@@ -496,7 +500,7 @@ class RCP_OT_colliders_from_selected(bpy.types.Operator):
                 continue
             matrix = obj.matrix_world
             radius = max(pose_bone.length * 0.2, 0.005)
-            empty, end = _make_capsule(context, collection, name + ".胶囊",
+            empty, end = _make_capsule(context, collection, name,
                                        matrix @ pose_bone.head, matrix @ pose_bone.tail, radius)
             for part in (empty, end):
                 collider_geom.attach_to_bone(context.view_layer, part, obj, name)
@@ -711,7 +715,7 @@ class RCP_OT_wind_zone_add(bpy.types.Operator):
     bl_options = {'REGISTER', 'UNDO'}
 
     def execute(self, context):
-        empty = bpy.data.objects.new("风区", None)
+        empty = bpy.data.objects.new("WindZone", None)
         empty.empty_display_size = 1.0
         empty.location = context.scene.cursor.location
         context.collection.objects.link(empty)

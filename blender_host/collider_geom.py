@@ -18,8 +18,10 @@ END_DISPLAY_TYPE = 'CIRCLE'
 
 MINIMUM_RADIUS = 1e-5
 
-COLLECTION_SUFFIX = "碰撞体"
-BONE_CONSTRAINT = "Ruri 跟随骨骼"
+COLLECTION_SUFFIX = "Colliders"
+BONE_CONSTRAINT = "Ruri Follow Bone"
+SHAPE_PREFIX = {'SPHERE': "Sphere", 'CAPSULE': "Capsule", 'PLANE': "Plane"}
+END_PREFIX = "CapsuleEnd"
 
 FOLLOW_NONE = 'NONE'
 FOLLOW_BONE = 'BONE'
@@ -43,6 +45,22 @@ def flip_side_name(name):
         parts[index] = _match_case(part, word)
         flipped = True
     return "".join(parts) if flipped else ""
+
+
+def collider_name(shape, base):
+    return "%s.%s" % (SHAPE_PREFIX[shape], base) if base else SHAPE_PREFIX[shape]
+
+
+def end_name(base):
+    return "%s.%s" % (END_PREFIX, base) if base else END_PREFIX
+
+
+def base_name(obj):
+    for prefix in tuple(SHAPE_PREFIX.values()) + (END_PREFIX,):
+        head = prefix + "."
+        if obj.name.startswith(head):
+            return obj.name[len(head):]
+    return obj.name
 
 
 def settings_of(obj):
@@ -94,6 +112,10 @@ def collection_for(scene, armature_object, create=False):
     for collection in scene.collection.children_recursive:
         if collection.name == name:
             return collection
+    for obj in scene.objects:
+        constraint = bone_constraint(obj) if is_collider(obj) else None
+        if constraint is not None and constraint.target is armature_object and obj.users_collection:
+            return obj.users_collection[0]
     if not create:
         return None
     collection = bpy.data.collections.new(name)
@@ -134,7 +156,21 @@ def new_empty(collection, name, display_type, display_size):
 
 
 def bone_constraint(obj):
-    return obj.constraints.get(BONE_CONSTRAINT)
+    found = obj.constraints.get(BONE_CONSTRAINT)
+    if found is not None:
+        return found
+    for constraint in obj.constraints:
+        if constraint.type == 'CHILD_OF' and constraint.target is not None:
+            return constraint
+    return None
+
+
+def ensure_bone_constraint(obj):
+    constraint = bone_constraint(obj)
+    if constraint is None:
+        constraint = obj.constraints.new('CHILD_OF')
+    constraint.name = BONE_CONSTRAINT
+    return constraint
 
 
 def detach(obj):
@@ -153,9 +189,7 @@ def bone_world(armature_object, bone_name):
 def attach_to_bone(view_layer, obj, armature_object, bone_name):
     view_layer.update()
     world = obj.matrix_world.copy()
-    detach(obj)
-    constraint = obj.constraints.new('CHILD_OF')
-    constraint.name = BONE_CONSTRAINT
+    constraint = ensure_bone_constraint(obj)
     constraint.target = armature_object
     constraint.subtarget = bone_name
     view_layer.update()
@@ -220,8 +254,7 @@ def _place(obj, armature_object, data, view_layer):
     if reference.get("kind", FOLLOW_NONE) == FOLLOW_BONE:
         bone_name = reference.get("bone", "")
         if bone_name in armature_object.pose.bones:
-            constraint = obj.constraints.new('CHILD_OF')
-            constraint.name = BONE_CONSTRAINT
+            constraint = ensure_bone_constraint(obj)
             constraint.target = armature_object
             constraint.subtarget = bone_name
             constraint.inverse_matrix = space.inverted_safe()
@@ -234,7 +267,7 @@ def _place(obj, armature_object, data, view_layer):
 
 def deserialize(data, armature_object, collection, view_layer):
     shape = data.get("shape", 'SPHERE')
-    empty = new_empty(collection, data.get("name", COLLECTION_SUFFIX), DISPLAY_TYPE[shape],
+    empty = new_empty(collection, data.get("name", SHAPE_PREFIX[shape]), DISPLAY_TYPE[shape],
                       data.get("display_size", 0.05))
     settings = settings_of(empty)
     settings.is_collider = True
@@ -243,8 +276,8 @@ def deserialize(data, armature_object, collection, view_layer):
     missing = _place(empty, armature_object, data, view_layer)
     end_data = data.get("end")
     if end_data is not None:
-        end = new_empty(collection, end_data.get("name", empty.name + ".end"), END_DISPLAY_TYPE,
-                        end_data.get("display_size", 0.05))
+        end = new_empty(collection, end_data.get("name", end_name(base_name(empty))),
+                        END_DISPLAY_TYPE, end_data.get("display_size", 0.05))
         missing.extend(_place(end, armature_object, end_data, view_layer))
         settings.end_object = end
     return empty, missing
