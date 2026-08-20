@@ -28,6 +28,8 @@ ANGLE_LIMIT_ROT_RATIO = wp.constant(float(_defs.ANGLE_LIMIT_ROTATION_RATIO))
 ANGLE_LIMIT_ATTENUATION = wp.constant(float(_defs.ANGLE_LIMIT_ATTENUATION))
 COLLIDER_SPHERE = wp.constant(int(_defs.COLLIDER_SPHERE))
 COLLIDER_CAPSULE = wp.constant(int(_defs.COLLIDER_CAPSULE))
+COLLISION_POINT = wp.constant(int(_defs.COLLISION_POINT))
+TO_FIXED = wp.constant(float(1.0e6))
 MAX_DISTANCE_RATIO_FUTURE_PREDICTION = wp.constant(
     float(_defs.MAX_DISTANCE_RATIO_FUTURE_PREDICTION))
 
@@ -159,22 +161,12 @@ def _edge_sphere(p0x: float, p0y: float, p0z: float, p1x: float, p1y: float, p1z
     c1x = nx * (b1 * scale)
     c1y = ny * (b1 * scale)
     c1z = nz * (b1 * scale)
-    dist = near_dist if no_contact else dmath.negate(cval)
     valid = overlap and (not degenerate) and (not miss)
     if not valid:
-        dist = wp.inf
-    if (not valid) or no_contact:
-        c0x = 0.0
-        c0y = 0.0
-        c0z = 0.0
-        c1x = 0.0
-        c1y = 0.0
-        c1z = 0.0
-    if not valid:
-        nx = 0.0
-        ny = 0.0
-        nz = 0.0
-    return (dist, c0x, c0y, c0z, c1x, c1y, c1z, nx, ny, nz)
+        return (wp.inf, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+    if no_contact:
+        return (near_dist, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, nx, ny, nz)
+    return (dmath.negate(cval), c0x, c0y, c0z, c1x, c1y, c1z, nx, ny, nz)
 
 
 @wp.func
@@ -248,22 +240,12 @@ def _edge_capsule(p0x: float, p0y: float, p0z: float, p1x: float, p1y: float, p1
     c1x = nx * (b1 * scale)
     c1y = ny * (b1 * scale)
     c1z = nz * (b1 * scale)
-    dist = near_dist if no_contact else dmath.negate(cval)
     valid = overlap and (not degenerate) and (not miss)
     if not valid:
-        dist = wp.inf
-    if (not valid) or no_contact:
-        c0x = 0.0
-        c0y = 0.0
-        c0z = 0.0
-        c1x = 0.0
-        c1y = 0.0
-        c1z = 0.0
-    if not valid:
-        nx = 0.0
-        ny = 0.0
-        nz = 0.0
-    return (dist, c0x, c0y, c0z, c1x, c1y, c1z, nx, ny, nz)
+        return (wp.inf, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+    if no_contact:
+        return (near_dist, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, nx, ny, nz)
+    return (dmath.negate(cval), c0x, c0y, c0z, c1x, c1y, c1z, nx, ny, nz)
 
 
 @wp.func
@@ -918,6 +900,428 @@ def do_collider_frame_post(ci: int, c_frame_pos: wp.array2d(dtype=float),
         c_old_frame_tip[ci, j] = c_frame_tip[ci, j]
     for j in range(4):
         c_old_frame_rot[ci, j] = c_frame_rot[ci, j]
+
+
+@wp.func
+def do_solve_point(p: int, p_team: wp.array(dtype=int),
+                   p_next_positions: wp.array2d(dtype=float),
+                   p_base_positions: wp.array2d(dtype=float),
+                   p_depth: wp.array(dtype=float),
+                   p_friction: wp.array(dtype=float),
+                   p_collision_normals: wp.array2d(dtype=float),
+                   p_velocity_positions: wp.array2d(dtype=float),
+                   t_collision_mode: wp.array(dtype=int),
+                   t_radius_lut: wp.array2d(dtype=float),
+                   t_scale_ratio: wp.array(dtype=float),
+                   t_is_spring: wp.array(dtype=int),
+                   t_limit_distance_lut: wp.array2d(dtype=float),
+                   c_kind: wp.array(dtype=int),
+                   c_active: wp.array(dtype=int),
+                   c_work_old_pos: wp.array3d(dtype=float),
+                   c_work_next_pos: wp.array3d(dtype=float),
+                   c_work_radius: wp.array2d(dtype=float),
+                   c_work_inv_old_rot: wp.array2d(dtype=float),
+                   c_work_rot: wp.array2d(dtype=float),
+                   c_work_aabb_min: wp.array2d(dtype=float),
+                   c_work_aabb_max: wp.array2d(dtype=float),
+                   csr_off: wp.array(dtype=int),
+                   csr_ord: wp.array(dtype=int),
+                   st_pp_collider: wp.array(dtype=int)):
+    team = p_team[p]
+    if t_collision_mode[team] != COLLISION_POINT:
+        return
+    start = csr_off[p]
+    stop = csr_off[p + 1]
+    if start == stop:
+        return
+    depth = p_depth[p]
+    radius = dmath.evaluate_team_lut(t_radius_lut, team, depth)
+    if radius < 0.0001:
+        radius = 0.0001
+    radius = radius * t_scale_ratio[team]
+    cfr = radius
+    npx = p_next_positions[p, 0]
+    npy = p_next_positions[p, 1]
+    npz = p_next_positions[p, 2]
+    is_spring = t_is_spring[team] != 0
+    max_length = dmath.evaluate_team_lut(t_limit_distance_lut, team, depth)
+    if max_length < 0.0001:
+        max_length = 0.0001
+    max_length = max_length * t_scale_ratio[team]
+    bpx = p_base_positions[p, 0]
+    bpy = p_base_positions[p, 1]
+    bpz = p_base_positions[p, 2]
+    box = radius + cfr
+    pmnx = npx - box
+    pmny = npy - box
+    pmnz = npz - box
+    pmxx = npx + box
+    pmxy = npy + box
+    pmxz = npz + box
+    count = int(0)
+    near_count = int(0)
+    psumx = wp.float64(0.0)
+    psumy = wp.float64(0.0)
+    psumz = wp.float64(0.0)
+    nsumx = wp.float64(0.0)
+    nsumy = wp.float64(0.0)
+    nsumz = wp.float64(0.0)
+    nnx = wp.float64(0.0)
+    nny = wp.float64(0.0)
+    nnz = wp.float64(0.0)
+    min_dist = float(wp.inf)
+    any_active = wp.bool(False)
+    for k in range(start, stop):
+        c = st_pp_collider[csr_ord[k]]
+        if c_active[c] == 0:
+            continue
+        any_active = True
+        kind = c_kind[c]
+        ux = 0.0
+        uy = 0.0
+        uz = 0.0
+        ox = npx
+        oy = npy
+        oz = npz
+        dist = wp.inf
+        if kind == COLLIDER_SPHERE:
+            overlap = (pmnx <= c_work_aabb_max[c, 0]) and (pmxx >= c_work_aabb_min[c, 0]) \
+                and (pmny <= c_work_aabb_max[c, 1]) and (pmxy >= c_work_aabb_min[c, 1]) \
+                and (pmnz <= c_work_aabb_max[c, 2]) and (pmxz >= c_work_aabb_min[c, 2])
+            cldx = c_work_old_pos[c, 0, 0]
+            cldy = c_work_old_pos[c, 0, 1]
+            cldz = c_work_old_pos[c, 0, 2]
+            cnwx = c_work_next_pos[c, 0, 0]
+            cnwy = c_work_next_pos[c, 0, 1]
+            cnwz = c_work_next_pos[c, 0, 2]
+            cradius = c_work_radius[c, 0]
+            nrx, nry, nrz = dmath.normalize3(npx - cldx, npy - cldy, npz - cldz)
+            ppx = cnwx + nrx * (cradius + radius)
+            ppy = cnwy + nry * (cradius + radius)
+            ppz = cnwz + nrz * (cradius + radius)
+            d, outx, outy, outz = dmath.intersect_point_plane_dist(ppx, ppy, ppz,
+                                                                   nrx, nry, nrz,
+                                                                   npx, npy, npz)
+            if is_spring:
+                clx, cly, clz = dmath.clamp_distance(bpx, bpy, bpz, outx, outy, outz,
+                                                     max_length)
+                lspr = dmath.length3(clx - bpx, cly - bpy, clz - bpz)
+                tspr = dmath.saturate(lspr / radius) * 0.85
+                outx = dmath.lerp(clx, npx, tspr)
+                outy = dmath.lerp(cly, npy, tspr)
+                outz = dmath.lerp(clz, npz, tspr)
+                d = d * 3.0
+            if overlap:
+                dist = d
+                ox = outx
+                oy = outy
+                oz = outz
+                ux = nrx
+                uy = nry
+                uz = nrz
+        elif kind == COLLIDER_CAPSULE:
+            overlap = (pmnx <= c_work_aabb_max[c, 0]) and (pmxx >= c_work_aabb_min[c, 0]) \
+                and (pmny <= c_work_aabb_max[c, 1]) and (pmxy >= c_work_aabb_min[c, 1]) \
+                and (pmnz <= c_work_aabb_max[c, 2]) and (pmxz >= c_work_aabb_min[c, 2])
+            sox = c_work_old_pos[c, 0, 0]
+            soy = c_work_old_pos[c, 0, 1]
+            soz = c_work_old_pos[c, 0, 2]
+            eox = c_work_old_pos[c, 1, 0]
+            eoy = c_work_old_pos[c, 1, 1]
+            eoz = c_work_old_pos[c, 1, 2]
+            snx = c_work_next_pos[c, 0, 0]
+            sny = c_work_next_pos[c, 0, 1]
+            snz = c_work_next_pos[c, 0, 2]
+            enx = c_work_next_pos[c, 1, 0]
+            eny = c_work_next_pos[c, 1, 1]
+            enz = c_work_next_pos[c, 1, 2]
+            sr = c_work_radius[c, 0]
+            er = c_work_radius[c, 1]
+            ts = dmath.closest_pt_point_segment_ratio(npx, npy, npz, sox, soy, soz,
+                                                      eox, eoy, eoz)
+            r = sr + (er - sr) * ts
+            d0x = sox + (eox - sox) * ts
+            d0y = soy + (eoy - soy) * ts
+            d0z = soz + (eoz - soz) * ts
+            lvx, lvy, lvz = dmath.quat_rotate(c_work_inv_old_rot[c, 0],
+                                              c_work_inv_old_rot[c, 1],
+                                              c_work_inv_old_rot[c, 2],
+                                              c_work_inv_old_rot[c, 3],
+                                              npx - d0x, npy - d0y, npz - d0z)
+            d1x = snx + (enx - snx) * ts
+            d1y = sny + (eny - sny) * ts
+            d1z = snz + (enz - snz) * ts
+            v2x, v2y, v2z = dmath.quat_rotate(c_work_rot[c, 0], c_work_rot[c, 1],
+                                              c_work_rot[c, 2], c_work_rot[c, 3],
+                                              lvx, lvy, lvz)
+            nrx, nry, nrz = dmath.normalize3(v2x, v2y, v2z)
+            ppx = d1x + nrx * (r + radius)
+            ppy = d1y + nry * (r + radius)
+            ppz = d1z + nrz * (r + radius)
+            d, outx, outy, outz = dmath.intersect_point_plane_dist(ppx, ppy, ppz,
+                                                                   nrx, nry, nrz,
+                                                                   npx, npy, npz)
+            if overlap:
+                dist = d
+                ox = outx
+                oy = outy
+                oz = outz
+                ux = nrx
+                uy = nry
+                uz = nrz
+        else:
+            nrx = c_work_old_pos[c, 0, 0]
+            nry = c_work_old_pos[c, 0, 1]
+            nrz = c_work_old_pos[c, 0, 2]
+            cpx = c_work_next_pos[c, 0, 0]
+            cpy = c_work_next_pos[c, 0, 1]
+            cpz = c_work_next_pos[c, 0, 2]
+            ppx = cpx + nrx * radius
+            ppy = cpy + nry * radius
+            ppz = cpz + nrz * radius
+            d, outx, outy, outz = dmath.intersect_point_plane_dist(ppx, ppy, ppz,
+                                                                   nrx, nry, nrz,
+                                                                   npx, npy, npz)
+            dist = d
+            ox = outx
+            oy = outy
+            oz = outz
+            ux = nrx
+            uy = nry
+            uz = nrz
+        if dist <= 0.0:
+            count += 1
+            psumx += wp.float64(ox - npx)
+            psumy += wp.float64(oy - npy)
+            psumz += wp.float64(oz - npz)
+            nsumx += wp.float64(ux)
+            nsumy += wp.float64(uy)
+            nsumz += wp.float64(uz)
+        if dist <= cfr:
+            near_count += 1
+            nnx += wp.float64(ux)
+            nny += wp.float64(uy)
+            nnz += wp.float64(uz)
+            if dist < min_dist:
+                min_dist = dist
+    if not any_active:
+        return
+    has_push = count > 0
+    sc = float(count) if count > 0 else 1.0
+    navx = wp.float32(nsumx) / sc
+    navy = wp.float32(nsumy) / sc
+    navz = wp.float32(nsumz) / sc
+    normal_length = dmath.length3(navx, navy, navz)
+    pavx = wp.float32(psumx) / sc
+    pavy = wp.float32(psumy) / sc
+    pavz = wp.float32(psumz) / sc
+    tclamp = normal_length if normal_length < 1.0 else 1.0
+    if has_push and (normal_length >= EPSILON):
+        p_next_positions[p, 0] = npx + pavx * tclamp
+        p_next_positions[p, 1] = npy + pavy * tclamp
+        p_next_positions[p, 2] = npz + pavz * tclamp
+    nsx = wp.float32(nnx)
+    nsy = wp.float32(nny)
+    nsz = wp.float32(nnz)
+    near_len = dmath.length3(nsx, nsy, nsz)
+    has_near = (near_count > 0) and (cfr > 0.0) and (near_len * near_len > 1e-6)
+    md = min_dist if (min_dist < wp.inf) else 0.0
+    denom_cfr = cfr if cfr > 0.0 else 1.0
+    friction_val = 1.0 - dmath.saturate(md / denom_cfr)
+    if has_near and (friction_val > p_friction[p]):
+        p_friction[p] = friction_val
+    if has_near:
+        onx, ony, onz = dmath.normalize3(nsx, nsy, nsz)
+        p_collision_normals[p, 0] = onx
+        p_collision_normals[p, 1] = ony
+        p_collision_normals[p, 2] = onz
+    else:
+        p_collision_normals[p, 0] = nsx
+        p_collision_normals[p, 1] = nsy
+        p_collision_normals[p, 2] = nsz
+    if is_spring and has_push:
+        p_velocity_positions[p, 0] = p_velocity_positions[p, 0] + pavx
+        p_velocity_positions[p, 1] = p_velocity_positions[p, 1] + pavy
+        p_velocity_positions[p, 2] = p_velocity_positions[p, 2] + pavz
+
+
+@wp.func
+def do_solve_edge(ee: int, p_team: wp.array(dtype=int),
+                  p_next_positions: wp.array2d(dtype=float),
+                  p_depth: wp.array(dtype=float),
+                  p_attr_move: wp.array(dtype=int),
+                  t_radius_lut: wp.array2d(dtype=float),
+                  t_scale_ratio: wp.array(dtype=float),
+                  c_kind: wp.array(dtype=int),
+                  c_active: wp.array(dtype=int),
+                  c_work_old_pos: wp.array3d(dtype=float),
+                  c_work_next_pos: wp.array3d(dtype=float),
+                  c_work_radius: wp.array2d(dtype=float),
+                  c_work_aabb_min: wp.array2d(dtype=float),
+                  c_work_aabb_max: wp.array2d(dtype=float),
+                  csr_off: wp.array(dtype=int),
+                  csr_ord: wp.array(dtype=int),
+                  st_ep_collider: wp.array(dtype=int),
+                  st_collision_edge: wp.array2d(dtype=int),
+                  sc_dcorr_fixed: wp.array2d(dtype=int),
+                  sc_dcount: wp.array(dtype=int),
+                  sc_col_friction_fixed: wp.array(dtype=int),
+                  sc_col_normal_fixed: wp.array2d(dtype=int)):
+    e0 = st_collision_edge[ee, 0]
+    e1 = st_collision_edge[ee, 1]
+    team = p_team[e0]
+    start = csr_off[ee]
+    stop = csr_off[ee + 1]
+    if start == stop:
+        return
+    p0x = p_next_positions[e0, 0]
+    p0y = p_next_positions[e0, 1]
+    p0z = p_next_positions[e0, 2]
+    p1x = p_next_positions[e1, 0]
+    p1y = p_next_positions[e1, 1]
+    p1z = p_next_positions[e1, 2]
+    r0 = dmath.evaluate_team_lut(t_radius_lut, team, p_depth[e0]) * t_scale_ratio[team]
+    r1 = dmath.evaluate_team_lut(t_radius_lut, team, p_depth[e1]) * t_scale_ratio[team]
+    cfr = (r0 + r1) * 0.5
+    emnx = dmath.fmin2(p0x - r0, p1x - r1) - cfr
+    emny = dmath.fmin2(p0y - r0, p1y - r1) - cfr
+    emnz = dmath.fmin2(p0z - r0, p1z - r1) - cfr
+    emxx = dmath.fmax2(p0x + r0, p1x + r1) + cfr
+    emxy = dmath.fmax2(p0y + r0, p1y + r1) + cfr
+    emxz = dmath.fmax2(p0z + r0, p1z + r1) + cfr
+    count = int(0)
+    near_count = int(0)
+    c0sx = wp.float64(0.0)
+    c0sy = wp.float64(0.0)
+    c0sz = wp.float64(0.0)
+    c1sx = wp.float64(0.0)
+    c1sy = wp.float64(0.0)
+    c1sz = wp.float64(0.0)
+    nsumx = wp.float64(0.0)
+    nsumy = wp.float64(0.0)
+    nsumz = wp.float64(0.0)
+    nnx = wp.float64(0.0)
+    nny = wp.float64(0.0)
+    nnz = wp.float64(0.0)
+    min_dist = float(wp.inf)
+    any_active = wp.bool(False)
+    for k in range(start, stop):
+        c = st_ep_collider[csr_ord[k]]
+        if c_active[c] == 0:
+            continue
+        any_active = True
+        overlap = (emnx <= c_work_aabb_max[c, 0]) and (emxx >= c_work_aabb_min[c, 0]) \
+            and (emny <= c_work_aabb_max[c, 1]) and (emxy >= c_work_aabb_min[c, 1]) \
+            and (emnz <= c_work_aabb_max[c, 2]) and (emxz >= c_work_aabb_min[c, 2])
+        kind = c_kind[c]
+        if kind == COLLIDER_SPHERE:
+            d, a0x, a0y, a0z, a1x, a1y, a1z, ux, uy, uz = _edge_sphere(
+                p0x, p0y, p0z, p1x, p1y, p1z, r0, r1, cfr, overlap,
+                c_work_old_pos[c, 0, 0], c_work_old_pos[c, 0, 1], c_work_old_pos[c, 0, 2],
+                c_work_next_pos[c, 0, 0], c_work_next_pos[c, 0, 1], c_work_next_pos[c, 0, 2],
+                c_work_radius[c, 0])
+        elif kind == COLLIDER_CAPSULE:
+            d, a0x, a0y, a0z, a1x, a1y, a1z, ux, uy, uz = _edge_capsule(
+                p0x, p0y, p0z, p1x, p1y, p1z, r0, r1, cfr, overlap,
+                c_work_old_pos[c, 0, 0], c_work_old_pos[c, 0, 1], c_work_old_pos[c, 0, 2],
+                c_work_old_pos[c, 1, 0], c_work_old_pos[c, 1, 1], c_work_old_pos[c, 1, 2],
+                c_work_next_pos[c, 0, 0], c_work_next_pos[c, 0, 1], c_work_next_pos[c, 0, 2],
+                c_work_next_pos[c, 1, 0], c_work_next_pos[c, 1, 1], c_work_next_pos[c, 1, 2],
+                c_work_radius[c, 0], c_work_radius[c, 1])
+        else:
+            ux = c_work_old_pos[c, 0, 0]
+            uy = c_work_old_pos[c, 0, 1]
+            uz = c_work_old_pos[c, 0, 2]
+            cpx = c_work_next_pos[c, 0, 0]
+            cpy = c_work_next_pos[c, 0, 1]
+            cpz = c_work_next_pos[c, 0, 2]
+            d0, o0x, o0y, o0z = dmath.intersect_point_plane_dist(cpx + ux * r0, cpy + uy * r0,
+                                                                 cpz + uz * r0, ux, uy, uz,
+                                                                 p0x, p0y, p0z)
+            d1, o1x, o1y, o1z = dmath.intersect_point_plane_dist(cpx + ux * r1, cpy + uy * r1,
+                                                                 cpz + uz * r1, ux, uy, uz,
+                                                                 p1x, p1y, p1z)
+            d = d0 if d0 < d1 else d1
+            a0x = o0x - p0x
+            a0y = o0y - p0y
+            a0z = o0z - p0z
+            a1x = o1x - p1x
+            a1y = o1y - p1y
+            a1z = o1z - p1z
+        if d <= 0.0:
+            count += 1
+            c0sx += wp.float64(a0x)
+            c0sy += wp.float64(a0y)
+            c0sz += wp.float64(a0z)
+            c1sx += wp.float64(a1x)
+            c1sy += wp.float64(a1y)
+            c1sz += wp.float64(a1z)
+            nsumx += wp.float64(ux)
+            nsumy += wp.float64(uy)
+            nsumz += wp.float64(uz)
+        if d <= cfr:
+            near_count += 1
+            nnx += wp.float64(ux)
+            nny += wp.float64(uy)
+            nnz += wp.float64(uz)
+            if d < min_dist:
+                min_dist = d
+    if not any_active:
+        return
+    has_push = count > 0
+    sc = float(count) if count > 0 else 1.0
+    navx = wp.float32(nsumx) / sc
+    navy = wp.float32(nsumy) / sc
+    navz = wp.float32(nsumz) / sc
+    normal_length = dmath.length3(navx, navy, navz)
+    tclamp = normal_length if normal_length < 1.0 else 1.0
+    valid = has_push and (normal_length > EPSILON)
+    scale = (tclamp if valid else 0.0) / sc
+    d0x = wp.float32(c0sx) * scale
+    d0y = wp.float32(c0sy) * scale
+    d0z = wp.float32(c0sz) * scale
+    d1x = wp.float32(c1sx) * scale
+    d1y = wp.float32(c1sy) * scale
+    d1z = wp.float32(c1sz) * scale
+    nsx = wp.float32(nnx)
+    nsy = wp.float32(nny)
+    nsz = wp.float32(nnz)
+    near_len = dmath.length3(nsx, nsy, nsz)
+    has_near = (near_count > 0) and (cfr > 0.0) and (near_len * near_len > 1e-6)
+    md = min_dist if (min_dist < wp.inf) else 0.0
+    denom_cfr = cfr if cfr > 0.0 else 1.0
+    friction = 1.0 - dmath.saturate(md / denom_cfr)
+    if has_near:
+        noutx, nouty, noutz = dmath.normalize3(nsx, nsy, nsz)
+    else:
+        noutx = 0.0
+        nouty = 0.0
+        noutz = 0.0
+    move0 = p_attr_move[e0] != 0
+    move1 = p_attr_move[e1] != 0
+    mask0 = has_near and move0
+    mask1 = has_near and move1
+    vint = 1 if valid else 0
+    wp.atomic_add(sc_dcorr_fixed, e0, 0, int(d0x * TO_FIXED))
+    wp.atomic_add(sc_dcorr_fixed, e0, 1, int(d0y * TO_FIXED))
+    wp.atomic_add(sc_dcorr_fixed, e0, 2, int(d0z * TO_FIXED))
+    wp.atomic_add(sc_dcount, e0, vint)
+    wp.atomic_add(sc_dcorr_fixed, e1, 0, int(d1x * TO_FIXED))
+    wp.atomic_add(sc_dcorr_fixed, e1, 1, int(d1y * TO_FIXED))
+    wp.atomic_add(sc_dcorr_fixed, e1, 2, int(d1z * TO_FIXED))
+    wp.atomic_add(sc_dcount, e1, vint)
+    f0 = friction if mask0 else 0.0
+    f1 = friction if mask1 else 0.0
+    wp.atomic_max(sc_col_friction_fixed, e0, int(f0 * TO_FIXED))
+    wp.atomic_max(sc_col_friction_fixed, e1, int(f1 * TO_FIXED))
+    if mask0:
+        wp.atomic_add(sc_col_normal_fixed, e0, 0, int(noutx * TO_FIXED))
+        wp.atomic_add(sc_col_normal_fixed, e0, 1, int(nouty * TO_FIXED))
+        wp.atomic_add(sc_col_normal_fixed, e0, 2, int(noutz * TO_FIXED))
+    if mask1:
+        wp.atomic_add(sc_col_normal_fixed, e1, 0, int(noutx * TO_FIXED))
+        wp.atomic_add(sc_col_normal_fixed, e1, 1, int(nouty * TO_FIXED))
+        wp.atomic_add(sc_col_normal_fixed, e1, 2, int(noutz * TO_FIXED))
 
 
 @wp.func

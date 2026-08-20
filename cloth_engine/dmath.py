@@ -272,10 +272,9 @@ def closest_pt_point_segment_ratio(cx: float, cy: float, cz: float,
     aby = by - ay
     abz = bz - az
     d = abx * abx + aby * aby + abz * abz
-    t = 0.0
     if d > 0.0:
-        t = ((cx - ax) * abx + (cy - ay) * aby + (cz - az) * abz) / d
-    return saturate(t)
+        return saturate(((cx - ax) * abx + (cy - ay) * aby + (cz - az) * abz) / d)
+    return saturate(0.0)
 
 
 @wp.func
@@ -441,13 +440,12 @@ def quat_to_tangent(x: float, y: float, z: float, w: float):
 def quat_angle(ax: float, ay: float, az: float, aw: float,
                bx: float, by: float, bz: float, bw: float):
     d = wp.abs(ax * bx + ay * by + az * bz + aw * bw)
-    result = 0.0
     if d < 0.9999:
         ang = wp.acos(clamp1(d)) * 2.0
         if ang > PI:
-            ang = PI * 2.0 - ang
-        result = ang
-    return result
+            return PI * 2.0 - ang
+        return ang
+    return 0.0
 
 
 @wp.func
