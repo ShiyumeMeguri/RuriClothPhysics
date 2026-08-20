@@ -2542,6 +2542,278 @@ def phase_30(k: int,
         p_velocity_positions[index, 2] = p_velocity_positions[index, 2] + (n2 - o2) * 0.95
 
 
+@wp.kernel
+def phase_42(k: int,
+             p_collision_normals: wp.array2d(dtype=float),
+             p_depth: wp.array(dtype=float),
+             p_friction: wp.array(dtype=float),
+             p_next_positions: wp.array2d(dtype=float),
+             p_old_positions: wp.array2d(dtype=float),
+             p_static_friction: wp.array(dtype=float),
+             p_velocities: wp.array2d(dtype=float),
+             p_velocity_positions: wp.array2d(dtype=float),
+             scal_f: wp.array(dtype=float),
+             st_move_particle: wp.array(dtype=int),
+             st_move_team: wp.array(dtype=int),
+             t_angular_velocity: wp.array(dtype=float),
+             t_centrifugal_acceleration: wp.array(dtype=float),
+             t_cws: wp.array2d(dtype=float),
+             t_dynamic_friction: wp.array(dtype=float),
+             t_enabled: wp.array(dtype=int),
+             t_now_world_position: wp.array2d(dtype=float),
+             t_particle_speed_limit: wp.array(dtype=float),
+             t_rotation_axis: wp.array2d(dtype=float),
+             t_scale_ratio: wp.array(dtype=float),
+             t_static_friction: wp.array(dtype=float),
+             t_update_count: wp.array(dtype=int),
+             t_valid: wp.array(dtype=int),
+             t_velocity_weight: wp.array(dtype=float)):
+    e = wp.tid()
+    sim_dt = scal_f[SCAL_SIM_DT]
+    mt = st_move_team[e]
+    if kernels.team_frame_mask(t_enabled, t_valid, t_cws, mt) and t_update_count[mt] > k:
+        pmi = st_move_particle[e]
+        n0 = p_next_positions[pmi, 0]
+        n1 = p_next_positions[pmi, 1]
+        n2 = p_next_positions[pmi, 2]
+        o0 = p_old_positions[pmi, 0]
+        o1 = p_old_positions[pmi, 1]
+        o2 = p_old_positions[pmi, 2]
+        vo0 = p_velocity_positions[pmi, 0]
+        vo1 = p_velocity_positions[pmi, 1]
+        vo2 = p_velocity_positions[pmi, 2]
+        depth = p_depth[pmi]
+        friction = p_friction[pmi]
+        cn0 = p_collision_normals[pmi, 0]
+        cn1 = p_collision_normals[pmi, 1]
+        cn2 = p_collision_normals[pmi, 2]
+        cn_len2 = cn0 * cn0 + cn1 * cn1 + cn2 * cn2
+        is_collision = (cn_len2 > EPSILON) and (friction > EPSILON)
+        static_param = t_static_friction[mt] * t_scale_ratio[mt]
+        dynamic_param = t_dynamic_friction[mt]
+
+        sfp = p_static_friction[pmi]
+        static_on = static_param > 0.0
+        vx = n0 - o0
+        vy = n1 - o1
+        vz = n2 - o2
+        vdotcn = vx * cn0 + vy * cn1 + vz * cn2
+        tgx = vx - vdotcn * cn0
+        tgy = vy - vdotcn * cn1
+        tgz = vz - vdotcn * cn2
+        tangent_velocity = dmath.length3(tgx, tgy, tgz) / sim_dt
+        increase = dmath.saturate(sfp + 0.04)
+        dec_amount = (tangent_velocity - static_param) / 0.2
+        if dec_amount < 0.05:
+            dec_amount = 0.05
+        decrease = dmath.saturate(sfp - dec_amount)
+        new_static = increase if tangent_velocity < static_param else decrease
+        decayed = dmath.saturate(sfp - 0.05)
+        updated_sf = new_static if is_collision else decayed
+        sfp_new = updated_sf if static_on else decayed
+        rbx = float(0.0)
+        rby = float(0.0)
+        rbz = float(0.0)
+        if static_on and is_collision:
+            rbx = tgx * sfp_new
+            rby = tgy * sfp_new
+            rbz = tgz * sfp_new
+        n0 = n0 - rbx
+        n1 = n1 - rby
+        n2 = n2 - rbz
+        vo0 = vo0 - rbx
+        vo1 = vo1 - rby
+        vo2 = vo2 - rbz
+        p_static_friction[pmi] = sfp_new
+
+        velx = (n0 - vo0) / sim_dt
+        vely = (n1 - vo1) / sim_dt
+        velz = (n2 - vo2) / sim_dt
+        sq_velocity = velx * velx + vely * vely + velz * velz
+        nvx, nvy, nvz = dmath.normalize3(velx, vely, velz)
+        if not (sq_velocity > EPSILON):
+            nvx = 0.0
+            nvy = 0.0
+            nvz = 0.0
+        dynamic_on = dynamic_param > 0.0
+        dd = cn0 * nvx + cn1 * nvy + cn2 * nvz
+        dd = 0.5 + 0.5 * dd
+        dd = dd * dd
+        dd = 1.0 - dd
+        damp = dd * dmath.saturate(friction * dynamic_param)
+        if dynamic_on and is_collision and (sq_velocity >= EPSILON):
+            velx = velx - velx * damp
+            vely = vely - vely * damp
+            velz = velz - velz * damp
+        p_friction[pmi] = friction * 0.6
+
+        speed_limit = t_particle_speed_limit[mt]
+        max_len = speed_limit * t_scale_ratio[mt]
+        if max_len < 0.0:
+            max_len = 0.0
+        if speed_limit >= 0.0:
+            velx, vely, velz = dmath.clamp_vector(velx, vely, velz, max_len)
+
+        angular = t_angular_velocity[mt]
+        centrifugal = t_centrifugal_acceleration[mt]
+        if (angular > EPSILON) and (centrifugal > EPSILON):
+            axx = t_rotation_axis[mt, 0]
+            axy = t_rotation_axis[mt, 1]
+            axz = t_rotation_axis[mt, 2]
+            lpx = n0 - t_now_world_position[mt, 0]
+            lpy = n1 - t_now_world_position[mt, 1]
+            lpz = n2 - t_now_world_position[mt, 2]
+            lp_dot = lpx * axx + lpy * axy + lpz * axz
+            v2x = lpx - lp_dot * axx
+            v2y = lpy - lp_dot * axy
+            v2z = lpz - lp_dot * axz
+            rr = dmath.length3(v2x, v2y, v2z)
+            if (rr > EPSILON) and (sq_velocity >= EPSILON):
+                nx2, ny2, nz2 = dmath.normalize3(v2x, v2y, v2z)
+                mm = 1.0 + (1.0 - depth)
+                ff = mm * angular * angular * rr
+                ucx, ucy, ucz = dmath.cross3(axx, axy, axz, nx2, ny2, nz2)
+                uux, uuy, uuz = dmath.normalize3(ucx, ucy, ucz)
+                ff = ff * dmath.saturate(nvx * uux + nvy * uuy + nvz * uuz)
+                addc = ff * centrifugal * 0.02
+                velx = velx + nx2 * addc
+                vely = vely + ny2 * addc
+                velz = velz + nz2 * addc
+
+        vw = t_velocity_weight[mt]
+        p_velocities[pmi, 0] = velx * vw
+        p_velocities[pmi, 1] = vely * vw
+        p_velocities[pmi, 2] = velz * vw
+        p_next_positions[pmi, 0] = n0
+        p_next_positions[pmi, 1] = n1
+        p_next_positions[pmi, 2] = n2
+
+
+@wp.kernel
+def phase_43(k: int,
+             p_next_positions: wp.array2d(dtype=float),
+             p_old_positions: wp.array2d(dtype=float),
+             p_real_velocities: wp.array2d(dtype=float),
+             p_team: wp.array(dtype=int),
+             scal_f: wp.array(dtype=float),
+             t_cws: wp.array2d(dtype=float),
+             t_enabled: wp.array(dtype=int),
+             t_update_count: wp.array(dtype=int),
+             t_valid: wp.array(dtype=int)):
+    p = wp.tid()
+    sim_dt = scal_f[SCAL_SIM_DT]
+    mt = p_team[p]
+    if kernels.team_frame_mask(t_enabled, t_valid, t_cws, mt) and t_update_count[mt] > k:
+        p_real_velocities[p, 0] = (p_next_positions[p, 0] - p_old_positions[p, 0]) / sim_dt
+        p_real_velocities[p, 1] = (p_next_positions[p, 1] - p_old_positions[p, 1]) / sim_dt
+        p_real_velocities[p, 2] = (p_next_positions[p, 2] - p_old_positions[p, 2]) / sim_dt
+        p_old_positions[p, 0] = p_next_positions[p, 0]
+        p_old_positions[p, 1] = p_next_positions[p, 1]
+        p_old_positions[p, 2] = p_next_positions[p, 2]
+
+
+@wp.kernel
+def phase_44(k: int,
+             c_active: wp.array(dtype=int),
+             c_now_pos: wp.array2d(dtype=float),
+             c_now_rot: wp.array2d(dtype=float),
+             c_now_tip: wp.array2d(dtype=float),
+             c_old_pos: wp.array2d(dtype=float),
+             c_old_rot: wp.array2d(dtype=float),
+             c_old_tip: wp.array2d(dtype=float),
+             c_team: wp.array(dtype=int),
+             t_cws: wp.array2d(dtype=float),
+             t_enabled: wp.array(dtype=int),
+             t_update_count: wp.array(dtype=int),
+             t_valid: wp.array(dtype=int)):
+    ci = wp.tid()
+    cm = c_team[ci]
+    if kernels.team_frame_mask(t_enabled, t_valid, t_cws, cm) and t_update_count[cm] > k \
+            and c_active[ci] != 0:
+        kernels.do_collider_end_step(ci, c_now_pos, c_now_rot, c_now_tip,
+                                     c_old_pos, c_old_rot, c_old_tip)
+
+
+@wp.kernel
+def phase_47(p_display_positions: wp.array2d(dtype=float),
+             p_old_anim_positions: wp.array2d(dtype=float),
+             p_old_anim_rotations: wp.array2d(dtype=float),
+             p_old_positions: wp.array2d(dtype=float),
+             p_positions: wp.array2d(dtype=float),
+             p_real_velocities: wp.array2d(dtype=float),
+             p_rotations: wp.array2d(dtype=float),
+             p_team: wp.array(dtype=int),
+             p_temp_base_positions: wp.array2d(dtype=float),
+             p_temp_base_rotations: wp.array2d(dtype=float),
+             p_vertex_root: wp.array(dtype=int),
+             scal_f: wp.array(dtype=float),
+             st_display_update_move_mask: wp.array(dtype=int),
+             t_blend_weight: wp.array(dtype=float),
+             t_cws: wp.array2d(dtype=float),
+             t_enabled: wp.array(dtype=int),
+             t_is_negative_scale: wp.array(dtype=int),
+             t_negative_scale_direction: wp.array2d(dtype=float),
+             t_now_update: wp.array(dtype=float),
+             t_old_time: wp.array(dtype=float),
+             t_running: wp.array(dtype=int),
+             t_time: wp.array(dtype=float),
+             t_valid: wp.array(dtype=int)):
+    p = wp.tid()
+    sim_dt = scal_f[SCAL_SIM_DT]
+    mt = p_team[p]
+    if kernels.team_frame_mask(t_enabled, t_valid, t_cws, mt):
+        kernels.do_display_particle(p, mt, sim_dt, p_positions, p_rotations, p_old_positions,
+                                    p_real_velocities, p_display_positions, p_vertex_root,
+                                    p_old_anim_positions, p_old_anim_rotations,
+                                    p_temp_base_positions, p_temp_base_rotations,
+                                    st_display_update_move_mask, t_now_update, t_old_time,
+                                    t_time, t_blend_weight, t_running, t_is_negative_scale,
+                                    t_negative_scale_direction)
+
+
+@wp.kernel
+def phase_48(level: int,
+             p_attr_invalid: wp.array(dtype=int),
+             p_attr_move: wp.array(dtype=int),
+             p_attr_zero_distance: wp.array(dtype=int),
+             p_positions: wp.array2d(dtype=float),
+             p_rotations: wp.array2d(dtype=float),
+             p_team: wp.array(dtype=int),
+             p_temp_base_positions: wp.array2d(dtype=float),
+             p_temp_base_rotations: wp.array2d(dtype=float),
+             p_vertex_local_positions: wp.array2d(dtype=float),
+             p_vertex_local_rotations: wp.array2d(dtype=float),
+             postline_child_offsets: wp.array(dtype=int),
+             postline_child_vertices: wp.array(dtype=int),
+             postline_entry_offsets: wp.array(dtype=int),
+             postline_entry_vertices: wp.array(dtype=int),
+             t_animation_pose_ratio: wp.array(dtype=float),
+             t_blend_weight: wp.array(dtype=float),
+             t_cws: wp.array2d(dtype=float),
+             t_enabled: wp.array(dtype=int),
+             t_negative_scale_direction: wp.array2d(dtype=float),
+             t_negative_scale_quaternion: wp.array2d(dtype=float),
+             t_root_rotation: wp.array(dtype=float),
+             t_rotational_interpolation: wp.array(dtype=float),
+             t_valid: wp.array(dtype=int)):
+    pl_start = postline_entry_offsets[level]
+    pl_end = postline_entry_offsets[level + 1]
+    i = pl_start + wp.tid()
+    if i < pl_end:
+        entry = postline_entry_vertices[i]
+        et = p_team[entry]
+        if kernels.team_frame_mask(t_enabled, t_valid, t_cws, et):
+            kernels.do_postline_entry(entry, et, postline_child_offsets[i],
+                                      postline_child_offsets[i + 1], postline_child_vertices,
+                                      p_positions, p_rotations, p_temp_base_positions,
+                                      p_temp_base_rotations, p_vertex_local_positions,
+                                      p_vertex_local_rotations, p_attr_invalid,
+                                      p_attr_zero_distance, p_attr_move, p_team,
+                                      t_rotational_interpolation, t_root_rotation,
+                                      t_blend_weight, t_animation_pose_ratio,
+                                      t_negative_scale_direction, t_negative_scale_quaternion)
+
+
 REPEAT_COUNT_FROM_OFFSET_PLANES = "offset_planes"
 REPEAT_COUNT_FROM_MODULE_CONSTANT = "module_constant"
 
@@ -2585,4 +2857,10 @@ PHASE_TABLE = (
     ("phase_28", (), ((phase_28, "p_team"),)),
     ("phase_29", (), ((phase_29, "p_team"),)),
     ("phase_30", (), ((phase_30, "st_motion_particle"),)),
+    ("phase_42", (), ((phase_42, "st_move_particle"),)),
+    ("phase_43", (), ((phase_43, "p_team"),)),
+    ("phase_44", (), ((phase_44, "c_team"),)),
+    ("phase_47", (), ((phase_47, "p_team"),)),
+    ("phase_48", (("level", REPEAT_COUNT_FROM_OFFSET_PLANES, ("postline_entry_offsets",)),),
+     ((phase_48, "postline_entry_vertices"),)),
 )
