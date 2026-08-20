@@ -7,6 +7,7 @@ from . import policy
 from .dmath import FRICTION_MASS
 from .kernels import ANGLE_LIMIT_ITERATION
 from .kernels import BENDING_FIXED_INVERSE_MASS
+from .kernels import COLLISION_EDGE
 from .kernels import DISTANCE_VELOCITY_ATTENUATION
 from .kernels import EPSILON
 from .kernels import FORCE_VELOCITY_ADD
@@ -2259,6 +2260,288 @@ def phase_23(k: int,
                                   + float(sc_dcorr_fixed[p, 2]) / TO_FIXED * inv_c)
 
 
+@wp.kernel
+def phase_24(k: int,
+             c_active: wp.array(dtype=int),
+             c_kind: wp.array(dtype=int),
+             c_work_aabb_max: wp.array2d(dtype=float),
+             c_work_aabb_min: wp.array2d(dtype=float),
+             c_work_inv_old_rot: wp.array2d(dtype=float),
+             c_work_next_pos: wp.array3d(dtype=float),
+             c_work_old_pos: wp.array3d(dtype=float),
+             c_work_radius: wp.array2d(dtype=float),
+             c_work_rot: wp.array2d(dtype=float),
+             csr_point_pair_offsets: wp.array(dtype=int),
+             csr_point_pair_order: wp.array(dtype=int),
+             p_base_positions: wp.array2d(dtype=float),
+             p_collision_normals: wp.array2d(dtype=float),
+             p_depth: wp.array(dtype=float),
+             p_friction: wp.array(dtype=float),
+             p_next_positions: wp.array2d(dtype=float),
+             p_team: wp.array(dtype=int),
+             p_velocity_positions: wp.array2d(dtype=float),
+             st_point_pair_collider: wp.array(dtype=int),
+             t_collision_mode: wp.array(dtype=int),
+             t_cws: wp.array2d(dtype=float),
+             t_enabled: wp.array(dtype=int),
+             t_is_spring: wp.array(dtype=int),
+             t_limit_distance_lut: wp.array2d(dtype=float),
+             t_radius_lut: wp.array2d(dtype=float),
+             t_scale_ratio: wp.array(dtype=float),
+             t_update_count: wp.array(dtype=int),
+             t_valid: wp.array(dtype=int)):
+    p = wp.tid()
+    mt = p_team[p]
+    if kernels.team_frame_mask(t_enabled, t_valid, t_cws, mt) and t_update_count[mt] > k:
+        kernels.do_solve_point(p, p_team, p_next_positions, p_base_positions, p_depth,
+                               p_friction, p_collision_normals, p_velocity_positions,
+                               t_collision_mode, t_radius_lut, t_scale_ratio, t_is_spring,
+                               t_limit_distance_lut, c_kind, c_active, c_work_old_pos,
+                               c_work_next_pos, c_work_radius, c_work_inv_old_rot, c_work_rot,
+                               c_work_aabb_min, c_work_aabb_max,
+                               csr_point_pair_offsets, csr_point_pair_order,
+                               st_point_pair_collider)
+
+
+@wp.kernel
+def phase_25(p_team: wp.array(dtype=int),
+             sc_col_friction_fixed: wp.array(dtype=int),
+             sc_col_normal_fixed: wp.array2d(dtype=int),
+             sc_dcorr_fixed: wp.array2d(dtype=int),
+             sc_dcount: wp.array(dtype=int)):
+    p = wp.tid()
+    sc_dcorr_fixed[p, 0] = 0
+    sc_dcorr_fixed[p, 1] = 0
+    sc_dcorr_fixed[p, 2] = 0
+    sc_dcount[p] = 0
+    sc_col_friction_fixed[p] = 0
+    sc_col_normal_fixed[p, 0] = 0
+    sc_col_normal_fixed[p, 1] = 0
+    sc_col_normal_fixed[p, 2] = 0
+
+
+@wp.kernel
+def phase_26(k: int,
+             c_active: wp.array(dtype=int),
+             c_kind: wp.array(dtype=int),
+             c_work_aabb_max: wp.array2d(dtype=float),
+             c_work_aabb_min: wp.array2d(dtype=float),
+             c_work_next_pos: wp.array3d(dtype=float),
+             c_work_old_pos: wp.array3d(dtype=float),
+             c_work_radius: wp.array2d(dtype=float),
+             csr_edge_pair_offsets: wp.array(dtype=int),
+             csr_edge_pair_order: wp.array(dtype=int),
+             p_attr_move: wp.array(dtype=int),
+             p_depth: wp.array(dtype=float),
+             p_next_positions: wp.array2d(dtype=float),
+             p_team: wp.array(dtype=int),
+             sc_col_friction_fixed: wp.array(dtype=int),
+             sc_col_normal_fixed: wp.array2d(dtype=int),
+             sc_dcorr_fixed: wp.array2d(dtype=int),
+             sc_dcount: wp.array(dtype=int),
+             st_collision_edge: wp.array2d(dtype=int),
+             st_edge_pair_collider: wp.array(dtype=int),
+             t_collision_mode: wp.array(dtype=int),
+             t_cws: wp.array2d(dtype=float),
+             t_enabled: wp.array(dtype=int),
+             t_radius_lut: wp.array2d(dtype=float),
+             t_scale_ratio: wp.array(dtype=float),
+             t_update_count: wp.array(dtype=int),
+             t_valid: wp.array(dtype=int)):
+    ee = wp.tid()
+    et = p_team[st_collision_edge[ee, 0]]
+    if kernels.team_frame_mask(t_enabled, t_valid, t_cws, et) and t_update_count[et] > k \
+            and t_collision_mode[et] == COLLISION_EDGE:
+        kernels.do_solve_edge(ee, p_team, p_next_positions, p_depth, p_attr_move,
+                              t_radius_lut, t_scale_ratio, c_kind, c_active, c_work_old_pos,
+                              c_work_next_pos, c_work_radius, c_work_aabb_min,
+                              c_work_aabb_max, csr_edge_pair_offsets, csr_edge_pair_order,
+                              st_edge_pair_collider, st_collision_edge, sc_dcorr_fixed,
+                              sc_dcount, sc_col_friction_fixed, sc_col_normal_fixed)
+
+
+@wp.kernel
+def phase_27(k: int,
+             p_collision_normals: wp.array2d(dtype=float),
+             p_friction: wp.array(dtype=float),
+             p_next_positions: wp.array2d(dtype=float),
+             p_team: wp.array(dtype=int),
+             sc_col_friction_fixed: wp.array(dtype=int),
+             sc_col_normal_fixed: wp.array2d(dtype=int),
+             sc_dcorr_fixed: wp.array2d(dtype=int),
+             sc_dcount: wp.array(dtype=int),
+             t_collision_mode: wp.array(dtype=int),
+             t_cws: wp.array2d(dtype=float),
+             t_enabled: wp.array(dtype=int),
+             t_update_count: wp.array(dtype=int),
+             t_valid: wp.array(dtype=int)):
+    p = wp.tid()
+    mt = p_team[p]
+    if kernels.team_frame_mask(t_enabled, t_valid, t_cws, mt) and t_update_count[mt] > k \
+            and t_collision_mode[mt] == COLLISION_EDGE:
+        cnt = sc_dcount[p]
+        if cnt > 0:
+            inv_e = 1.0 / float(cnt)
+            p_next_positions[p, 0] = (p_next_positions[p, 0]
+                                      + float(sc_dcorr_fixed[p, 0]) / TO_FIXED * inv_e)
+            p_next_positions[p, 1] = (p_next_positions[p, 1]
+                                      + float(sc_dcorr_fixed[p, 1]) / TO_FIXED * inv_e)
+            p_next_positions[p, 2] = (p_next_positions[p, 2]
+                                      + float(sc_dcorr_fixed[p, 2]) / TO_FIXED * inv_e)
+        ef = float(sc_col_friction_fixed[p]) / TO_FIXED
+        if ef > p_friction[p]:
+            p_friction[p] = ef
+        enx = float(sc_col_normal_fixed[p, 0]) / TO_FIXED
+        eny = float(sc_col_normal_fixed[p, 1]) / TO_FIXED
+        enz = float(sc_col_normal_fixed[p, 2]) / TO_FIXED
+        if (enx * enx + eny * eny + enz * enz) > 0.0:
+            onx, ony, onz = dmath.normalize3(enx, eny, enz)
+            p_collision_normals[p, 0] = onx
+            p_collision_normals[p, 1] = ony
+            p_collision_normals[p, 2] = onz
+
+
+@wp.kernel
+def phase_28(k: int,
+             csr_distance_offsets: wp.array(dtype=int),
+             csr_distance_order: wp.array(dtype=int),
+             p_attr_move: wp.array(dtype=int),
+             p_base_positions: wp.array2d(dtype=float),
+             p_depth: wp.array(dtype=float),
+             p_friction: wp.array(dtype=float),
+             p_next_positions: wp.array2d(dtype=float),
+             p_team: wp.array(dtype=int),
+             sc_dcorr: wp.array2d(dtype=float),
+             scal_f: wp.array(dtype=float),
+             st_distance_rest: wp.array(dtype=float),
+             st_distance_target: wp.array(dtype=int),
+             t_animation_pose_ratio: wp.array(dtype=float),
+             t_cws: wp.array2d(dtype=float),
+             t_distance_lut: wp.array2d(dtype=float),
+             t_enabled: wp.array(dtype=int),
+             t_init_scale: wp.array2d(dtype=float),
+             t_is_spring: wp.array(dtype=int),
+             t_scale_ratio: wp.array(dtype=float),
+             t_update_count: wp.array(dtype=int),
+             t_valid: wp.array(dtype=int)):
+    p = wp.tid()
+    power1 = scal_f[SCAL_POWER1]
+    mt = p_team[p]
+    if kernels.team_frame_mask(t_enabled, t_valid, t_cws, mt) and t_update_count[mt] > k:
+        kernels.do_distance_gather(p, p_team, p_next_positions, p_base_positions, p_depth,
+                                   p_friction, p_attr_move, t_is_spring, t_animation_pose_ratio,
+                                   t_init_scale, t_scale_ratio, t_distance_lut, power1,
+                                   csr_distance_offsets, csr_distance_order,
+                                   st_distance_target, st_distance_rest, sc_dcorr)
+
+
+@wp.kernel
+def phase_29(k: int,
+             p_next_positions: wp.array2d(dtype=float),
+             p_team: wp.array(dtype=int),
+             p_velocity_positions: wp.array2d(dtype=float),
+             sc_dcorr: wp.array2d(dtype=float),
+             t_cws: wp.array2d(dtype=float),
+             t_enabled: wp.array(dtype=int),
+             t_update_count: wp.array(dtype=int),
+             t_valid: wp.array(dtype=int)):
+    p = wp.tid()
+    mt = p_team[p]
+    if kernels.team_frame_mask(t_enabled, t_valid, t_cws, mt) and t_update_count[mt] > k:
+        p_next_positions[p, 0] = p_next_positions[p, 0] + sc_dcorr[p, 0]
+        p_next_positions[p, 1] = p_next_positions[p, 1] + sc_dcorr[p, 1]
+        p_next_positions[p, 2] = p_next_positions[p, 2] + sc_dcorr[p, 2]
+        p_velocity_positions[p, 0] = (p_velocity_positions[p, 0]
+                                      + sc_dcorr[p, 0] * DISTANCE_VELOCITY_ATTENUATION)
+        p_velocity_positions[p, 1] = (p_velocity_positions[p, 1]
+                                      + sc_dcorr[p, 1] * DISTANCE_VELOCITY_ATTENUATION)
+        p_velocity_positions[p, 2] = (p_velocity_positions[p, 2]
+                                      + sc_dcorr[p, 2] * DISTANCE_VELOCITY_ATTENUATION)
+
+
+@wp.kernel
+def phase_30(k: int,
+             p_base_positions: wp.array2d(dtype=float),
+             p_base_rotations: wp.array2d(dtype=float),
+             p_depth: wp.array(dtype=float),
+             p_next_positions: wp.array2d(dtype=float),
+             p_velocity_positions: wp.array2d(dtype=float),
+             st_motion_particle: wp.array(dtype=int),
+             st_motion_team: wp.array(dtype=int),
+             t_cws: wp.array2d(dtype=float),
+             t_enabled: wp.array(dtype=int),
+             t_motion_backstop_lut: wp.array2d(dtype=float),
+             t_motion_backstop_radius: wp.array(dtype=float),
+             t_motion_max_distance_lut: wp.array2d(dtype=float),
+             t_motion_stiffness: wp.array(dtype=float),
+             t_motion_use_backstop: wp.array(dtype=int),
+             t_motion_use_max_distance: wp.array(dtype=int),
+             t_normal_axis_vector: wp.array2d(dtype=float),
+             t_radius_lut: wp.array2d(dtype=float),
+             t_update_count: wp.array(dtype=int),
+             t_valid: wp.array(dtype=int)):
+    e = wp.tid()
+    mt = st_motion_team[e]
+    use_max = t_motion_use_max_distance[mt] != 0
+    use_backstop = t_motion_use_backstop[mt] != 0
+    if kernels.team_frame_mask(t_enabled, t_valid, t_cws, mt) and t_update_count[mt] > k \
+            and (use_max or use_backstop):
+        index = st_motion_particle[e]
+        stiffness = t_motion_stiffness[mt]
+        backstop_radius = t_motion_backstop_radius[mt]
+        o0 = p_next_positions[index, 0]
+        o1 = p_next_positions[index, 1]
+        o2 = p_next_positions[index, 2]
+        n0 = float(o0)
+        n1 = float(o1)
+        n2 = float(o2)
+        b0 = p_base_positions[index, 0]
+        b1 = p_base_positions[index, 1]
+        b2 = p_base_positions[index, 2]
+        depth = p_depth[index]
+        radius = dmath.evaluate_team_lut(t_radius_lut, mt, depth)
+        if radius < 0.0001:
+            radius = 0.0001
+        cfr = radius
+        depth2 = depth * depth
+        dirx, diry, dirz = dmath.quat_rotate(
+            p_base_rotations[index, 0], p_base_rotations[index, 1],
+            p_base_rotations[index, 2], p_base_rotations[index, 3],
+            t_normal_axis_vector[mt, 0], t_normal_axis_vector[mt, 1],
+            t_normal_axis_vector[mt, 2])
+        if use_max:
+            max_distance = dmath.evaluate_team_lut(t_motion_max_distance_lut, mt, depth2)
+            cvx, cvy, cvz = dmath.clamp_vector(n0 - b0, n1 - b1, n2 - b2, max_distance)
+            n0 = b0 + cvx
+            n1 = b1 + cvy
+            n2 = b2 + cvz
+        if use_backstop and backstop_radius > 0.0:
+            backstop_distance = dmath.evaluate_team_lut(t_motion_backstop_lut, mt, depth2)
+            backstop_offset = backstop_distance + backstop_radius
+            cx = b0 - dirx * backstop_offset
+            cy = b1 - diry * backstop_offset
+            cz = b2 - dirz * backstop_offset
+            vx = n0 - cx
+            vy = n1 - cy
+            vz = n2 - cz
+            center_distance = dmath.length3(vx, vy, vz)
+            near = (center_distance > EPSILON) and (center_distance < backstop_radius + cfr)
+            if near and (center_distance < backstop_radius):
+                safe_distance = center_distance if center_distance > 1e-30 else 1.0
+                n0 = cx + vx / safe_distance * backstop_radius
+                n1 = cy + vy / safe_distance * backstop_radius
+                n2 = cz + vz / safe_distance * backstop_radius
+        n0 = dmath.lerp(o0, n0, stiffness)
+        n1 = dmath.lerp(o1, n1, stiffness)
+        n2 = dmath.lerp(o2, n2, stiffness)
+        p_next_positions[index, 0] = n0
+        p_next_positions[index, 1] = n1
+        p_next_positions[index, 2] = n2
+        p_velocity_positions[index, 0] = p_velocity_positions[index, 0] + (n0 - o0) * 0.95
+        p_velocity_positions[index, 1] = p_velocity_positions[index, 1] + (n1 - o1) * 0.95
+        p_velocity_positions[index, 2] = p_velocity_positions[index, 2] + (n2 - o2) * 0.95
+
+
 REPEAT_COUNT_FROM_OFFSET_PLANES = "offset_planes"
 REPEAT_COUNT_FROM_MODULE_CONSTANT = "module_constant"
 
@@ -2295,4 +2578,11 @@ PHASE_TABLE = (
     ("phase_21", (), ((phase_21, "p_team"),)),
     ("phase_22", (), ((phase_22, "st_bending_team"),)),
     ("phase_23", (), ((phase_23, "p_team"),)),
+    ("phase_24", (), ((phase_24, "p_team"),)),
+    ("phase_25", (), ((phase_25, "p_team"),)),
+    ("phase_26", (), ((phase_26, "st_collision_edge"),)),
+    ("phase_27", (), ((phase_27, "p_team"),)),
+    ("phase_28", (), ((phase_28, "p_team"),)),
+    ("phase_29", (), ((phase_29, "p_team"),)),
+    ("phase_30", (), ((phase_30, "st_motion_particle"),)),
 )

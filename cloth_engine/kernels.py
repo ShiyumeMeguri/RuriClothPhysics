@@ -44,6 +44,7 @@ FORCE_VELOCITY_CHANGE_WITHOUT_DEPTH = wp.constant(
 COLLIDER_SPHERE = wp.constant(int(_defs.COLLIDER_SPHERE))
 COLLIDER_CAPSULE = wp.constant(int(_defs.COLLIDER_CAPSULE))
 COLLISION_POINT = wp.constant(int(_defs.COLLISION_POINT))
+COLLISION_EDGE = wp.constant(int(_defs.COLLISION_EDGE))
 TO_FIXED = wp.constant(float(_defs.TO_FIXED))
 MAX_DISTANCE_RATIO_FUTURE_PREDICTION = wp.constant(
     float(_defs.MAX_DISTANCE_RATIO_FUTURE_PREDICTION))
