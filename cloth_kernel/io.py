@@ -1,5 +1,7 @@
 import numpy as np
 
+from . import contact_plan
+
 
 class WindZoneInput:
     __slots__ = ("zone_id", "mode", "main", "turbulence", "is_addition", "world_position",
@@ -70,6 +72,18 @@ def set_team_frame_input(world, slot, component_position, component_rotation,
         row["anchor_rotation"] = anchor[1]
     else:
         row["has_anchor"] = False
+
+
+def set_team_contact_links(world, slot, targets):
+    ordered = tuple(int(target) for target in targets)
+    assert len(set(ordered)) == len(ordered), \
+        "team %d declares the contact link targets %r and a link is declared once" \
+        % (slot, ordered)
+    assert len(ordered) <= contact_plan.CONTACT_LINKS_PER_TEAM_LIMIT, \
+        "team %d declares %d contact links and the static contact capacity budgets %d, %s" \
+        % (slot, len(ordered), contact_plan.CONTACT_LINKS_PER_TEAM_LIMIT,
+           contact_plan.CONTACT_LINKS_PER_TEAM_REASON)
+    world.contact_links[int(slot)] = ordered
 
 
 def set_team_transform_worlds(world, slot, transform_worlds):

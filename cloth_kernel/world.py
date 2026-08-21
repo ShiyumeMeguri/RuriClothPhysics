@@ -257,6 +257,7 @@ class World:
         self.self_edges = ChunkArena(PRIMITIVE_FIELDS, 256)
         self.self_triangles = ChunkArena(PRIMITIVE_FIELDS, 64)
         self.grids = {}
+        self.contact_links = {}
         self.contacts = {"EE": None, "PT": None}
         self.buckets_dirty = True
         self.fk_levels = []
@@ -484,6 +485,7 @@ class World:
         self.edge_pairs.release(start, count)
         self.team[slot] = np.zeros((), dtype=TEAM_DTYPE)
         self.team_free.append(slot)
+        self.contact_links.pop(slot, None)
         self.buckets_dirty = True
         for grid in self.grids.values():
             grid.valid = False

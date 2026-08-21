@@ -624,6 +624,12 @@ def run_frame(scene, frame_delta_time):
             if partner == entry.team:
                 partner = 0
         _world.team["sync_target"][entry.team] = partner
+        targets = []
+        if int(_world.team["self_mode"][entry.team]) == defs.SELF_MODE_FULL_MESH:
+            targets.append(entry.team)
+        if int(_world.team["sync_mode"][entry.team]) == defs.SELF_MODE_FULL_MESH and partner:
+            targets.append(partner)
+        kernel_io.set_team_contact_links(_world, entry.team, targets)
 
     if frame_globals.zones is None:
         frame_globals.zones = []

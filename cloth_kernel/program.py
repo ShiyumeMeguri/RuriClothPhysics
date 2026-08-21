@@ -1,6 +1,7 @@
 import numpy as np
 
 from . import defs
+from . import fixed_point
 
 I4 = np.int32
 F4 = np.float32
@@ -40,6 +41,13 @@ DERIVED_PLANE_SPECIFICATION = (
     ("postline_child_offsets", DERIVED_SOURCE_ATTRIBUTE, "postline_child_offsets", I4, ()),
     ("postline_child_vertices", DERIVED_SOURCE_ATTRIBUTE, "postline_child_vertices", I4, ()),
     ("display_update_move_mask", DERIVED_SOURCE_ATTRIBUTE, "display_update_move_mask", U1, ()),
+    ("solve_point_active", DERIVED_SOURCE_SCRATCH, "num_particles", I4, ()),
+    ("solve_point_contact_count", DERIVED_SOURCE_SCRATCH, "num_particles", I4, ()),
+    ("solve_point_near_count", DERIVED_SOURCE_SCRATCH, "num_particles", I4, ()),
+    ("solve_point_minimum_distance", DERIVED_SOURCE_SCRATCH, "num_particles", F4, ()),
+    ("solve_point_push_sum", DERIVED_SOURCE_SCRATCH, "num_particles", F8, (3,)),
+    ("solve_point_normal_sum", DERIVED_SOURCE_SCRATCH, "num_particles", F8, (3,)),
+    ("solve_point_near_normal_sum", DERIVED_SOURCE_SCRATCH, "num_particles", F8, (3,)),
     ("distance_correction", DERIVED_SOURCE_SCRATCH, "num_particles", F4, (3,)),
     ("distance_correction_fixed", DERIVED_SOURCE_SCRATCH, "num_particles", I4, (3,)),
     ("distance_count", DERIVED_SOURCE_SCRATCH, "num_particles", I4, ()),
@@ -320,6 +328,7 @@ def build_program(world):
     program.display_update_move_mask = _build_update_move_mask(
         program.update_move["particle"], n_particles)
     _assert_derived_specification_covers(program)
+    fixed_point.assert_headroom(program, world)
     return program
 
 

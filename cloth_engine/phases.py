@@ -2337,46 +2337,118 @@ def phase_23(k: int,
 
 
 @wp.kernel
-def phase_24(k: int,
-             c_active: wp.array(dtype=int),
-             c_kind: wp.array(dtype=int),
-             c_work_aabb_max: wp.array2d(dtype=float),
-             c_work_aabb_min: wp.array2d(dtype=float),
-             c_work_inv_old_rot: wp.array2d(dtype=float),
-             c_work_next_pos: wp.array3d(dtype=float),
-             c_work_old_pos: wp.array3d(dtype=float),
-             c_work_radius: wp.array2d(dtype=float),
-             c_work_rot: wp.array2d(dtype=float),
-             csr_point_pair_offsets: wp.array(dtype=int),
-             csr_point_pair_order: wp.array(dtype=int),
-             p_base_positions: wp.array2d(dtype=float),
-             p_collision_normals: wp.array2d(dtype=float),
-             p_depth: wp.array(dtype=float),
-             p_friction: wp.array(dtype=float),
-             p_next_positions: wp.array2d(dtype=float),
-             p_team: wp.array(dtype=int),
-             p_velocity_positions: wp.array2d(dtype=float),
-             st_point_pair_collider: wp.array(dtype=int),
-             t_collision_mode: wp.array(dtype=int),
-             t_cws: wp.array2d(dtype=float),
-             t_enabled: wp.array(dtype=int),
-             t_is_spring: wp.array(dtype=int),
-             t_limit_distance_lut: wp.array2d(dtype=float),
-             t_radius_lut: wp.array2d(dtype=float),
-             t_scale_ratio: wp.array(dtype=float),
-             t_update_count: wp.array(dtype=int),
-             t_valid: wp.array(dtype=int)):
+def phase_24_gather(k: int,
+                    c_active: wp.array(dtype=int),
+                    c_kind: wp.array(dtype=int),
+                    c_work_aabb_max: wp.array2d(dtype=float),
+                    c_work_aabb_min: wp.array2d(dtype=float),
+                    c_work_inv_old_rot: wp.array2d(dtype=float),
+                    c_work_next_pos: wp.array3d(dtype=float),
+                    c_work_old_pos: wp.array3d(dtype=float),
+                    c_work_radius: wp.array2d(dtype=float),
+                    c_work_rot: wp.array2d(dtype=float),
+                    csr_point_pair_offsets: wp.array(dtype=int),
+                    csr_point_pair_order: wp.array(dtype=int),
+                    p_base_positions: wp.array2d(dtype=float),
+                    p_collision_normals: wp.array2d(dtype=float),
+                    p_depth: wp.array(dtype=float),
+                    p_friction: wp.array(dtype=float),
+                    p_next_positions: wp.array2d(dtype=float),
+                    p_team: wp.array(dtype=int),
+                    p_velocity_positions: wp.array2d(dtype=float),
+                    st_point_pair_collider: wp.array(dtype=int),
+                    t_collision_mode: wp.array(dtype=int),
+                    t_cws: wp.array2d(dtype=float),
+                    t_enabled: wp.array(dtype=int),
+                    t_is_spring: wp.array(dtype=int),
+                    t_limit_distance_lut: wp.array2d(dtype=float),
+                    t_radius_lut: wp.array2d(dtype=float),
+                    t_scale_ratio: wp.array(dtype=float),
+                    t_update_count: wp.array(dtype=int),
+                    t_valid: wp.array(dtype=int),
+                    sc_point_active: wp.array(dtype=int),
+                    sc_point_contact_count: wp.array(dtype=int),
+                    sc_point_near_count: wp.array(dtype=int),
+                    sc_point_minimum_distance: wp.array(dtype=float),
+                    sc_point_push_sum: wp.array2d(dtype=wp.float64),
+                    sc_point_normal_sum: wp.array2d(dtype=wp.float64),
+                    sc_point_near_normal_sum: wp.array2d(dtype=wp.float64)):
     p = wp.tid()
     mt = p_team[p]
     if kernels.team_frame_mask(t_enabled, t_valid, t_cws, mt) and t_update_count[mt] > k:
-        kernels.do_solve_point(p, p_team, p_next_positions, p_base_positions, p_depth,
-                               p_friction, p_collision_normals, p_velocity_positions,
-                               t_collision_mode, t_radius_lut, t_scale_ratio, t_is_spring,
-                               t_limit_distance_lut, c_kind, c_active, c_work_old_pos,
-                               c_work_next_pos, c_work_radius, c_work_inv_old_rot, c_work_rot,
-                               c_work_aabb_min, c_work_aabb_max,
-                               csr_point_pair_offsets, csr_point_pair_order,
-                               st_point_pair_collider)
+        active, count, near_count, min_dist, psumx, psumy, psumz, nsumx, nsumy, nsumz, \
+            nnx, nny, nnz = kernels.do_solve_point_gather(
+                p, p_team, p_next_positions, p_base_positions, p_depth,
+                t_collision_mode, t_radius_lut, t_scale_ratio, t_is_spring,
+                t_limit_distance_lut, c_kind, c_active, c_work_old_pos,
+                c_work_next_pos, c_work_radius, c_work_inv_old_rot, c_work_rot,
+                c_work_aabb_min, c_work_aabb_max,
+                csr_point_pair_offsets, csr_point_pair_order,
+                st_point_pair_collider)
+        sc_point_active[p] = active
+        sc_point_contact_count[p] = count
+        sc_point_near_count[p] = near_count
+        sc_point_minimum_distance[p] = min_dist
+        sc_point_push_sum[p, 0] = psumx
+        sc_point_push_sum[p, 1] = psumy
+        sc_point_push_sum[p, 2] = psumz
+        sc_point_normal_sum[p, 0] = nsumx
+        sc_point_normal_sum[p, 1] = nsumy
+        sc_point_normal_sum[p, 2] = nsumz
+        sc_point_near_normal_sum[p, 0] = nnx
+        sc_point_near_normal_sum[p, 1] = nny
+        sc_point_near_normal_sum[p, 2] = nnz
+
+
+@wp.kernel
+def phase_24_resolve(k: int,
+                     c_active: wp.array(dtype=int),
+                     c_kind: wp.array(dtype=int),
+                     c_work_aabb_max: wp.array2d(dtype=float),
+                     c_work_aabb_min: wp.array2d(dtype=float),
+                     c_work_inv_old_rot: wp.array2d(dtype=float),
+                     c_work_next_pos: wp.array3d(dtype=float),
+                     c_work_old_pos: wp.array3d(dtype=float),
+                     c_work_radius: wp.array2d(dtype=float),
+                     c_work_rot: wp.array2d(dtype=float),
+                     csr_point_pair_offsets: wp.array(dtype=int),
+                     csr_point_pair_order: wp.array(dtype=int),
+                     p_base_positions: wp.array2d(dtype=float),
+                     p_collision_normals: wp.array2d(dtype=float),
+                     p_depth: wp.array(dtype=float),
+                     p_friction: wp.array(dtype=float),
+                     p_next_positions: wp.array2d(dtype=float),
+                     p_team: wp.array(dtype=int),
+                     p_velocity_positions: wp.array2d(dtype=float),
+                     st_point_pair_collider: wp.array(dtype=int),
+                     t_collision_mode: wp.array(dtype=int),
+                     t_cws: wp.array2d(dtype=float),
+                     t_enabled: wp.array(dtype=int),
+                     t_is_spring: wp.array(dtype=int),
+                     t_limit_distance_lut: wp.array2d(dtype=float),
+                     t_radius_lut: wp.array2d(dtype=float),
+                     t_scale_ratio: wp.array(dtype=float),
+                     t_update_count: wp.array(dtype=int),
+                     t_valid: wp.array(dtype=int),
+                     sc_point_active: wp.array(dtype=int),
+                     sc_point_contact_count: wp.array(dtype=int),
+                     sc_point_near_count: wp.array(dtype=int),
+                     sc_point_minimum_distance: wp.array(dtype=float),
+                     sc_point_push_sum: wp.array2d(dtype=wp.float64),
+                     sc_point_normal_sum: wp.array2d(dtype=wp.float64),
+                     sc_point_near_normal_sum: wp.array2d(dtype=wp.float64)):
+    p = wp.tid()
+    mt = p_team[p]
+    if kernels.team_frame_mask(t_enabled, t_valid, t_cws, mt) and t_update_count[mt] > k:
+        kernels.do_solve_point_resolve(
+            p, sc_point_active[p], sc_point_contact_count[p], sc_point_near_count[p],
+            sc_point_minimum_distance[p],
+            sc_point_push_sum[p, 0], sc_point_push_sum[p, 1], sc_point_push_sum[p, 2],
+            sc_point_normal_sum[p, 0], sc_point_normal_sum[p, 1], sc_point_normal_sum[p, 2],
+            sc_point_near_normal_sum[p, 0], sc_point_near_normal_sum[p, 1],
+            sc_point_near_normal_sum[p, 2],
+            p_team, p_next_positions, p_depth, p_friction, p_collision_normals,
+            p_velocity_positions, t_radius_lut, t_scale_ratio, t_is_spring)
 
 
 @wp.kernel
@@ -3827,7 +3899,7 @@ PHASE_TABLE = (
     ("phase_21", (), ((phase_21, ("p_team",)),)),
     ("phase_22", (), ((phase_22, ("st_bending_team",)),)),
     ("phase_23", (), ((phase_23, ("p_team",)),)),
-    ("phase_24", (), ((phase_24, ("p_team",)),)),
+    ("phase_24", (), ((phase_24_gather, ("p_team",)), (phase_24_resolve, ("p_team",)))),
     ("phase_25", (), ((phase_25, ("p_team",)),)),
     ("phase_26", (), ((phase_26, ("st_collision_edge",)),)),
     ("phase_27", (), ((phase_27, ("p_team",)),)),

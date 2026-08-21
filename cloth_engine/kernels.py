@@ -1181,37 +1181,40 @@ def do_collider_frame_post(ci: int, c_frame_pos: wp.array2d(dtype=float),
 
 
 @wp.func
-def do_solve_point(p: int, p_team: wp.array(dtype=int),
-                   p_next_positions: wp.array2d(dtype=float),
-                   p_base_positions: wp.array2d(dtype=float),
-                   p_depth: wp.array(dtype=float),
-                   p_friction: wp.array(dtype=float),
-                   p_collision_normals: wp.array2d(dtype=float),
-                   p_velocity_positions: wp.array2d(dtype=float),
-                   t_collision_mode: wp.array(dtype=int),
-                   t_radius_lut: wp.array2d(dtype=float),
-                   t_scale_ratio: wp.array(dtype=float),
-                   t_is_spring: wp.array(dtype=int),
-                   t_limit_distance_lut: wp.array2d(dtype=float),
-                   c_kind: wp.array(dtype=int),
-                   c_active: wp.array(dtype=int),
-                   c_work_old_pos: wp.array3d(dtype=float),
-                   c_work_next_pos: wp.array3d(dtype=float),
-                   c_work_radius: wp.array2d(dtype=float),
-                   c_work_inv_old_rot: wp.array2d(dtype=float),
-                   c_work_rot: wp.array2d(dtype=float),
-                   c_work_aabb_min: wp.array2d(dtype=float),
-                   c_work_aabb_max: wp.array2d(dtype=float),
-                   csr_off: wp.array(dtype=int),
-                   csr_ord: wp.array(dtype=int),
-                   st_pp_collider: wp.array(dtype=int)):
+def do_solve_point_gather(p: int, p_team: wp.array(dtype=int),
+                          p_next_positions: wp.array2d(dtype=float),
+                          p_base_positions: wp.array2d(dtype=float),
+                          p_depth: wp.array(dtype=float),
+                          t_collision_mode: wp.array(dtype=int),
+                          t_radius_lut: wp.array2d(dtype=float),
+                          t_scale_ratio: wp.array(dtype=float),
+                          t_is_spring: wp.array(dtype=int),
+                          t_limit_distance_lut: wp.array2d(dtype=float),
+                          c_kind: wp.array(dtype=int),
+                          c_active: wp.array(dtype=int),
+                          c_work_old_pos: wp.array3d(dtype=float),
+                          c_work_next_pos: wp.array3d(dtype=float),
+                          c_work_radius: wp.array2d(dtype=float),
+                          c_work_inv_old_rot: wp.array2d(dtype=float),
+                          c_work_rot: wp.array2d(dtype=float),
+                          c_work_aabb_min: wp.array2d(dtype=float),
+                          c_work_aabb_max: wp.array2d(dtype=float),
+                          csr_off: wp.array(dtype=int),
+                          csr_ord: wp.array(dtype=int),
+                          st_pp_collider: wp.array(dtype=int)):
     team = p_team[p]
     if t_collision_mode[team] != COLLISION_POINT:
-        return
+        return int(0), int(0), int(0), float(wp.inf), \
+            wp.float64(0.0), wp.float64(0.0), wp.float64(0.0), \
+            wp.float64(0.0), wp.float64(0.0), wp.float64(0.0), \
+            wp.float64(0.0), wp.float64(0.0), wp.float64(0.0)
     start = csr_off[p]
     stop = csr_off[p + 1]
     if start == stop:
-        return
+        return int(0), int(0), int(0), float(wp.inf), \
+            wp.float64(0.0), wp.float64(0.0), wp.float64(0.0), \
+            wp.float64(0.0), wp.float64(0.0), wp.float64(0.0), \
+            wp.float64(0.0), wp.float64(0.0), wp.float64(0.0)
     depth = p_depth[p]
     radius = dmath.evaluate_team_lut(t_radius_lut, team, depth)
     if radius < 0.0001:
@@ -1382,8 +1385,39 @@ def do_solve_point(p: int, p_team: wp.array(dtype=int),
             nnz += wp.float64(uz)
             if dist < min_dist:
                 min_dist = dist
-    if not any_active:
+    active = int(1) if any_active else int(0)
+    return active, count, near_count, min_dist, \
+        psumx, psumy, psumz, nsumx, nsumy, nsumz, nnx, nny, nnz
+
+
+@wp.func
+def do_solve_point_resolve(p: int, active: int, count: int, near_count: int,
+                           min_dist: float,
+                           psumx: wp.float64, psumy: wp.float64, psumz: wp.float64,
+                           nsumx: wp.float64, nsumy: wp.float64, nsumz: wp.float64,
+                           nnx: wp.float64, nny: wp.float64, nnz: wp.float64,
+                           p_team: wp.array(dtype=int),
+                           p_next_positions: wp.array2d(dtype=float),
+                           p_depth: wp.array(dtype=float),
+                           p_friction: wp.array(dtype=float),
+                           p_collision_normals: wp.array2d(dtype=float),
+                           p_velocity_positions: wp.array2d(dtype=float),
+                           t_radius_lut: wp.array2d(dtype=float),
+                           t_scale_ratio: wp.array(dtype=float),
+                           t_is_spring: wp.array(dtype=int)):
+    if active == 0:
         return
+    team = p_team[p]
+    depth = p_depth[p]
+    radius = dmath.evaluate_team_lut(t_radius_lut, team, depth)
+    if radius < 0.0001:
+        radius = 0.0001
+    radius = radius * t_scale_ratio[team]
+    cfr = radius
+    npx = p_next_positions[p, 0]
+    npy = p_next_positions[p, 1]
+    npz = p_next_positions[p, 2]
+    is_spring = t_is_spring[team] != 0
     has_push = count > 0
     sc = float(count) if count > 0 else 1.0
     navx = wp.float32(nsumx) / sc
@@ -1421,6 +1455,43 @@ def do_solve_point(p: int, p_team: wp.array(dtype=int),
         p_velocity_positions[p, 0] = p_velocity_positions[p, 0] + pavx
         p_velocity_positions[p, 1] = p_velocity_positions[p, 1] + pavy
         p_velocity_positions[p, 2] = p_velocity_positions[p, 2] + pavz
+
+
+@wp.func
+def do_solve_point(p: int, p_team: wp.array(dtype=int),
+                   p_next_positions: wp.array2d(dtype=float),
+                   p_base_positions: wp.array2d(dtype=float),
+                   p_depth: wp.array(dtype=float),
+                   p_friction: wp.array(dtype=float),
+                   p_collision_normals: wp.array2d(dtype=float),
+                   p_velocity_positions: wp.array2d(dtype=float),
+                   t_collision_mode: wp.array(dtype=int),
+                   t_radius_lut: wp.array2d(dtype=float),
+                   t_scale_ratio: wp.array(dtype=float),
+                   t_is_spring: wp.array(dtype=int),
+                   t_limit_distance_lut: wp.array2d(dtype=float),
+                   c_kind: wp.array(dtype=int),
+                   c_active: wp.array(dtype=int),
+                   c_work_old_pos: wp.array3d(dtype=float),
+                   c_work_next_pos: wp.array3d(dtype=float),
+                   c_work_radius: wp.array2d(dtype=float),
+                   c_work_inv_old_rot: wp.array2d(dtype=float),
+                   c_work_rot: wp.array2d(dtype=float),
+                   c_work_aabb_min: wp.array2d(dtype=float),
+                   c_work_aabb_max: wp.array2d(dtype=float),
+                   csr_off: wp.array(dtype=int),
+                   csr_ord: wp.array(dtype=int),
+                   st_pp_collider: wp.array(dtype=int)):
+    active, count, near_count, min_dist, psumx, psumy, psumz, nsumx, nsumy, nsumz, \
+        nnx, nny, nnz = do_solve_point_gather(
+            p, p_team, p_next_positions, p_base_positions, p_depth, t_collision_mode,
+            t_radius_lut, t_scale_ratio, t_is_spring, t_limit_distance_lut, c_kind, c_active,
+            c_work_old_pos, c_work_next_pos, c_work_radius, c_work_inv_old_rot, c_work_rot,
+            c_work_aabb_min, c_work_aabb_max, csr_off, csr_ord, st_pp_collider)
+    do_solve_point_resolve(p, active, count, near_count, min_dist, psumx, psumy, psumz,
+                           nsumx, nsumy, nsumz, nnx, nny, nnz, p_team, p_next_positions,
+                           p_depth, p_friction, p_collision_normals, p_velocity_positions,
+                           t_radius_lut, t_scale_ratio, t_is_spring)
 
 
 @wp.func

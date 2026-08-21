@@ -1,5 +1,6 @@
 import numpy as np
 
+from ..cloth_kernel import contact_plan as _contact_plan
 from ..cloth_kernel import defs as _defs
 from ..cloth_kernel import frame as _frame
 from ..cloth_kernel import io as _io
@@ -19,8 +20,6 @@ assert _wiring.SCALAR_NAMES == (SUBSTEP_SCALAR_NAME,), \
 ZONE_MODE_VALUES = {"GLOBAL_DIRECTION": 0, "BOX_DIRECTION": 1,
                     "SPHERE_DIRECTION": 2, "SPHERE_RADIAL": 3}
 
-SELF_TASK_KIND_EDGE_EDGE = 0
-SELF_TASK_KIND_POINT_TRIANGLE = 1
 SELF_PAIR_GUARD = 30_000_000
 
 STRUCTURE_TEAM_COLUMNS = ("valid", "is_spring", "p_start", "p_count", "t_start", "t_count",
@@ -133,28 +132,41 @@ def _validate_domain_source_table():
 
 _validate_domain_source_table()
 
-CONTACT_TASK_COLUMNS = (
-    (0, "self_contact_task_kind"),
-    (2, "self_contact_task_source_start"),
-    (4, "self_contact_task_target_team"),
-    (5, "self_contact_task_target_start"),
-    (6, "self_contact_task_target_count"),
-    (7, "self_contact_task_same_team"),
+CONTACT_TASK_UPLOADED_COLUMNS = (
+    ("kind", "self_contact_task_kind"),
+    ("source_start", "self_contact_task_source_start"),
+    ("target_team", "self_contact_task_target_team"),
+    ("target_start", "self_contact_task_target_start"),
+    ("target_count", "self_contact_task_target_count"),
+    ("same_team", "self_contact_task_same_team"),
 )
-CONTACT_TASK_PAIR_OFFSET_PLANE = "self_contact_task_pair_offsets"
-CONTACT_TASK_SOURCE_COUNT_COLUMN = 3
-CONTACT_TASK_TARGET_COUNT_COLUMN = 6
 
-INTERSECT_TASK_COLUMNS = (
-    (1, "self_intersect_task_edge_start"),
-    (3, "self_intersect_task_triangle_team"),
-    (4, "self_intersect_task_triangle_start"),
-    (5, "self_intersect_task_triangle_count"),
-    (6, "self_intersect_task_same_team"),
+INTERSECT_TASK_UPLOADED_COLUMNS = (
+    ("edge_start", "self_intersect_task_edge_start"),
+    ("triangle_team", "self_intersect_task_triangle_team"),
+    ("triangle_start", "self_intersect_task_triangle_start"),
+    ("triangle_count", "self_intersect_task_triangle_count"),
+    ("same_team", "self_intersect_task_same_team"),
 )
+
+
+def _task_columns(declared, uploaded):
+    return tuple((declared.index(column_name), plane_name)
+                 for column_name, plane_name in uploaded)
+
+
+CONTACT_TASK_COLUMNS = _task_columns(_contact_plan.CONTACT_TASK_COLUMNS,
+                                     CONTACT_TASK_UPLOADED_COLUMNS)
+CONTACT_TASK_PAIR_OFFSET_PLANE = "self_contact_task_pair_offsets"
+CONTACT_TASK_SOURCE_COUNT_COLUMN = _contact_plan.CONTACT_TASK_COLUMNS.index("source_count")
+CONTACT_TASK_TARGET_COUNT_COLUMN = _contact_plan.CONTACT_TASK_COLUMNS.index("target_count")
+
+INTERSECT_TASK_COLUMNS = _task_columns(_contact_plan.INTERSECT_TASK_COLUMNS,
+                                       INTERSECT_TASK_UPLOADED_COLUMNS)
 INTERSECT_TASK_PAIR_OFFSET_PLANE = "self_intersect_task_pair_offsets"
-INTERSECT_TASK_SOURCE_COUNT_COLUMN = 2
-INTERSECT_TASK_TARGET_COUNT_COLUMN = 5
+INTERSECT_TASK_SOURCE_COUNT_COLUMN = _contact_plan.INTERSECT_TASK_COLUMNS.index("edge_count")
+INTERSECT_TASK_TARGET_COUNT_COLUMN = \
+    _contact_plan.INTERSECT_TASK_COLUMNS.index("triangle_count")
 
 SELF_COUNTER_PLANE = "self_counters"
 
@@ -348,95 +360,17 @@ class ClothEngine:
             self._write_field(ZONE_DOMAIN_NAME, field_name, values[field_name])
 
     @staticmethod
-    def _self_task_fingerprint(team, team_count):
+    def _self_task_fingerprint(team, team_count, contact_links):
         component_scale = team["component_world_scale"][:team_count]
         scale_alive = (np.abs(component_scale).min(axis=1) >= _frame.SCALE_EPSILON)
         return b"".join((
             int(team_count).to_bytes(8, "little"),
-            team["self_mode"][:team_count].tobytes(),
-            team["sync_mode"][:team_count].tobytes(),
-            team["sync_target"][:team_count].tobytes(),
+            _contact_plan.link_fingerprint(contact_links, team_count),
             team["enabled"][:team_count].tobytes(),
             team["valid"][:team_count].tobytes(), scale_alive.tobytes(),
             team["sp_start"][:team_count].tobytes(), team["sp_count"][:team_count].tobytes(),
             team["se_start"][:team_count].tobytes(), team["se_count"][:team_count].tobytes(),
             team["st_start"][:team_count].tobytes(), team["st_count"][:team_count].tobytes()))
-
-    @staticmethod
-    def _build_self_tasks(team, team_count):
-        component_scale = team["component_world_scale"][:team_count]
-        scale_alive = np.abs(component_scale).min(axis=1) >= _frame.SCALE_EPSILON
-        frame_mask = team["enabled"][:team_count] & team["valid"][:team_count] & scale_alive
-        frame_teams = np.flatnonzero(frame_mask)
-        use_point = np.zeros(team_count, np.uint8)
-        use_edge = np.zeros(team_count, np.uint8)
-        use_triangle = np.zeros(team_count, np.uint8)
-        contact = []
-        intersect = []
-        full_mesh = _defs.SELF_MODE_FULL_MESH
-        for slot in frame_teams:
-            row = team[slot]
-            self_mode = int(row["self_mode"])
-            sync_mode = int(row["sync_mode"])
-            partner = int(row["sync_target"])
-            if partner <= 0 or not team["valid"][partner] or not team["enabled"][partner] \
-                    or partner == slot:
-                partner = 0
-            edge_count = int(row["se_count"])
-            edge_start = int(row["se_start"])
-            triangle_count = int(row["st_count"])
-            triangle_start = int(row["st_start"])
-            point_count = int(row["sp_count"])
-            point_start = int(row["sp_start"])
-            has_edge = edge_count > 0
-            has_triangle = triangle_count > 0
-            if self_mode == full_mesh:
-                if has_edge:
-                    use_edge[slot] = 1
-                    contact.append((SELF_TASK_KIND_EDGE_EDGE, slot, edge_start, edge_count,
-                                    slot, edge_start, edge_count, 1))
-                if has_triangle:
-                    use_point[slot] = 1
-                    use_triangle[slot] = 1
-                    contact.append((SELF_TASK_KIND_POINT_TRIANGLE, slot, point_start,
-                                    point_count, slot, triangle_start, triangle_count, 1))
-                if has_edge and has_triangle:
-                    intersect.append((slot, edge_start, edge_count, slot, triangle_start,
-                                      triangle_count, 1))
-            if sync_mode == full_mesh and partner > 0:
-                partner_row = team[partner]
-                partner_edge_count = int(partner_row["se_count"])
-                partner_edge_start = int(partner_row["se_start"])
-                partner_triangle_count = int(partner_row["st_count"])
-                partner_triangle_start = int(partner_row["st_start"])
-                partner_point_count = int(partner_row["sp_count"])
-                partner_point_start = int(partner_row["sp_start"])
-                partner_has_edge = partner_edge_count > 0
-                partner_has_triangle = partner_triangle_count > 0
-                if has_edge and partner_has_edge:
-                    use_edge[slot] = 1
-                    use_edge[partner] = 1
-                    contact.append((SELF_TASK_KIND_EDGE_EDGE, slot, edge_start, edge_count,
-                                    partner, partner_edge_start, partner_edge_count, 0))
-                if has_triangle:
-                    use_triangle[slot] = 1
-                    use_point[partner] = 1
-                    contact.append((SELF_TASK_KIND_POINT_TRIANGLE, partner, partner_point_start,
-                                    partner_point_count, slot, triangle_start, triangle_count,
-                                    0))
-                if partner_has_triangle:
-                    use_point[slot] = 1
-                    use_triangle[partner] = 1
-                    contact.append((SELF_TASK_KIND_POINT_TRIANGLE, slot, point_start,
-                                    point_count, partner, partner_triangle_start,
-                                    partner_triangle_count, 0))
-                if has_edge and partner_has_triangle:
-                    intersect.append((slot, edge_start, edge_count, partner,
-                                      partner_triangle_start, partner_triangle_count, 0))
-                if has_triangle and partner_has_edge:
-                    intersect.append((partner, partner_edge_start, partner_edge_count, slot,
-                                      triangle_start, triangle_count, 0))
-        return contact, intersect, use_point, use_edge, use_triangle
 
     def _fill_task_table(self, tasks, capacity, columns, pair_offset_plane,
                          source_count_column, target_count_column):
@@ -457,9 +391,10 @@ class ClothEngine:
     def _prepare_self_frame(self, world, frame_index):
         team = world.team
         team_count = self.program.num_teams
-        fingerprint = self._self_task_fingerprint(team, team_count)
+        fingerprint = self._self_task_fingerprint(team, team_count, world.contact_links)
         if fingerprint != self.self_task_shadow or self.self_task_cache is None:
-            self.self_task_cache = self._build_self_tasks(team, team_count)
+            self.self_task_cache = _contact_plan.build_tasks(team, team_count,
+                                                             world.contact_links)
             self.self_task_shadow = fingerprint
         contact, intersect, use_point, use_edge, use_triangle = self.self_task_cache
         if not contact and not intersect and self.self_empty_uploaded:
