@@ -2814,6 +2814,183 @@ def phase_48(level: int,
                                       t_negative_scale_direction, t_negative_scale_quaternion)
 
 
+@wp.kernel
+def phase_49(p_positions: wp.array2d(dtype=float),
+             p_uv: wp.array2d(dtype=float),
+             sc_tri_normal_f64: wp.array2d(dtype=wp.float64),
+             sc_tri_tangent_f64: wp.array2d(dtype=wp.float64),
+             st_triangle_particles: wp.array2d(dtype=int),
+             st_triangle_team: wp.array(dtype=int),
+             t_cws: wp.array2d(dtype=float),
+             t_enabled: wp.array(dtype=int),
+             t_negative_scale_triangle_sign: wp.array2d(dtype=float),
+             t_valid: wp.array(dtype=int)):
+    tri_idx = wp.tid()
+    tt_team = st_triangle_team[tri_idx]
+    if kernels.team_frame_mask(t_enabled, t_valid, t_cws, tt_team):
+        kernels.do_triangle_normal_tangent(tri_idx, tt_team, st_triangle_particles, p_positions,
+                                           p_uv, t_negative_scale_triangle_sign,
+                                           sc_tri_normal_f64, sc_tri_tangent_f64)
+
+
+@wp.kernel
+def phase_50(csr_v2t_offsets: wp.array(dtype=int),
+             csr_v2t_order: wp.array(dtype=int),
+             p_normal_adjustment_rotations: wp.array2d(dtype=float),
+             p_rotations: wp.array2d(dtype=float),
+             p_team: wp.array(dtype=int),
+             sc_tri_normal_f64: wp.array2d(dtype=wp.float64),
+             sc_tri_tangent_f64: wp.array2d(dtype=wp.float64),
+             st_v2t_flip_normal: wp.array(dtype=float),
+             st_v2t_flip_tangent: wp.array(dtype=float),
+             st_v2t_triangle: wp.array(dtype=int),
+             t_cws: wp.array2d(dtype=float),
+             t_enabled: wp.array(dtype=int),
+             t_negative_scale_quaternion: wp.array2d(dtype=float),
+             t_valid: wp.array(dtype=int)):
+    p = wp.tid()
+    seg0 = csr_v2t_offsets[p]
+    seg1 = csr_v2t_offsets[p + 1]
+    if seg0 < seg1 and kernels.team_frame_mask(t_enabled, t_valid, t_cws, p_team[p]):
+        kernels.do_v2t_owner(p, p_team[p], seg0, seg1, csr_v2t_order, st_v2t_triangle,
+                             st_v2t_flip_normal, st_v2t_flip_tangent, sc_tri_normal_f64,
+                             sc_tri_tangent_f64, p_rotations, p_normal_adjustment_rotations,
+                             t_negative_scale_quaternion)
+
+
+@wp.kernel
+def phase_51(p_out_rotations: wp.array2d(dtype=float),
+             p_rotations: wp.array2d(dtype=float),
+             p_team: wp.array(dtype=int),
+             p_vertex_to_transform_rotations: wp.array2d(dtype=float),
+             t_cws: wp.array2d(dtype=float),
+             t_enabled: wp.array(dtype=int),
+             t_negative_scale_quaternion: wp.array2d(dtype=float),
+             t_valid: wp.array(dtype=int)):
+    p = wp.tid()
+    mt = p_team[p]
+    if kernels.team_frame_mask(t_enabled, t_valid, t_cws, mt):
+        kernels.do_output_particle(p, mt, p_rotations, p_vertex_to_transform_rotations,
+                                   t_negative_scale_quaternion, p_out_rotations)
+
+
+@wp.kernel
+def phase_52(c_active: wp.array(dtype=int),
+             c_frame_pos: wp.array2d(dtype=float),
+             c_frame_rot: wp.array2d(dtype=float),
+             c_frame_tip: wp.array2d(dtype=float),
+             c_old_frame_pos: wp.array2d(dtype=float),
+             c_old_frame_rot: wp.array2d(dtype=float),
+             c_old_frame_tip: wp.array2d(dtype=float),
+             c_team: wp.array(dtype=int),
+             t_cws: wp.array2d(dtype=float),
+             t_enabled: wp.array(dtype=int),
+             t_running: wp.array(dtype=int),
+             t_valid: wp.array(dtype=int)):
+    ci = wp.tid()
+    cm = c_team[ci]
+    if kernels.team_frame_mask(t_enabled, t_valid, t_cws, cm) and t_running[cm] != 0 \
+            and c_active[ci] != 0:
+        kernels.do_collider_frame_post(ci, c_frame_pos, c_frame_rot, c_frame_tip,
+                                       c_old_frame_pos, c_old_frame_rot, c_old_frame_tip)
+
+
+@wp.kernel
+def phase_53(t_anchor_component_local_position: wp.array2d(dtype=float),
+             t_anchor_position: wp.array2d(dtype=float),
+             t_anchor_rotation: wp.array2d(dtype=float),
+             t_component_world_position: wp.array2d(dtype=float),
+             t_component_world_rotation: wp.array2d(dtype=float),
+             t_cws: wp.array2d(dtype=float),
+             t_enabled: wp.array(dtype=int),
+             t_force_mode: wp.array(dtype=int),
+             t_frame_old: wp.array(dtype=float),
+             t_frame_update: wp.array(dtype=float),
+             t_frame_world_position: wp.array2d(dtype=float),
+             t_frame_world_rotation: wp.array2d(dtype=float),
+             t_frame_world_scale: wp.array2d(dtype=float),
+             t_impact_force: wp.array2d(dtype=float),
+             t_inertia_shift: wp.array(dtype=int),
+             t_keep_teleport_pending: wp.array(dtype=int),
+             t_negative_scale_teleport: wp.array(dtype=int),
+             t_now_update: wp.array(dtype=float),
+             t_old_anchor_position: wp.array2d(dtype=float),
+             t_old_anchor_rotation: wp.array2d(dtype=float),
+             t_old_component_world_position: wp.array2d(dtype=float),
+             t_old_component_world_rotation: wp.array2d(dtype=float),
+             t_old_component_world_scale: wp.array2d(dtype=float),
+             t_old_frame_world_position: wp.array2d(dtype=float),
+             t_old_frame_world_rotation: wp.array2d(dtype=float),
+             t_old_frame_world_scale: wp.array2d(dtype=float),
+             t_old_time: wp.array(dtype=float),
+             t_old_update: wp.array(dtype=float),
+             t_reset_pending: wp.array(dtype=int),
+             t_running: wp.array(dtype=int),
+             t_skip_count: wp.array(dtype=int),
+             t_time: wp.array(dtype=float),
+             t_time_reset: wp.array(dtype=int),
+             t_valid: wp.array(dtype=int)):
+    i = wp.tid()
+    if kernels.team_frame_mask(t_enabled, t_valid, t_cws, i):
+        run = t_running[i] != 0
+        t_old_component_world_position[i, 0] = t_component_world_position[i, 0]
+        t_old_component_world_position[i, 1] = t_component_world_position[i, 1]
+        t_old_component_world_position[i, 2] = t_component_world_position[i, 2]
+        t_old_component_world_rotation[i, 0] = t_component_world_rotation[i, 0]
+        t_old_component_world_rotation[i, 1] = t_component_world_rotation[i, 1]
+        t_old_component_world_rotation[i, 2] = t_component_world_rotation[i, 2]
+        t_old_component_world_rotation[i, 3] = t_component_world_rotation[i, 3]
+        t_old_component_world_scale[i, 0] = t_cws[i, 0]
+        t_old_component_world_scale[i, 1] = t_cws[i, 1]
+        t_old_component_world_scale[i, 2] = t_cws[i, 2]
+        if run:
+            t_old_frame_world_position[i, 0] = t_frame_world_position[i, 0]
+            t_old_frame_world_position[i, 1] = t_frame_world_position[i, 1]
+            t_old_frame_world_position[i, 2] = t_frame_world_position[i, 2]
+            t_old_frame_world_rotation[i, 0] = t_frame_world_rotation[i, 0]
+            t_old_frame_world_rotation[i, 1] = t_frame_world_rotation[i, 1]
+            t_old_frame_world_rotation[i, 2] = t_frame_world_rotation[i, 2]
+            t_old_frame_world_rotation[i, 3] = t_frame_world_rotation[i, 3]
+            t_old_frame_world_scale[i, 0] = t_frame_world_scale[i, 0]
+            t_old_frame_world_scale[i, 1] = t_frame_world_scale[i, 1]
+            t_old_frame_world_scale[i, 2] = t_frame_world_scale[i, 2]
+            t_skip_count[i] = 0
+            t_force_mode[i] = 0
+            t_impact_force[i, 0] = 0.0
+            t_impact_force[i, 1] = 0.0
+            t_impact_force[i, 2] = 0.0
+        t_old_anchor_position[i, 0] = t_anchor_position[i, 0]
+        t_old_anchor_position[i, 1] = t_anchor_position[i, 1]
+        t_old_anchor_position[i, 2] = t_anchor_position[i, 2]
+        t_old_anchor_rotation[i, 0] = t_anchor_rotation[i, 0]
+        t_old_anchor_rotation[i, 1] = t_anchor_rotation[i, 1]
+        t_old_anchor_rotation[i, 2] = t_anchor_rotation[i, 2]
+        t_old_anchor_rotation[i, 3] = t_anchor_rotation[i, 3]
+        qix, qiy, qiz, qiw = dmath.quat_inverse(
+            t_anchor_rotation[i, 0], t_anchor_rotation[i, 1],
+            t_anchor_rotation[i, 2], t_anchor_rotation[i, 3])
+        dpx = t_component_world_position[i, 0] - t_anchor_position[i, 0]
+        dpy = t_component_world_position[i, 1] - t_anchor_position[i, 1]
+        dpz = t_component_world_position[i, 2] - t_anchor_position[i, 2]
+        alx, aly, alz = dmath.quat_rotate(qix, qiy, qiz, qiw, dpx, dpy, dpz)
+        t_anchor_component_local_position[i, 0] = alx
+        t_anchor_component_local_position[i, 1] = aly
+        t_anchor_component_local_position[i, 2] = alz
+        t_reset_pending[i] = 0
+        t_time_reset[i] = 0
+        t_running[i] = 0
+        t_keep_teleport_pending[i] = 0
+        t_inertia_shift[i] = 0
+        t_negative_scale_teleport[i] = 0
+        if t_time[i] > 7200.0:
+            t_time[i] = t_time[i] - 3600.0
+            t_old_time[i] = t_old_time[i] - 3600.0
+            t_now_update[i] = t_now_update[i] - 3600.0
+            t_old_update[i] = t_old_update[i] - 3600.0
+            t_frame_update[i] = t_frame_update[i] - 3600.0
+            t_frame_old[i] = t_frame_old[i] - 3600.0
+
+
 REPEAT_COUNT_FROM_OFFSET_PLANES = "offset_planes"
 REPEAT_COUNT_FROM_MODULE_CONSTANT = "module_constant"
 
@@ -2863,4 +3040,9 @@ PHASE_TABLE = (
     ("phase_47", (), ((phase_47, "p_team"),)),
     ("phase_48", (("level", REPEAT_COUNT_FROM_OFFSET_PLANES, ("postline_entry_offsets",)),),
      ((phase_48, "postline_entry_vertices"),)),
+    ("phase_49", (), ((phase_49, "st_triangle_team"),)),
+    ("phase_50", (), ((phase_50, "p_team"),)),
+    ("phase_51", (), ((phase_51, "p_team"),)),
+    ("phase_52", (), ((phase_52, "c_team"),)),
+    ("phase_53", (), ((phase_53, "t_enabled"),)),
 )
