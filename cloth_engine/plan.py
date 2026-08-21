@@ -39,11 +39,26 @@ class Plan:
         self.captured_state = None
         self.graph = None
         self.captured_structure_key = None
+        self.graphs = {}
+        self.captures = 0
 
     def reset(self):
         self.entries = []
         self.stages = []
         self.bound_state = None
+
+    def forget_graphs(self):
+        self.graphs = {}
+        self.graph = None
+        self.captured_state = None
+        self.captured_structure_key = None
+        self.bound_state = None
+
+    def graph_count(self):
+        return len(self.graphs)
+
+    def capture_count(self):
+        return self.captures
 
     @contextlib.contextmanager
     def stage(self, stage_name):
@@ -67,9 +82,13 @@ class Plan:
 
     def capture(self, state):
         requested_structure_key = self.structure_key(state)
-        if (self.graph is not None
-                and state is self.captured_state
-                and requested_structure_key == self.captured_structure_key):
+        if state is not self.captured_state:
+            self.forget_graphs()
+        held = self.graphs.get(requested_structure_key)
+        if held is not None:
+            self.graph = held
+            self.captured_structure_key = requested_structure_key
+            self.captured_state = state
             self.bound_state = state
             return False
         with wp.ScopedCapture(device=_state.DEVICE) as capture:
@@ -77,6 +96,8 @@ class Plan:
                 wp.launch(entry.kernel, dim=entry.dimension, inputs=entry.inputs,
                           device=_state.DEVICE, block_dim=LAUNCH_BLOCK_DIMENSION)
         self.graph = capture.graph
+        self.graphs[requested_structure_key] = capture.graph
+        self.captures += 1
         self.captured_structure_key = requested_structure_key
         self.captured_state = state
         self.bound_state = state

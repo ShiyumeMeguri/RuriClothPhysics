@@ -24,6 +24,10 @@ from .kernels import SCAL_POWER2
 from .kernels import SCAL_POWER3
 from .kernels import SCAL_SIM_DT
 from .kernels import SCAL_TIME_SCALE
+from .kernels import SCL_EE_COUNT
+from .kernels import SCL_IP_COUNT
+from .kernels import SCL_PT_COUNT
+from .kernels import SELF_COLLISION_UNIFORM_GRID_SCALE
 from .kernels import TELEPORT_RESET
 from .kernels import TO_FIXED
 from .kernels import VOLUME_SCALE
@@ -2543,6 +2547,222 @@ def phase_30(k: int,
 
 
 @wp.kernel
+def phase_33(k: int,
+             scl_max_fixed: wp.array(dtype=int),
+             t_cws: wp.array2d(dtype=float),
+             t_enabled: wp.array(dtype=int),
+             t_update_count: wp.array(dtype=int),
+             t_valid: wp.array(dtype=int)):
+    i = wp.tid()
+    if kernels.team_frame_mask(t_enabled, t_valid, t_cws, i) and t_update_count[i] > k:
+        scl_max_fixed[i] = 0
+
+
+@wp.kernel
+def phase_34_points(k: int,
+                    p_friction: wp.array(dtype=float),
+                    p_intersect_flag: wp.array(dtype=int),
+                    p_next_positions: wp.array2d(dtype=float),
+                    p_old_positions: wp.array2d(dtype=float),
+                    scl_counts: wp.array(dtype=int),
+                    scl_max_fixed: wp.array(dtype=int),
+                    sfe_aabb_max: wp.array2d(dtype=float),
+                    sfe_aabb_min: wp.array2d(dtype=float),
+                    sfe_fix: wp.array(dtype=int),
+                    sfe_ignore: wp.array(dtype=int),
+                    sfe_intersect: wp.array(dtype=int),
+                    sfe_inv_mass: wp.array2d(dtype=float),
+                    sfe_particles: wp.array2d(dtype=int),
+                    sfe_prim_depth: wp.array(dtype=float),
+                    sfe_team: wp.array(dtype=int),
+                    sfe_thickness: wp.array(dtype=float),
+                    sfe_use: wp.array(dtype=int),
+                    sfp_aabb_max: wp.array2d(dtype=float),
+                    sfp_aabb_min: wp.array2d(dtype=float),
+                    sfp_fix: wp.array(dtype=int),
+                    sfp_ignore: wp.array(dtype=int),
+                    sfp_intersect: wp.array(dtype=int),
+                    sfp_inv_mass: wp.array2d(dtype=float),
+                    sfp_particles: wp.array2d(dtype=int),
+                    sfp_prim_depth: wp.array(dtype=float),
+                    sfp_team: wp.array(dtype=int),
+                    sfp_thickness: wp.array(dtype=float),
+                    sfp_use: wp.array(dtype=int),
+                    sft_aabb_max: wp.array2d(dtype=float),
+                    sft_aabb_min: wp.array2d(dtype=float),
+                    sft_fix: wp.array(dtype=int),
+                    sft_ignore: wp.array(dtype=int),
+                    sft_intersect: wp.array(dtype=int),
+                    sft_inv_mass: wp.array2d(dtype=float),
+                    sft_particles: wp.array2d(dtype=int),
+                    sft_prim_depth: wp.array(dtype=float),
+                    sft_team: wp.array(dtype=int),
+                    sft_thickness: wp.array(dtype=float),
+                    sft_use: wp.array(dtype=int),
+                    t_cws: wp.array2d(dtype=float),
+                    t_enabled: wp.array(dtype=int),
+                    t_scale_ratio: wp.array(dtype=float),
+                    t_self_cloth_mass: wp.array(dtype=float),
+                    t_self_thickness_lut: wp.array2d(dtype=float),
+                    t_update_count: wp.array(dtype=int),
+                    t_use_edge: wp.array(dtype=int),
+                    t_use_point: wp.array(dtype=int),
+                    t_use_triangle: wp.array(dtype=int),
+                    t_valid: wp.array(dtype=int)):
+    q = wp.tid()
+    kernels.do_self_update_primitive(
+        q, 1, sfp_team, sfp_particles, sfp_fix, sfp_ignore, sfp_prim_depth,
+        sfp_inv_mass, sfp_thickness, sfp_aabb_min, sfp_aabb_max, sfp_intersect,
+        sfp_use, t_use_point, t_self_thickness_lut, t_self_cloth_mass, t_scale_ratio,
+        t_enabled, t_valid, t_cws, t_update_count, p_next_positions, p_old_positions,
+        p_friction, p_intersect_flag, scl_counts, scl_max_fixed, k)
+
+
+@wp.kernel
+def phase_34_edges(k: int,
+                   p_friction: wp.array(dtype=float),
+                   p_intersect_flag: wp.array(dtype=int),
+                   p_next_positions: wp.array2d(dtype=float),
+                   p_old_positions: wp.array2d(dtype=float),
+                   scl_counts: wp.array(dtype=int),
+                   scl_max_fixed: wp.array(dtype=int),
+                   sfe_aabb_max: wp.array2d(dtype=float),
+                   sfe_aabb_min: wp.array2d(dtype=float),
+                   sfe_fix: wp.array(dtype=int),
+                   sfe_ignore: wp.array(dtype=int),
+                   sfe_intersect: wp.array(dtype=int),
+                   sfe_inv_mass: wp.array2d(dtype=float),
+                   sfe_particles: wp.array2d(dtype=int),
+                   sfe_prim_depth: wp.array(dtype=float),
+                   sfe_team: wp.array(dtype=int),
+                   sfe_thickness: wp.array(dtype=float),
+                   sfe_use: wp.array(dtype=int),
+                   sfp_aabb_max: wp.array2d(dtype=float),
+                   sfp_aabb_min: wp.array2d(dtype=float),
+                   sfp_fix: wp.array(dtype=int),
+                   sfp_ignore: wp.array(dtype=int),
+                   sfp_intersect: wp.array(dtype=int),
+                   sfp_inv_mass: wp.array2d(dtype=float),
+                   sfp_particles: wp.array2d(dtype=int),
+                   sfp_prim_depth: wp.array(dtype=float),
+                   sfp_team: wp.array(dtype=int),
+                   sfp_thickness: wp.array(dtype=float),
+                   sfp_use: wp.array(dtype=int),
+                   sft_aabb_max: wp.array2d(dtype=float),
+                   sft_aabb_min: wp.array2d(dtype=float),
+                   sft_fix: wp.array(dtype=int),
+                   sft_ignore: wp.array(dtype=int),
+                   sft_intersect: wp.array(dtype=int),
+                   sft_inv_mass: wp.array2d(dtype=float),
+                   sft_particles: wp.array2d(dtype=int),
+                   sft_prim_depth: wp.array(dtype=float),
+                   sft_team: wp.array(dtype=int),
+                   sft_thickness: wp.array(dtype=float),
+                   sft_use: wp.array(dtype=int),
+                   t_cws: wp.array2d(dtype=float),
+                   t_enabled: wp.array(dtype=int),
+                   t_scale_ratio: wp.array(dtype=float),
+                   t_self_cloth_mass: wp.array(dtype=float),
+                   t_self_thickness_lut: wp.array2d(dtype=float),
+                   t_update_count: wp.array(dtype=int),
+                   t_use_edge: wp.array(dtype=int),
+                   t_use_point: wp.array(dtype=int),
+                   t_use_triangle: wp.array(dtype=int),
+                   t_valid: wp.array(dtype=int)):
+    q = wp.tid()
+    kernels.do_self_update_primitive(
+        q, 2, sfe_team, sfe_particles, sfe_fix, sfe_ignore, sfe_prim_depth,
+        sfe_inv_mass, sfe_thickness, sfe_aabb_min, sfe_aabb_max, sfe_intersect,
+        sfe_use, t_use_edge, t_self_thickness_lut, t_self_cloth_mass, t_scale_ratio,
+        t_enabled, t_valid, t_cws, t_update_count, p_next_positions, p_old_positions,
+        p_friction, p_intersect_flag, scl_counts, scl_max_fixed, k)
+
+
+@wp.kernel
+def phase_34_triangles(k: int,
+                       p_friction: wp.array(dtype=float),
+                       p_intersect_flag: wp.array(dtype=int),
+                       p_next_positions: wp.array2d(dtype=float),
+                       p_old_positions: wp.array2d(dtype=float),
+                       scl_counts: wp.array(dtype=int),
+                       scl_max_fixed: wp.array(dtype=int),
+                       sfe_aabb_max: wp.array2d(dtype=float),
+                       sfe_aabb_min: wp.array2d(dtype=float),
+                       sfe_fix: wp.array(dtype=int),
+                       sfe_ignore: wp.array(dtype=int),
+                       sfe_intersect: wp.array(dtype=int),
+                       sfe_inv_mass: wp.array2d(dtype=float),
+                       sfe_particles: wp.array2d(dtype=int),
+                       sfe_prim_depth: wp.array(dtype=float),
+                       sfe_team: wp.array(dtype=int),
+                       sfe_thickness: wp.array(dtype=float),
+                       sfe_use: wp.array(dtype=int),
+                       sfp_aabb_max: wp.array2d(dtype=float),
+                       sfp_aabb_min: wp.array2d(dtype=float),
+                       sfp_fix: wp.array(dtype=int),
+                       sfp_ignore: wp.array(dtype=int),
+                       sfp_intersect: wp.array(dtype=int),
+                       sfp_inv_mass: wp.array2d(dtype=float),
+                       sfp_particles: wp.array2d(dtype=int),
+                       sfp_prim_depth: wp.array(dtype=float),
+                       sfp_team: wp.array(dtype=int),
+                       sfp_thickness: wp.array(dtype=float),
+                       sfp_use: wp.array(dtype=int),
+                       sft_aabb_max: wp.array2d(dtype=float),
+                       sft_aabb_min: wp.array2d(dtype=float),
+                       sft_fix: wp.array(dtype=int),
+                       sft_ignore: wp.array(dtype=int),
+                       sft_intersect: wp.array(dtype=int),
+                       sft_inv_mass: wp.array2d(dtype=float),
+                       sft_particles: wp.array2d(dtype=int),
+                       sft_prim_depth: wp.array(dtype=float),
+                       sft_team: wp.array(dtype=int),
+                       sft_thickness: wp.array(dtype=float),
+                       sft_use: wp.array(dtype=int),
+                       t_cws: wp.array2d(dtype=float),
+                       t_enabled: wp.array(dtype=int),
+                       t_scale_ratio: wp.array(dtype=float),
+                       t_self_cloth_mass: wp.array(dtype=float),
+                       t_self_thickness_lut: wp.array2d(dtype=float),
+                       t_update_count: wp.array(dtype=int),
+                       t_use_edge: wp.array(dtype=int),
+                       t_use_point: wp.array(dtype=int),
+                       t_use_triangle: wp.array(dtype=int),
+                       t_valid: wp.array(dtype=int)):
+    q = wp.tid()
+    kernels.do_self_update_primitive(
+        q, 3, sft_team, sft_particles, sft_fix, sft_ignore, sft_prim_depth,
+        sft_inv_mass, sft_thickness, sft_aabb_min, sft_aabb_max, sft_intersect,
+        sft_use, t_use_triangle, t_self_thickness_lut, t_self_cloth_mass, t_scale_ratio,
+        t_enabled, t_valid, t_cws, t_update_count, p_next_positions, p_old_positions,
+        p_friction, p_intersect_flag, scl_counts, scl_max_fixed, k)
+
+
+@wp.kernel
+def phase_35(k: int,
+             scl_max_fixed: wp.array(dtype=int),
+             t_cws: wp.array2d(dtype=float),
+             t_enabled: wp.array(dtype=int),
+             t_self_grid_size: wp.array(dtype=float),
+             t_self_max_primitive_size: wp.array(dtype=float),
+             t_update_count: wp.array(dtype=int),
+             t_valid: wp.array(dtype=int)):
+    i = wp.tid()
+    if kernels.team_frame_mask(t_enabled, t_valid, t_cws, i) and t_update_count[i] > k:
+        ms = float(scl_max_fixed[i]) / TO_FIXED
+        t_self_max_primitive_size[i] = ms
+        t_self_grid_size[i] = ms * SELF_COLLISION_UNIFORM_GRID_SCALE
+
+
+@wp.kernel
+def phase_36(scl_counts: wp.array(dtype=int)):
+    tid = wp.tid()
+    if tid == 0:
+        scl_counts[SCL_EE_COUNT] = 0
+        scl_counts[SCL_PT_COUNT] = 0
+
+
+@wp.kernel
 def phase_42(k: int,
              p_collision_normals: wp.array2d(dtype=float),
              p_depth: wp.array(dtype=float),
@@ -2732,6 +2952,92 @@ def phase_44(k: int,
             and c_active[ci] != 0:
         kernels.do_collider_end_step(ci, c_now_pos, c_now_rot, c_now_tip,
                                      c_old_pos, c_old_rot, c_old_tip)
+
+
+@wp.kernel
+def phase_45(p_intersect_flag: wp.array(dtype=int),
+             p_team: wp.array(dtype=int),
+             t_cws: wp.array2d(dtype=float),
+             t_enabled: wp.array(dtype=int),
+             t_valid: wp.array(dtype=int)):
+    p = wp.tid()
+    if kernels.team_frame_mask(t_enabled, t_valid, t_cws, p_team[p]):
+        p_intersect_flag[p] = 0
+
+
+@wp.kernel
+def phase_46(ip_edge: wp.array(dtype=int),
+             ip_tri: wp.array(dtype=int),
+             p_intersect_flag: wp.array(dtype=int),
+             p_next_positions: wp.array2d(dtype=float),
+             scl_counts: wp.array(dtype=int),
+             sfe_particles: wp.array2d(dtype=int),
+             sft_particles: wp.array2d(dtype=int)):
+    e = wp.tid()
+    ip_count = scl_counts[SCL_IP_COUNT]
+    ip_lim = ip_count if ip_count < ip_edge.shape[0] else ip_edge.shape[0]
+    if e < ip_lim:
+        edge_prim = ip_edge[e]
+        tri_prim = ip_tri[e]
+        ep0 = sfe_particles[edge_prim, 0]
+        ep1 = sfe_particles[edge_prim, 1]
+        ta = sft_particles[tri_prim, 0]
+        tb = sft_particles[tri_prim, 1]
+        tc = sft_particles[tri_prim, 2]
+        px = p_next_positions[ep0, 0]
+        py = p_next_positions[ep0, 1]
+        pz = p_next_positions[ep0, 2]
+        qx = p_next_positions[ep1, 0]
+        qy = p_next_positions[ep1, 1]
+        qz = p_next_positions[ep1, 2]
+        ax = p_next_positions[ta, 0]
+        ay = p_next_positions[ta, 1]
+        az = p_next_positions[ta, 2]
+        bx = p_next_positions[tb, 0]
+        by = p_next_positions[tb, 1]
+        bz = p_next_positions[tb, 2]
+        cx = p_next_positions[tc, 0]
+        cy = p_next_positions[tc, 1]
+        cz = p_next_positions[tc, 2]
+        qpx = px - qx
+        qpy = py - qy
+        qpz = pz - qz
+        acx = cx - ax
+        acy = cy - ay
+        acz = cz - az
+        abx = bx - ax
+        aby = by - ay
+        abz = bz - az
+        nx, ny, nz = dmath.cross3(abx, aby, abz, acx, acy, acz)
+        d = qpx * nx + qpy * ny + qpz * nz
+        ok = wp.abs(d) >= EPSILON
+        p2x = px
+        p2y = py
+        p2z = pz
+        qp2x = qpx
+        qp2y = qpy
+        qp2z = qpz
+        if d < 0.0:
+            p2x = qx
+            p2y = qy
+            p2z = qz
+            qp2x = dmath.negate(qpx)
+            qp2y = dmath.negate(qpy)
+            qp2z = dmath.negate(qpz)
+        d2 = wp.abs(d)
+        apx = p2x - ax
+        apy = p2y - ay
+        apz = p2z - az
+        tparam = apx * nx + apy * ny + apz * nz
+        ok = ok and (tparam >= 0.0) and (tparam <= d2)
+        ecx, ecy, ecz = dmath.cross3(qp2x, qp2y, qp2z, apx, apy, apz)
+        vparam = acx * ecx + acy * ecy + acz * ecz
+        ok = ok and (vparam >= 0.0) and (vparam <= d2)
+        wparam = dmath.negate(abx * ecx + aby * ecy + abz * ecz)
+        ok = ok and (wparam >= 0.0) and ((vparam + wparam) <= d2)
+        if ok:
+            p_intersect_flag[ep0] = 1
+            p_intersect_flag[ep1] = 1
 
 
 @wp.kernel
@@ -3034,9 +3340,17 @@ PHASE_TABLE = (
     ("phase_28", (), ((phase_28, "p_team"),)),
     ("phase_29", (), ((phase_29, "p_team"),)),
     ("phase_30", (), ((phase_30, "st_motion_particle"),)),
+    ("phase_33", (), ((phase_33, "t_enabled"),)),
+    ("phase_34", (), ((phase_34_points, "sfp_team"),
+                      (phase_34_edges, "sfe_team"),
+                      (phase_34_triangles, "sft_team"))),
+    ("phase_35", (), ((phase_35, "t_enabled"),)),
+    ("phase_36", (), ((phase_36, "scl_counts"),)),
     ("phase_42", (), ((phase_42, "st_move_particle"),)),
     ("phase_43", (), ((phase_43, "p_team"),)),
     ("phase_44", (), ((phase_44, "c_team"),)),
+    ("phase_45", (), ((phase_45, "p_team"),)),
+    ("phase_46", (), ((phase_46, "ip_edge"),)),
     ("phase_47", (), ((phase_47, "p_team"),)),
     ("phase_48", (("level", REPEAT_COUNT_FROM_OFFSET_PLANES, ("postline_entry_offsets",)),),
      ((phase_48, "postline_entry_vertices"),)),

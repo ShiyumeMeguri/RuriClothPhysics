@@ -1,5 +1,7 @@
 import numpy as np
 
+from . import defs
+
 I4 = np.int32
 F4 = np.float32
 F8 = np.float64
@@ -46,6 +48,10 @@ DERIVED_PLANE_SPECIFICATION = (
     ("synchronization_snapshot", DERIVED_SOURCE_SCRATCH, "num_teams", F4, (22,)),
     ("triangle_normal_double", DERIVED_SOURCE_SCRATCH, "num_triangle_entries", F8, (3,)),
     ("triangle_tangent_double", DERIVED_SOURCE_SCRATCH, "num_triangle_entries", F8, (3,)),
+    ("self_counters", DERIVED_SOURCE_SCRATCH, "self_counter_slots", I4, ()),
+    ("self_max_fixed_size", DERIVED_SOURCE_SCRATCH, "num_teams", I4, ()),
+    ("self_intersect_pair_edge", DERIVED_SOURCE_SCRATCH, "self_cap_ip", I4, ()),
+    ("self_intersect_pair_triangle", DERIVED_SOURCE_SCRATCH, "self_cap_ip", I4, ()),
 )
 
 
@@ -142,6 +148,7 @@ class Program:
         self.self_cap_ip = 1
         self.self_max_contact_tasks = 1
         self.self_max_intersect_tasks = 1
+        self.self_counter_slots = int(defs.SCL_LEN)
 
         self.distance_csr = None
         self.point_pair_csr = None

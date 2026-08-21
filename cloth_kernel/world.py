@@ -8,6 +8,7 @@ F8 = np.float64
 I4 = np.int32
 I8 = np.int64
 B1 = np.bool_
+U1 = np.uint8
 
 TEAM_DTYPE = np.dtype([
     ("valid", B1), ("enabled", B1), ("is_spring", B1), ("running", B1),
@@ -162,6 +163,17 @@ PRIMITIVE_FIELDS = {
     "use": (B1, ()),
     "cell_key": (I8, ()),
 }
+
+PRIMITIVE_PACKED_FIELDS = ("fix", "intersect")
+
+PRIMITIVE_DEVICE_FIELDS = {
+    field_name: ((U1, ()) if field_name in PRIMITIVE_PACKED_FIELDS else specification)
+    for field_name, specification in PRIMITIVE_FIELDS.items()
+}
+
+assert set(PRIMITIVE_DEVICE_FIELDS) == set(PRIMITIVE_FIELDS)
+assert all(PRIMITIVE_FIELDS[field_name] == (B1, (3,))
+           for field_name in PRIMITIVE_PACKED_FIELDS)
 
 
 class ChunkArena:

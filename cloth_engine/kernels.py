@@ -27,6 +27,11 @@ SELF_COLLISION_SCR = wp.constant(float(_defs.SELF_COLLISION_SCR))
 SELF_COLLISION_POINT_TRIANGLE_ANGLE_COS = wp.constant(
     float(_defs.SELF_COLLISION_POINT_TRIANGLE_ANGLE_COS))
 SCL_USE_INTERSECT = wp.constant(int(_defs.SCL_USE_INTERSECT))
+SCL_EE_COUNT = wp.constant(int(_defs.SCL_EE_COUNT))
+SCL_PT_COUNT = wp.constant(int(_defs.SCL_PT_COUNT))
+SCL_IP_COUNT = wp.constant(int(_defs.SCL_IP_COUNT))
+SELF_COLLISION_UNIFORM_GRID_SCALE = wp.constant(
+    float(_defs.SELF_COLLISION_UNIFORM_GRID_SCALE))
 DEG2RAD = wp.constant(float(_defs.DEG2RAD))
 RAD2DEG = wp.constant(float(_defs.RAD2DEG))
 ANGLE_LIMIT_ROT_RATIO = wp.constant(float(_defs.ANGLE_LIMIT_ROTATION_RATIO))
