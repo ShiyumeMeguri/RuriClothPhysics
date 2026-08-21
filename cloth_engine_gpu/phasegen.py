@@ -6,6 +6,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 BODIES_PATH = os.path.join(HERE, "phase_bodies.py")
 KERNELS_PATH = os.path.join(HERE, "kernels.py")
 OUTPUT_PATH = os.path.join(HERE, "phases.py")
+PHASE_PLAN_PATH = os.path.join(os.path.dirname(HERE), "cloth_kernel", "phase_plan.py")
+PHASE_SEQUENCE_NAME = "PHASE_SEQUENCE"
 
 THREAD_SOURCES = (
     ("tid", "cuda.grid(1)"),
@@ -71,6 +73,13 @@ HEADER = (
     "from . import dmath",
     "from .slots import *",
 )
+
+
+def _phase_sequence():
+    constants = _module_constants(PHASE_PLAN_PATH)
+    assert PHASE_SEQUENCE_NAME in constants, \
+        "the shared phase plan declares no %s" % PHASE_SEQUENCE_NAME
+    return ast.literal_eval(constants[PHASE_SEQUENCE_NAME])
 
 
 def _module_constants(path):
@@ -147,26 +156,37 @@ def _phase_declarations():
     eol = "\r\n" if "\r\n" in source else "\n"
     lines = source.split(eol)
     tree = ast.parse(source)
+    context_of = dict(_phase_sequence())
     declarations = []
     for node in tree.body:
         if not isinstance(node, ast.FunctionDef) or not node.decorator_list:
             continue
         decorator = node.decorator_list[0]
         assert isinstance(decorator, ast.Call) and decorator.func.id == "phase", node.name
-        context = ast.literal_eval(decorator.args[0])
-        grid_domain = ast.literal_eval(decorator.args[1])
+        assert len(decorator.args) == 1, \
+            "%s declares a phase decorator with %d arguments, a phase body declares only its " \
+            "grid domain and takes its context from the shared phase plan" \
+            % (node.name, len(decorator.args))
+        assert node.name in context_of, \
+            "%s has a phase body but the shared phase plan does not sequence it" % node.name
+        grid_domain = ast.literal_eval(decorator.args[0])
         body_start = node.body[0].lineno
         body_lines = lines[body_start - 1:node.end_lineno]
         while body_lines and not body_lines[-1].strip():
             body_lines.pop()
         declarations.append({
             "name": node.name,
-            "context": context,
+            "context": context_of[node.name],
             "grid_domain": grid_domain,
             "parameters": [argument.arg for argument in node.args.args],
             "free": _body_names(node),
             "body": body_lines,
         })
+    sequenced = set(context_of)
+    declared = {declaration["name"] for declaration in declarations}
+    assert sequenced == declared, \
+        "the shared phase plan sequences %r while the phase bodies declare %r" \
+        % (sorted(sequenced - declared), sorted(declared - sequenced))
     return declarations, eol
 
 
@@ -228,9 +248,11 @@ def render():
         block.extend(declaration["body"])
         blocks.append(eol.join(block))
 
+    declaration_of = {declaration["name"]: declaration for declaration in declarations}
     table = ["PHASE_TABLE = ("]
-    for declaration in declarations:
-        table.append("    (%r, %r, %r)," % (declaration["name"], declaration["context"],
+    for phase_name, context in _phase_sequence():
+        declaration = declaration_of[phase_name]
+        table.append("    (%r, %r, %r)," % (phase_name, context,
                                             declaration["grid_domain"]))
     table.append(")")
 

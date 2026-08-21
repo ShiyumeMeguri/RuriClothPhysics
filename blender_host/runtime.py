@@ -1,3 +1,4 @@
+import importlib
 import zlib
 
 import numpy as np
@@ -25,6 +26,13 @@ _last_frame = None
 _last_display = None
 
 DEFAULT_BACKEND = 'GPU'
+
+BACKEND_PIPELINE_MODULES = {
+    'CPU': "..cloth_engine_cpu.pipeline",
+    'GPU': "..cloth_engine_gpu.pipeline",
+    'WARP': "..cloth_engine.pipeline",
+}
+
 _backends = {}
 
 
@@ -32,10 +40,10 @@ def _backend_module(name):
     backend = _backends.get(name)
     if backend is not None:
         return backend
-    if name == 'CPU':
-        from ..cloth_engine_cpu import pipeline as backend
-    else:
-        from ..cloth_engine_gpu import pipeline as backend
+    assert name in BACKEND_PIPELINE_MODULES, \
+        "there is no solver backend named %r, the declared backends are %r" \
+        % (name, sorted(BACKEND_PIPELINE_MODULES))
+    backend = importlib.import_module(BACKEND_PIPELINE_MODULES[name], __package__)
     _backends[name] = backend
     return backend
 

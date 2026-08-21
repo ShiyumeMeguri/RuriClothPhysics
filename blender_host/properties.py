@@ -959,6 +959,7 @@ class RCPObjectSettings(bpy.types.PropertyGroup):
 BACKEND_ITEMS = (
     ('GPU', "GPU (numba.cuda)", "生产路径: 常驻显存的协作式巨核, 整帧一次启动"),
     ('CPU', "CPU (numpy 参考)", "参考实现: 同一套算法的 numpy 版, 用来对拍 GPU 结果"),
+    ('WARP', "Warp (统一 kernel 源)", "迁移目标: 一份 Warp kernel 源编译出 CPU 与 CUDA 两个目标"),
 )
 
 

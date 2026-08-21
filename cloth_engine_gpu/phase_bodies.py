@@ -1,11 +1,10 @@
-def phase(context, grid_domain):
+def phase(grid_domain):
     def declare(function):
-        function.phase_context = context
         function.phase_grid_domain = grid_domain
         return function
     return declare
 
-@phase((), 'single')
+@phase('single')
 def phase_00(tid, bid, bdim, sc_sync, t_anchor_inertia, t_component_world_position,
              t_component_world_rotation, t_enabled, t_frame_old, t_frame_update,
              t_movement_inertia_smoothing, t_movement_speed_limit, t_now_update, t_old_time, t_old_update,
@@ -86,7 +85,7 @@ def phase_00(tid, bid, bdim, sc_sync, t_anchor_inertia, t_component_world_positi
             i += bdim
 
 
-@phase((), 'teams')
+@phase('teams')
 def phase_01(tid, stride, fdt, global_time_scale, max_sim_count, sim_dt, t_cws, t_enabled, t_frame_dt,
              t_frame_old, t_frame_update, t_now_time_scale, t_now_update, t_old_time, t_old_update,
              t_running, t_skip_count, t_time, t_time_reset, t_time_scale, t_update_count, t_valid,
@@ -101,7 +100,7 @@ def phase_01(tid, stride, fdt, global_time_scale, max_sim_count, sim_dt, t_cws, 
         i += stride
 
 
-@phase((), 'particles')
+@phase('particles')
 def phase_02(tid, stride, p_local_normals, p_local_positions, p_local_tangents, p_positions, p_rotations,
              p_skin_indices, p_skin_weights, p_team, t_cws, t_enabled, t_valid, x_bind, x_world,
              num_particles):
@@ -114,7 +113,7 @@ def phase_02(tid, stride, p_local_normals, p_local_positions, p_local_tangents, 
         p += stride
 
 
-@phase((), 'teams')
+@phase('teams')
 def phase_03(tid, stride, sim_dt, csr_center_fixed_offsets, csr_center_fixed_order, p_positions,
              p_rotations, p_vertex_bind_pose_rotations, st_center_fixed_particle,
              t_anchor_component_local_position, t_anchor_inertia, t_anchor_position, t_anchor_rotation,
@@ -685,7 +684,7 @@ def phase_03(tid, stride, sim_dt, csr_center_fixed_offsets, csr_center_fixed_ord
         i += stride
 
 
-@phase((), 'teams')
+@phase('teams')
 def phase_03b(tid, stride, n_zones, t_cws, t_enabled, t_frame_world_position, t_valid, t_wind_count,
               t_wind_direction, t_wind_dirq, t_wind_influence, t_wind_main, t_wind_time, t_wind_zone_id,
               t_wind_zone_turbulence, z_attenuation_lut, z_is_addition, z_main, z_mode, z_size,
@@ -824,7 +823,7 @@ def phase_03b(tid, stride, n_zones, t_cws, t_enabled, t_frame_world_position, t_
         i += stride
 
 
-@phase((), 'particles')
+@phase('particles')
 def phase_04(tid, stride, p_base_positions, p_base_rotations, p_collision_normals, p_display_positions,
              p_friction, p_next_positions, p_old_anim_positions, p_old_anim_rotations, p_old_positions,
              p_old_rotations, p_positions, p_real_velocities, p_rotations, p_static_friction, p_team,
@@ -848,7 +847,7 @@ def phase_04(tid, stride, p_base_positions, p_base_rotations, p_collision_normal
         p += stride
 
 
-@phase((), 'colliders')
+@phase('colliders')
 def phase_05(tid, stride, c_active, c_enabled, c_enabled_prev, c_frame_pos, c_frame_radius, c_frame_rot,
              c_frame_tip, c_input_positions, c_input_radii, c_input_rotations, c_input_tips, c_now_pos,
              c_now_rot, c_now_tip, c_old_frame_pos, c_old_frame_rot, c_old_frame_tip, c_old_pos, c_old_rot,
@@ -873,13 +872,13 @@ def phase_05(tid, stride, c_active, c_enabled, c_enabled_prev, c_frame_pos, c_fr
         ci += stride
 
 
-@phase((('if', 'total_it > 0'),), 'single')
+@phase('single')
 def phase_07(tid, scl_counts):
     if tid == 0:
         scl_counts[SCL_IP_COUNT] = int32(0)
 
 
-@phase((('if', 'total_it > 0'),), 'self_pairs')
+@phase('self_pairs')
 def phase_08(tid, stride, ip_edge, ip_tri, it_edge_start, it_pair_off, it_same, it_tri_count, it_tri_start,
              it_tri_team, scl_counts, sfe_aabb_max, sfe_aabb_min, sfe_all_fix, sfe_ignore, sfe_particles,
              sft_aabb_max, sft_aabb_min, sft_all_fix, sft_ignore, sft_particles, sft_use, t_self_grid_size,
@@ -923,7 +922,7 @@ def phase_08(tid, stride, ip_edge, ip_tri, it_edge_start, it_pair_off, it_same, 
         g += stride
 
 
-@phase((('loop', '_k'),), 'teams')
+@phase('teams')
 def phase_10(tid, stride, _k, sim_dt, t_angular_velocity, t_blend_weight, t_blend_weight_param, t_cws,
              t_distance_weight, t_enabled, t_frame_interpolation, t_frame_moving_direction,
              t_frame_moving_speed, t_frame_old, t_frame_world_position, t_frame_world_rotation,
@@ -968,7 +967,7 @@ def phase_10(tid, stride, _k, sim_dt, t_angular_velocity, t_blend_weight, t_blen
         i += stride
 
 
-@phase((('loop', '_k'),), 'colliders')
+@phase('colliders')
 def phase_11(tid, stride, _k, c_active, c_frame_pos, c_frame_radius, c_frame_rot, c_frame_tip, c_kind,
              c_now_pos, c_now_rot, c_now_tip, c_old_frame_pos, c_old_frame_rot, c_old_frame_tip, c_old_pos,
              c_old_rot, c_old_tip, c_team, c_work_aabb_max, c_work_aabb_min, c_work_inv_old_rot,
@@ -993,7 +992,7 @@ def phase_11(tid, stride, _k, c_active, c_frame_pos, c_frame_radius, c_frame_rot
         ci += stride
 
 
-@phase((('loop', '_k'),), 'particles')
+@phase('particles')
 def phase_12(tid, stride, _k, power2, sim_dt, p_base_positions, p_base_rotations, p_depth, p_friction,
              p_next_positions, p_old_anim_positions, p_old_anim_rotations, p_old_positions, p_positions,
              p_rotations, p_step_basic_positions, p_step_basic_rotations, p_team, p_velocities,
@@ -1170,7 +1169,7 @@ def phase_12(tid, stride, _k, power2, sim_dt, p_base_positions, p_base_rotations
         e += stride
 
 
-@phase((('loop', '_k'),), 'particles')
+@phase('particles')
 def phase_13(tid, stride, _k, p_base_positions, p_base_rotations, p_next_positions, p_velocity_positions,
              st_fixed_particle, st_fixed_team, st_spring_particle, st_spring_team, t_cws, t_enabled,
              t_normal_axis_vector, t_scale_ratio, t_spring_limit_distance, t_spring_noise,
@@ -1257,7 +1256,7 @@ def phase_13(tid, stride, _k, p_base_positions, p_base_rotations, p_next_positio
         e += stride
 
 
-@phase((('loop', '_k'),), 'single')
+@phase('single')
 def phase_14(tid, bid, bdim, _k, fk_no, fk_no_offsets, fk_yes, fk_yes_offsets, fk_yes_parent,
              p_step_basic_positions, p_step_basic_rotations, p_team, p_vertex_local_positions,
              p_vertex_local_rotations, t_animation_pose_ratio, t_cws, t_enabled, t_init_scale,
@@ -1333,7 +1332,7 @@ def phase_14(tid, bid, bdim, _k, fk_no, fk_no_offsets, fk_yes, fk_yes_offsets, f
         cuda.syncthreads()
 
 
-@phase((('loop', '_k'),), 'particles')
+@phase('particles')
 def phase_15(tid, stride, _k, baseline_entries, p_base_positions, p_base_rotations, p_step_basic_positions,
              p_step_basic_rotations, p_team, t_animation_pose_ratio, t_cws, t_enabled, t_update_count,
              t_valid, n_baseline):
@@ -1362,7 +1361,7 @@ def phase_15(tid, stride, _k, baseline_entries, p_base_positions, p_base_rotatio
         i += stride
 
 
-@phase((('loop', '_k'),), 'particles')
+@phase('particles')
 def phase_16(tid, stride, _k, p_next_positions, p_step_basic_positions, p_team, p_velocity_positions,
              p_vertex_root, st_tether_particle, st_tether_team, t_cws, t_enabled, t_tether_compression,
              t_update_count, t_valid, n_tether):
@@ -1376,7 +1375,7 @@ def phase_16(tid, stride, _k, p_next_positions, p_step_basic_positions, p_team, 
         e += stride
 
 
-@phase((('loop', '_k'),), 'particles')
+@phase('particles')
 def phase_17(tid, stride, _k, power1, csr_distance_offsets, csr_distance_order, p_attr_move,
              p_base_positions, p_depth, p_friction, p_next_positions, p_team, sc_dcorr, st_distance_rest,
              st_distance_target, t_animation_pose_ratio, t_cws, t_distance_lut, t_enabled, t_init_scale,
@@ -1393,7 +1392,7 @@ def phase_17(tid, stride, _k, power1, csr_distance_offsets, csr_distance_order, 
         p += stride
 
 
-@phase((('loop', '_k'),), 'particles')
+@phase('particles')
 def phase_18(tid, stride, _k, p_next_positions, p_team, p_velocity_positions, sc_dcorr, t_cws, t_enabled,
              t_update_count, t_valid, num_particles):
     p = tid
@@ -1409,7 +1408,7 @@ def phase_18(tid, stride, _k, p_next_positions, p_team, p_velocity_positions, sc
         p += stride
 
 
-@phase((('loop', '_k'),), 'particles')
+@phase('particles')
 def phase_19(tid, stride, _k, baseline_entries, p_albuf_length, p_albuf_local_pos, p_albuf_local_rot,
              p_albuf_restore, p_albuf_rotation, p_next_positions, p_step_basic_positions,
              p_step_basic_rotations, p_team, p_vertex_parent, st_angle_buffered_particle,
@@ -1479,7 +1478,7 @@ def phase_19(tid, stride, _k, baseline_entries, p_albuf_length, p_albuf_local_po
         i += stride
 
 
-@phase((('loop', '_k'),), 'single')
+@phase('single')
 def phase_20(tid, bid, bdim, _k, power3, angle_pass_offsets, angle_pass_parents, angle_pass_vertices,
              p_albuf_length, p_albuf_local_pos, p_albuf_local_rot, p_albuf_restore, p_albuf_rotation,
              p_attr_move, p_depth, p_friction, p_next_positions, p_team, p_velocity_positions,
@@ -1526,7 +1525,7 @@ def phase_20(tid, bid, bdim, _k, power3, angle_pass_offsets, angle_pass_parents,
                 cuda.syncthreads()
 
 
-@phase((('loop', '_k'),), 'particles')
+@phase('particles')
 def phase_21(tid, stride, sc_dcorr_fixed, sc_dcount, num_particles):
     p = tid
     while p < num_particles:
@@ -1537,7 +1536,7 @@ def phase_21(tid, stride, sc_dcorr_fixed, sc_dcount, num_particles):
         p += stride
 
 
-@phase((('loop', '_k'),), 'bending')
+@phase('bending')
 def phase_22(tid, stride, _k, power1, p_attr_move, p_depth, p_friction, p_next_positions, sc_dcorr_fixed,
              sc_dcount, st_bending_pair, st_bending_rest, st_bending_sign, st_bending_team,
              t_bending_stiffness, t_cws, t_enabled, t_negative_scale_sign, t_scale_ratio, t_update_count,
@@ -1718,7 +1717,7 @@ def phase_22(tid, stride, _k, power1, p_attr_move, p_depth, p_friction, p_next_p
         e += stride
 
 
-@phase((('loop', '_k'),), 'particles')
+@phase('particles')
 def phase_23(tid, stride, _k, p_attr_move, p_next_positions, p_team, sc_dcorr_fixed, sc_dcount, t_cws,
              t_enabled, t_update_count, t_valid, num_particles):
     p = tid
@@ -1733,7 +1732,7 @@ def phase_23(tid, stride, _k, p_attr_move, p_next_positions, p_team, sc_dcorr_fi
         p += stride
 
 
-@phase((('loop', '_k'),), 'particles')
+@phase('particles')
 def phase_24(tid, stride, _k, c_active, c_kind, c_work_aabb_max, c_work_aabb_min, c_work_inv_old_rot,
              c_work_next_pos, c_work_old_pos, c_work_radius, c_work_rot, csr_point_pair_offsets,
              csr_point_pair_order, p_base_positions, p_collision_normals, p_depth, p_friction,
@@ -1755,7 +1754,7 @@ def phase_24(tid, stride, _k, c_active, c_kind, c_work_aabb_max, c_work_aabb_min
         p += stride
 
 
-@phase((('loop', '_k'),), 'particles')
+@phase('particles')
 def phase_25(tid, stride, sc_col_friction_fixed, sc_col_normal_fixed, sc_dcorr_fixed, sc_dcount,
              num_particles):
     p = tid
@@ -1771,7 +1770,7 @@ def phase_25(tid, stride, sc_col_friction_fixed, sc_col_normal_fixed, sc_dcorr_f
         p += stride
 
 
-@phase((('loop', '_k'),), 'collision_edges')
+@phase('collision_edges')
 def phase_26(tid, stride, _k, c_active, c_kind, c_work_aabb_max, c_work_aabb_min, c_work_next_pos,
              c_work_old_pos, c_work_radius, csr_edge_pair_offsets, csr_edge_pair_order, p_attr_move,
              p_depth, p_next_positions, p_team, sc_col_friction_fixed, sc_col_normal_fixed, sc_dcorr_fixed,
@@ -1791,7 +1790,7 @@ def phase_26(tid, stride, _k, c_active, c_kind, c_work_aabb_max, c_work_aabb_min
         ee += stride
 
 
-@phase((('loop', '_k'),), 'particles')
+@phase('particles')
 def phase_27(tid, stride, _k, p_collision_normals, p_friction, p_next_positions, p_team,
              sc_col_friction_fixed, sc_col_normal_fixed, sc_dcorr_fixed, sc_dcount, t_collision_mode,
              t_cws, t_enabled, t_update_count, t_valid, num_particles):
@@ -1820,7 +1819,7 @@ def phase_27(tid, stride, _k, p_collision_normals, p_friction, p_next_positions,
         p += stride
 
 
-@phase((('loop', '_k'),), 'particles')
+@phase('particles')
 def phase_28(tid, stride, _k, power1, csr_distance_offsets, csr_distance_order, p_attr_move,
              p_base_positions, p_depth, p_friction, p_next_positions, p_team, sc_dcorr, st_distance_rest,
              st_distance_target, t_animation_pose_ratio, t_cws, t_distance_lut, t_enabled, t_init_scale,
@@ -1837,7 +1836,7 @@ def phase_28(tid, stride, _k, power1, csr_distance_offsets, csr_distance_order, 
         p += stride
 
 
-@phase((('loop', '_k'),), 'particles')
+@phase('particles')
 def phase_29(tid, stride, _k, p_next_positions, p_team, p_velocity_positions, sc_dcorr, t_cws, t_enabled,
              t_update_count, t_valid, num_particles):
     p = tid
@@ -1853,7 +1852,7 @@ def phase_29(tid, stride, _k, p_next_positions, p_team, p_velocity_positions, sc
         p += stride
 
 
-@phase((('loop', '_k'),), 'particles')
+@phase('particles')
 def phase_30(tid, stride, _k, p_base_positions, p_base_rotations, p_depth, p_next_positions,
              p_velocity_positions, st_motion_particle, st_motion_team, t_cws, t_enabled,
              t_motion_backstop_lut, t_motion_backstop_radius, t_motion_max_distance_lut,
@@ -1923,7 +1922,7 @@ def phase_30(tid, stride, _k, p_base_positions, p_base_rotations, p_depth, p_nex
         e += stride
 
 
-@phase((('loop', '_k'), ('if', 'total_ct > 0'), ('if', '_k == 0')), 'teams')
+@phase('teams')
 def phase_33(tid, stride, _k, scl_max_fixed, t_cws, t_enabled, t_update_count, t_valid, num_teams):
     i = tid
     while i < num_teams:
@@ -1932,7 +1931,7 @@ def phase_33(tid, stride, _k, scl_max_fixed, t_cws, t_enabled, t_update_count, t
         i += stride
 
 
-@phase((('loop', '_k'), ('if', 'total_ct > 0'), ('if', '_k == 0')), 'self_primitives')
+@phase('self_primitives')
 def phase_34(tid, stride, _k, p_friction, p_intersect_flag, p_next_positions, p_old_positions, scl_counts,
              scl_max_fixed, sfe_aabb_max, sfe_aabb_min, sfe_fix, sfe_ignore, sfe_intersect, sfe_inv_mass,
              sfe_particles, sfe_prim_depth, sfe_team, sfe_thickness, sfe_use, sfp_aabb_max, sfp_aabb_min,
@@ -1970,7 +1969,7 @@ def phase_34(tid, stride, _k, p_friction, p_intersect_flag, p_next_positions, p_
         q += stride
 
 
-@phase((('loop', '_k'), ('if', 'total_ct > 0'), ('if', '_k == 0')), 'teams')
+@phase('teams')
 def phase_35(tid, stride, _k, scl_max_fixed, t_cws, t_enabled, t_self_grid_size, t_self_max_primitive_size,
              t_update_count, t_valid, num_teams):
     i = tid
@@ -1982,14 +1981,14 @@ def phase_35(tid, stride, _k, scl_max_fixed, t_cws, t_enabled, t_self_grid_size,
         i += stride
 
 
-@phase((('loop', '_k'), ('if', 'total_ct > 0'), ('if', '_k == 0')), 'single')
+@phase('single')
 def phase_36(tid, scl_counts):
     if tid == 0:
         scl_counts[SCL_EE_COUNT] = int32(0)
         scl_counts[SCL_PT_COUNT] = int32(0)
 
 
-@phase((('loop', '_k'), ('if', 'total_ct > 0'), ('if', '_k == 0')), 'self_pairs')
+@phase('self_pairs')
 def phase_37(tid, stride, ct_kind, ct_my_start, ct_pair_off, ct_same, ct_tgt_count, ct_tgt_start,
              ct_tgt_team, ee_enable, ee_my, ee_n, ee_s, ee_t, ee_target, ee_thickness, p_next_positions,
              p_old_positions, pt_enable, pt_my, pt_sign, pt_target, pt_thickness, scl_counts, sfe_aabb_max,
@@ -2070,7 +2069,7 @@ def phase_37(tid, stride, ct_kind, ct_my_start, ct_pair_off, ct_same, ct_tgt_cou
         g += stride
 
 
-@phase((('loop', '_k'), ('if', 'total_ct > 0'), ('else', '_k == 0')), 'self_contacts')
+@phase('self_contacts')
 def phase_38(tid, stride, ee_enable, ee_my, ee_n, ee_s, ee_t, ee_target, ee_thickness, p_next_positions,
              p_old_positions, pt_enable, pt_my, pt_target, pt_thickness, scl_counts, sfe_particles,
              sfp_particles, sft_particles, ee_cap, pt_cap):
@@ -2099,7 +2098,7 @@ def phase_38(tid, stride, ee_enable, ee_my, ee_n, ee_s, ee_t, ee_target, ee_thic
         e += stride
 
 
-@phase((('loop', '_k'), ('if', 'total_ct > 0')), 'particles')
+@phase('particles')
 def phase_39(tid, stride, sc_dcorr_fixed, sc_dcount, scl_counts, ee_cap, num_particles, pt_cap):
     ee_count2 = scl_counts[SCL_EE_COUNT]
     ee_lim2 = ee_count2 if ee_count2 < ee_cap else ee_cap
@@ -2114,7 +2113,7 @@ def phase_39(tid, stride, sc_dcorr_fixed, sc_dcount, scl_counts, ee_cap, num_par
         p += stride
 
 
-@phase((('loop', '_k'), ('if', 'total_ct > 0'), ('loop', '_sit')), 'self_contacts')
+@phase('self_contacts')
 def phase_40(tid, stride, ee_enable, ee_my, ee_n, ee_s, ee_t, ee_target, ee_thickness, p_next_positions,
              pt_enable, pt_my, pt_sign, pt_target, pt_thickness, sc_dcorr_fixed, sc_dcount, scl_counts,
              sfe_fix, sfe_intersect, sfe_inv_mass, sfe_particles, sfp_fix, sfp_intersect, sfp_inv_mass,
@@ -2256,7 +2255,7 @@ def phase_40(tid, stride, ee_enable, ee_my, ee_n, ee_s, ee_t, ee_target, ee_thic
         e += stride
 
 
-@phase((('loop', '_k'), ('if', 'total_ct > 0'), ('loop', '_sit')), 'particles')
+@phase('particles')
 def phase_41(tid, stride, _k, p_next_positions, p_team, sc_dcorr_fixed, sc_dcount, t_cws, t_enabled,
              t_update_count, t_valid, num_particles):
     p = tid
@@ -2276,7 +2275,7 @@ def phase_41(tid, stride, _k, p_next_positions, p_team, sc_dcorr_fixed, sc_dcoun
         p += stride
 
 
-@phase((('loop', '_k'),), 'particles')
+@phase('particles')
 def phase_42(tid, stride, _k, sim_dt, p_collision_normals, p_depth, p_friction, p_next_positions,
              p_old_positions, p_static_friction, p_velocities, p_velocity_positions, st_move_particle,
              st_move_team, t_angular_velocity, t_centrifugal_acceleration, t_cws, t_dynamic_friction,
@@ -2405,7 +2404,7 @@ def phase_42(tid, stride, _k, sim_dt, p_collision_normals, p_depth, p_friction, 
         e += stride
 
 
-@phase((('loop', '_k'),), 'particles')
+@phase('particles')
 def phase_43(tid, stride, _k, sim_dt, p_next_positions, p_old_positions, p_real_velocities, p_team, t_cws,
              t_enabled, t_update_count, t_valid, num_particles):
     p = tid
@@ -2421,7 +2420,7 @@ def phase_43(tid, stride, _k, sim_dt, p_next_positions, p_old_positions, p_real_
         p += stride
 
 
-@phase((('loop', '_k'),), 'colliders')
+@phase('colliders')
 def phase_44(tid, stride, _k, c_active, c_now_pos, c_now_rot, c_now_tip, c_old_pos, c_old_rot, c_old_tip,
              c_team, t_cws, t_enabled, t_update_count, t_valid, num_colliders):
     ci = tid
@@ -2434,7 +2433,7 @@ def phase_44(tid, stride, _k, c_active, c_now_pos, c_now_rot, c_now_tip, c_old_p
         ci += stride
 
 
-@phase((('if', 'total_it > 0'),), 'particles')
+@phase('particles')
 def phase_45(tid, stride, p_intersect_flag, p_team, t_cws, t_enabled, t_valid, num_particles):
     p = tid
     while p < num_particles:
@@ -2443,7 +2442,7 @@ def phase_45(tid, stride, p_intersect_flag, p_team, t_cws, t_enabled, t_valid, n
         p += stride
 
 
-@phase((('if', 'total_it > 0'),), 'self_contacts')
+@phase('self_contacts')
 def phase_46(tid, stride, ip_edge, ip_tri, p_intersect_flag, p_next_positions, scl_counts, sfe_particles,
              sft_particles):
     ip_count = scl_counts[SCL_IP_COUNT]
@@ -2489,7 +2488,7 @@ def phase_46(tid, stride, ip_edge, ip_tri, p_intersect_flag, p_next_positions, s
         e += stride
 
 
-@phase((), 'particles')
+@phase('particles')
 def phase_47(tid, stride, sim_dt, p_display_positions, p_old_anim_positions, p_old_anim_rotations,
              p_old_positions, p_positions, p_real_velocities, p_rotations, p_team, p_temp_base_positions,
              p_temp_base_rotations, p_vertex_root, st_display_update_move_mask, t_blend_weight, t_cws,
@@ -2509,7 +2508,7 @@ def phase_47(tid, stride, sim_dt, p_display_positions, p_old_anim_positions, p_o
         p += stride
 
 
-@phase((), 'single')
+@phase('single')
 def phase_48(tid, bid, bdim, p_attr_invalid, p_attr_move, p_attr_zero_distance, p_positions, p_rotations,
              p_team, p_temp_base_positions, p_temp_base_rotations, p_vertex_local_positions,
              p_vertex_local_rotations, postline_child_offsets, postline_child_vertices,
@@ -2538,7 +2537,7 @@ def phase_48(tid, bid, bdim, p_attr_invalid, p_attr_move, p_attr_zero_distance, 
         cuda.syncthreads()
 
 
-@phase((), 'triangles')
+@phase('triangles')
 def phase_49(tid, stride, p_positions, p_uv, sc_tri_normal_f64, sc_tri_tangent_f64, st_triangle_particles,
              st_triangle_team, t_cws, t_enabled, t_negative_scale_triangle_sign, t_valid, num_triangles):
     tri_idx = tid
@@ -2551,7 +2550,7 @@ def phase_49(tid, stride, p_positions, p_uv, sc_tri_normal_f64, sc_tri_tangent_f
         tri_idx += stride
 
 
-@phase((), 'particles')
+@phase('particles')
 def phase_50(tid, stride, csr_v2t_offsets, csr_v2t_order, p_normal_adjustment_rotations, p_rotations,
              p_team, sc_tri_normal_f64, sc_tri_tangent_f64, st_v2t_flip_normal, st_v2t_flip_tangent,
              st_v2t_triangle, t_cws, t_enabled, t_negative_scale_quaternion, t_valid, num_particles):
@@ -2567,7 +2566,7 @@ def phase_50(tid, stride, csr_v2t_offsets, csr_v2t_order, p_normal_adjustment_ro
         p += stride
 
 
-@phase((), 'particles')
+@phase('particles')
 def phase_51(tid, stride, p_out_rotations, p_rotations, p_team, p_vertex_to_transform_rotations, t_cws,
              t_enabled, t_negative_scale_quaternion, t_valid, num_particles):
     p = tid
@@ -2579,7 +2578,7 @@ def phase_51(tid, stride, p_out_rotations, p_rotations, p_team, p_vertex_to_tran
         p += stride
 
 
-@phase((), 'colliders')
+@phase('colliders')
 def phase_52(tid, stride, c_active, c_frame_pos, c_frame_rot, c_frame_tip, c_old_frame_pos,
              c_old_frame_rot, c_old_frame_tip, c_team, t_cws, t_enabled, t_running, t_valid,
              num_colliders):
@@ -2593,7 +2592,7 @@ def phase_52(tid, stride, c_active, c_frame_pos, c_frame_rot, c_frame_tip, c_old
         ci += stride
 
 
-@phase((), 'teams')
+@phase('teams')
 def phase_53(tid, stride, t_anchor_component_local_position, t_anchor_position, t_anchor_rotation,
              t_component_world_position, t_component_world_rotation, t_cws, t_enabled, t_force_mode,
              t_frame_old, t_frame_update, t_frame_world_position, t_frame_world_rotation,

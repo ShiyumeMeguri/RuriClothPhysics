@@ -1,5 +1,6 @@
 import itertools
 
+from ..cloth_kernel import phase_plan as _phase_plan
 from . import phases as _phases
 from . import plan as _plan
 from . import state as _state
@@ -518,6 +519,10 @@ def _validate_signature(phase_name, kernel, names, dimension_names):
 
 
 def _validate_phase_table():
+    assert PHASE_NAMES == _phase_plan.PHASE_NAMES, \
+        "the engine phase table runs %r while the shared phase plan sequences %r, the " \
+        "sequence is declared once and both engines read it from there" \
+        % (list(PHASE_NAMES), list(_phase_plan.PHASE_NAMES))
     seen = set()
     seen_kernels = set()
     for phase_name, dimensions, passes in _phases.PHASE_TABLE:

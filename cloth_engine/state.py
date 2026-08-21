@@ -358,6 +358,18 @@ class ClothState:
     def element_count(self, domain_name):
         return self.domain_element_counts[domain_name]
 
+    def resize_domain(self, domain_name, element_count):
+        if domain_name not in self.domain_element_counts:
+            raise ValueError("there is no domain named %r to resize" % (domain_name,))
+        requested = int(element_count)
+        if self.domain_element_counts[domain_name] == requested:
+            return False
+        fields = STORAGE_FIELDS[domain_name]
+        self.storages[domain_name] = SlabStorage(
+            domain_name, fields, uniform_element_counts(fields, requested))
+        self.domain_element_counts[domain_name] = requested
+        return True
+
     def plane_element_count(self, storage_name, field_name):
         return self.storages[storage_name].element_counts[field_name]
 
