@@ -25,8 +25,11 @@ from .kernels import SCAL_POWER3
 from .kernels import SCAL_SIM_DT
 from .kernels import SCAL_TIME_SCALE
 from .kernels import SCL_EE_COUNT
+from .kernels import SCL_ERROR
+from .kernels import SCL_FRAME_INDEX
 from .kernels import SCL_IP_COUNT
 from .kernels import SCL_PT_COUNT
+from .kernels import SELF_COLLISION_INTERSECT_DIV
 from .kernels import SELF_COLLISION_UNIFORM_GRID_SCALE
 from .kernels import TELEPORT_RESET
 from .kernels import TO_FIXED
@@ -1110,6 +1113,75 @@ def phase_05(c_active: wp.array(dtype=int),
                                       t_inertia_shift, t_frame_component_shift_vector,
                                       t_frame_component_shift_rotation,
                                       t_old_component_world_position)
+
+
+@wp.kernel
+def phase_07(scl_counts: wp.array(dtype=int)):
+    tid = wp.tid()
+    if tid == 0:
+        scl_counts[SCL_IP_COUNT] = 0
+
+
+@wp.kernel
+def phase_08(ip_edge: wp.array(dtype=int),
+             ip_tri: wp.array(dtype=int),
+             it_edge_start: wp.array(dtype=int),
+             it_pair_off: wp.array(dtype=int),
+             it_same: wp.array(dtype=int),
+             it_tri_count: wp.array(dtype=int),
+             it_tri_start: wp.array(dtype=int),
+             it_tri_team: wp.array(dtype=int),
+             scl_counts: wp.array(dtype=int),
+             sfe_aabb_max: wp.array2d(dtype=float),
+             sfe_aabb_min: wp.array2d(dtype=float),
+             sfe_all_fix: wp.array(dtype=int),
+             sfe_ignore: wp.array(dtype=int),
+             sfe_particles: wp.array2d(dtype=int),
+             sft_aabb_max: wp.array2d(dtype=float),
+             sft_aabb_min: wp.array2d(dtype=float),
+             sft_all_fix: wp.array(dtype=int),
+             sft_ignore: wp.array(dtype=int),
+             sft_particles: wp.array2d(dtype=int),
+             sft_use: wp.array(dtype=int),
+             t_self_grid_size: wp.array(dtype=float),
+             t_self_max_primitive_size: wp.array(dtype=float)):
+    g = wp.tid()
+    num_it_slots = it_pair_off.shape[0] - 1
+    total_it = it_pair_off[num_it_slots]
+    frame_index = scl_counts[SCL_FRAME_INDEX]
+    if g < total_it:
+        lo = int(0)
+        hi = num_it_slots
+        while lo < hi:
+            mid = (lo + hi) >> 1
+            if it_pair_off[mid + 1] <= g:
+                lo = mid + 1
+            else:
+                hi = mid
+        task = lo
+        tgt_team = it_tri_team[task]
+        if t_self_grid_size[tgt_team] > EPSILON and t_self_max_primitive_size[tgt_team] > EPSILON:
+            tri_count = it_tri_count[task]
+            local = g - it_pair_off[task]
+            i = local // tri_count
+            j = local % tri_count
+            my_edge = it_edge_start[task] + i
+            tgt_tri = it_tri_start[task] + j
+            same = it_same[task]
+            if (sfe_ignore[my_edge] == 0 and (i % SELF_COLLISION_INTERSECT_DIV) == frame_index
+                    and sft_use[tgt_tri] != 0 and sft_ignore[tgt_tri] == 0
+                    and kernels.self_aabb_overlap(sfe_aabb_min, sfe_aabb_max, my_edge,
+                                                  sft_aabb_min, sft_aabb_max, tgt_tri)
+                    and not (sfe_all_fix[my_edge] != 0 and sft_all_fix[tgt_tri] != 0)):
+                conn = (same == 0) or (not kernels.self_connection_shared(
+                    sfe_particles, my_edge, sft_particles, tgt_tri))
+                if conn:
+                    idx = wp.atomic_add(scl_counts, SCL_IP_COUNT, 1)
+                    if idx < ip_edge.shape[0]:
+                        ip_edge[idx] = my_edge
+                        ip_tri[idx] = tgt_tri
+                    else:
+                        scl_counts[SCL_ERROR] = 1
 
 
 @wp.kernel
@@ -2763,6 +2835,426 @@ def phase_36(scl_counts: wp.array(dtype=int)):
 
 
 @wp.kernel
+def phase_37(ct_kind: wp.array(dtype=int),
+             ct_my_start: wp.array(dtype=int),
+             ct_pair_off: wp.array(dtype=int),
+             ct_same: wp.array(dtype=int),
+             ct_tgt_count: wp.array(dtype=int),
+             ct_tgt_start: wp.array(dtype=int),
+             ct_tgt_team: wp.array(dtype=int),
+             ee_enable: wp.array(dtype=int),
+             ee_my: wp.array(dtype=int),
+             ee_n: wp.array2d(dtype=float),
+             ee_s: wp.array(dtype=float),
+             ee_t: wp.array(dtype=float),
+             ee_target: wp.array(dtype=int),
+             ee_thickness: wp.array(dtype=float),
+             p_next_positions: wp.array2d(dtype=float),
+             p_old_positions: wp.array2d(dtype=float),
+             pt_enable: wp.array(dtype=int),
+             pt_my: wp.array(dtype=int),
+             pt_sign: wp.array(dtype=float),
+             pt_target: wp.array(dtype=int),
+             pt_thickness: wp.array(dtype=float),
+             scl_counts: wp.array(dtype=int),
+             sfe_aabb_max: wp.array2d(dtype=float),
+             sfe_aabb_min: wp.array2d(dtype=float),
+             sfe_all_fix: wp.array(dtype=int),
+             sfe_ignore: wp.array(dtype=int),
+             sfe_particles: wp.array2d(dtype=int),
+             sfe_thickness: wp.array(dtype=float),
+             sfe_use: wp.array(dtype=int),
+             sfp_aabb_max: wp.array2d(dtype=float),
+             sfp_aabb_min: wp.array2d(dtype=float),
+             sfp_all_fix: wp.array(dtype=int),
+             sfp_ignore: wp.array(dtype=int),
+             sfp_particles: wp.array2d(dtype=int),
+             sfp_thickness: wp.array(dtype=float),
+             sfp_use: wp.array(dtype=int),
+             sft_aabb_max: wp.array2d(dtype=float),
+             sft_aabb_min: wp.array2d(dtype=float),
+             sft_all_fix: wp.array(dtype=int),
+             sft_ignore: wp.array(dtype=int),
+             sft_particles: wp.array2d(dtype=int),
+             sft_thickness: wp.array(dtype=float),
+             sft_use: wp.array(dtype=int),
+             t_self_grid_size: wp.array(dtype=float)):
+    g = wp.tid()
+    num_ct_slots = ct_pair_off.shape[0] - 1
+    total_ct = ct_pair_off[num_ct_slots]
+    if g < total_ct:
+        lo = int(0)
+        hi = num_ct_slots
+        while lo < hi:
+            mid = (lo + hi) >> 1
+            if ct_pair_off[mid + 1] <= g:
+                lo = mid + 1
+            else:
+                hi = mid
+        task = lo
+        tgt_team = ct_tgt_team[task]
+        if t_self_grid_size[tgt_team] > EPSILON:
+            tgt_count = ct_tgt_count[task]
+            local = g - ct_pair_off[task]
+            i = local // tgt_count
+            j = local % tgt_count
+            my_prim = ct_my_start[task] + i
+            tgt_prim = ct_tgt_start[task] + j
+            same = ct_same[task]
+            if ct_kind[task] == 0:
+                if (sfe_use[my_prim] != 0 and sfe_ignore[my_prim] == 0
+                        and sfe_use[tgt_prim] != 0 and sfe_ignore[tgt_prim] == 0
+                        and (same == 0 or my_prim < tgt_prim)
+                        and kernels.self_aabb_overlap(sfe_aabb_min, sfe_aabb_max, my_prim,
+                                                      sfe_aabb_min, sfe_aabb_max, tgt_prim)
+                        and not (sfe_all_fix[my_prim] != 0 and sfe_all_fix[tgt_prim] != 0)):
+                    if (same == 0) or (not kernels.self_connection_shared(
+                            sfe_particles, my_prim, sfe_particles, tgt_prim)):
+                        thk = sfe_thickness[my_prim] + sfe_thickness[tgt_prim]
+                        s, t, nx, ny, nz, enable = kernels.self_ee_geometry(
+                            my_prim, tgt_prim, thk, sfe_particles,
+                            p_next_positions, p_old_positions)
+                        if enable:
+                            idx = wp.atomic_add(scl_counts, SCL_EE_COUNT, 1)
+                            if idx < ee_my.shape[0]:
+                                ee_my[idx] = my_prim
+                                ee_target[idx] = tgt_prim
+                                ee_thickness[idx] = thk
+                                ee_s[idx] = s
+                                ee_t[idx] = t
+                                ee_n[idx, 0] = nx
+                                ee_n[idx, 1] = ny
+                                ee_n[idx, 2] = nz
+                                ee_enable[idx] = 1
+                            else:
+                                scl_counts[SCL_ERROR] = 1
+            else:
+                if (sfp_use[my_prim] != 0 and sfp_ignore[my_prim] == 0
+                        and sft_use[tgt_prim] != 0 and sft_ignore[tgt_prim] == 0
+                        and kernels.self_aabb_overlap(sfp_aabb_min, sfp_aabb_max, my_prim,
+                                                      sft_aabb_min, sft_aabb_max, tgt_prim)
+                        and not (sfp_all_fix[my_prim] != 0 and sft_all_fix[tgt_prim] != 0)):
+                    if (same == 0) or (not kernels.self_connection_shared(
+                            sfp_particles, my_prim, sft_particles, tgt_prim)):
+                        thk = sfp_thickness[my_prim] + sft_thickness[tgt_prim]
+                        enable, sign = kernels.self_pt_geometry(
+                            my_prim, tgt_prim, thk, True, sfp_particles,
+                            sft_particles, p_next_positions, p_old_positions)
+                        if enable:
+                            idx = wp.atomic_add(scl_counts, SCL_PT_COUNT, 1)
+                            if idx < pt_my.shape[0]:
+                                pt_my[idx] = my_prim
+                                pt_target[idx] = tgt_prim
+                                pt_thickness[idx] = thk
+                                pt_sign[idx] = sign
+                                pt_enable[idx] = 1
+                            else:
+                                scl_counts[SCL_ERROR] = 1
+
+
+@wp.kernel
+def phase_38_edges(ee_enable: wp.array(dtype=int),
+             ee_my: wp.array(dtype=int),
+             ee_n: wp.array2d(dtype=float),
+             ee_s: wp.array(dtype=float),
+             ee_t: wp.array(dtype=float),
+             ee_target: wp.array(dtype=int),
+             ee_thickness: wp.array(dtype=float),
+             p_next_positions: wp.array2d(dtype=float),
+             p_old_positions: wp.array2d(dtype=float),
+             pt_enable: wp.array(dtype=int),
+             pt_my: wp.array(dtype=int),
+             pt_target: wp.array(dtype=int),
+             pt_thickness: wp.array(dtype=float),
+             scl_counts: wp.array(dtype=int),
+             sfe_particles: wp.array2d(dtype=int),
+             sfp_particles: wp.array2d(dtype=int),
+             sft_particles: wp.array2d(dtype=int)):
+    e = wp.tid()
+    ee_count = scl_counts[SCL_EE_COUNT]
+    ee_lim = ee_count if ee_count < ee_my.shape[0] else ee_my.shape[0]
+    if e < ee_lim:
+        s, t, nx, ny, nz, enable = kernels.self_ee_geometry(
+            ee_my[e], ee_target[e], ee_thickness[e], sfe_particles,
+            p_next_positions, p_old_positions)
+        ee_s[e] = s
+        ee_t[e] = t
+        ee_n[e, 0] = nx
+        ee_n[e, 1] = ny
+        ee_n[e, 2] = nz
+        ee_enable[e] = 1 if enable else 0
+
+
+@wp.kernel
+def phase_38_points(ee_enable: wp.array(dtype=int),
+             ee_my: wp.array(dtype=int),
+             ee_n: wp.array2d(dtype=float),
+             ee_s: wp.array(dtype=float),
+             ee_t: wp.array(dtype=float),
+             ee_target: wp.array(dtype=int),
+             ee_thickness: wp.array(dtype=float),
+             p_next_positions: wp.array2d(dtype=float),
+             p_old_positions: wp.array2d(dtype=float),
+             pt_enable: wp.array(dtype=int),
+             pt_my: wp.array(dtype=int),
+             pt_target: wp.array(dtype=int),
+             pt_thickness: wp.array(dtype=float),
+             scl_counts: wp.array(dtype=int),
+             sfe_particles: wp.array2d(dtype=int),
+             sfp_particles: wp.array2d(dtype=int),
+             sft_particles: wp.array2d(dtype=int)):
+    e = wp.tid()
+    pt_count = scl_counts[SCL_PT_COUNT]
+    pt_lim = pt_count if pt_count < pt_my.shape[0] else pt_my.shape[0]
+    if e < pt_lim:
+        enable, sign = kernels.self_pt_geometry(
+            pt_my[e], pt_target[e], pt_thickness[e], False, sfp_particles,
+            sft_particles, p_next_positions, p_old_positions)
+        pt_enable[e] = 1 if enable else 0
+
+
+@wp.kernel
+def phase_39(ee_my: wp.array(dtype=int),
+             p_team: wp.array(dtype=int),
+             pt_my: wp.array(dtype=int),
+             sc_dcorr_fixed: wp.array2d(dtype=int),
+             sc_dcount: wp.array(dtype=int),
+             scl_counts: wp.array(dtype=int)):
+    p = wp.tid()
+    ee_count2 = scl_counts[SCL_EE_COUNT]
+    ee_lim2 = ee_count2 if ee_count2 < ee_my.shape[0] else ee_my.shape[0]
+    pt_count2 = scl_counts[SCL_PT_COUNT]
+    pt_lim2 = pt_count2 if pt_count2 < pt_my.shape[0] else pt_my.shape[0]
+    sc_dcorr_fixed[p, 0] = 0
+    sc_dcorr_fixed[p, 1] = 0
+    sc_dcorr_fixed[p, 2] = 0
+    sc_dcount[p] = 0
+
+
+@wp.kernel
+def phase_40_edges(ee_enable: wp.array(dtype=int),
+             ee_my: wp.array(dtype=int),
+             ee_n: wp.array2d(dtype=float),
+             ee_s: wp.array(dtype=float),
+             ee_t: wp.array(dtype=float),
+             ee_target: wp.array(dtype=int),
+             ee_thickness: wp.array(dtype=float),
+             p_next_positions: wp.array2d(dtype=float),
+             pt_enable: wp.array(dtype=int),
+             pt_my: wp.array(dtype=int),
+             pt_sign: wp.array(dtype=float),
+             pt_target: wp.array(dtype=int),
+             pt_thickness: wp.array(dtype=float),
+             sc_dcorr_fixed: wp.array2d(dtype=int),
+             sc_dcount: wp.array(dtype=int),
+             scl_counts: wp.array(dtype=int),
+             sfe_fix: wp.array(dtype=int),
+             sfe_intersect: wp.array(dtype=int),
+             sfe_inv_mass: wp.array2d(dtype=float),
+             sfe_particles: wp.array2d(dtype=int),
+             sfp_fix: wp.array(dtype=int),
+             sfp_intersect: wp.array(dtype=int),
+             sfp_inv_mass: wp.array2d(dtype=float),
+             sfp_particles: wp.array2d(dtype=int),
+             sft_fix: wp.array(dtype=int),
+             sft_intersect: wp.array(dtype=int),
+             sft_inv_mass: wp.array2d(dtype=float),
+             sft_particles: wp.array2d(dtype=int)):
+    e = wp.tid()
+    ee_count2 = scl_counts[SCL_EE_COUNT]
+    ee_lim2 = ee_count2 if ee_count2 < ee_my.shape[0] else ee_my.shape[0]
+    if e < ee_lim2:
+        if ee_enable[e] != 0:
+            my = ee_my[e]
+            tgt = ee_target[e]
+            s = ee_s[e]
+            t = ee_t[e]
+            nx = ee_n[e, 0]
+            ny = ee_n[e, 1]
+            nz = ee_n[e, 2]
+            thk = ee_thickness[e]
+            a0 = sfe_particles[my, 0]
+            a1 = sfe_particles[my, 1]
+            b0 = sfe_particles[tgt, 0]
+            b1 = sfe_particles[tgt, 1]
+            ax = dmath.lerp(p_next_positions[a0, 0], p_next_positions[a1, 0], s)
+            ay = dmath.lerp(p_next_positions[a0, 1], p_next_positions[a1, 1], s)
+            az = dmath.lerp(p_next_positions[a0, 2], p_next_positions[a1, 2], s)
+            bx = dmath.lerp(p_next_positions[b0, 0], p_next_positions[b1, 0], t)
+            by = dmath.lerp(p_next_positions[b0, 1], p_next_positions[b1, 1], t)
+            bz = dmath.lerp(p_next_positions[b0, 2], p_next_positions[b1, 2], t)
+            l = nx * (ax - bx) + ny * (ay - by) + nz * (az - bz)
+            c = thk - l
+            bb0 = 1.0 - s
+            bb1 = s
+            bb2 = 1.0 - t
+            bb3 = t
+            im0 = sfe_inv_mass[my, 0]
+            im1 = sfe_inv_mass[my, 1]
+            im20 = sfe_inv_mass[tgt, 0]
+            im21 = sfe_inv_mass[tgt, 1]
+            denom = im0 * bb0 * bb0 + im1 * bb1 * bb1 + im20 * bb2 * bb2 + im21 * bb3 * bb3
+            if l <= thk and denom != 0.0:
+                scale = c / denom
+                s0 = scale * im0 * bb0
+                s1 = scale * im1 * bb1
+                s2 = scale * im20 * bb2
+                s3 = scale * im21 * bb3
+                fm = sfe_fix[my]
+                imk = sfe_intersect[my]
+                fmt = sfe_fix[tgt]
+                imt = sfe_intersect[tgt]
+                if ((fm >> 0) & 1) == 0 and ((imk >> 0) & 1) == 0:
+                    wp.atomic_add(sc_dcorr_fixed, a0, 0, int(nx * s0 * TO_FIXED))
+                    wp.atomic_add(sc_dcorr_fixed, a0, 1, int(ny * s0 * TO_FIXED))
+                    wp.atomic_add(sc_dcorr_fixed, a0, 2, int(nz * s0 * TO_FIXED))
+                    wp.atomic_add(sc_dcount, a0, 1)
+                if ((fm >> 1) & 1) == 0 and ((imk >> 1) & 1) == 0:
+                    wp.atomic_add(sc_dcorr_fixed, a1, 0, int(nx * s1 * TO_FIXED))
+                    wp.atomic_add(sc_dcorr_fixed, a1, 1, int(ny * s1 * TO_FIXED))
+                    wp.atomic_add(sc_dcorr_fixed, a1, 2, int(nz * s1 * TO_FIXED))
+                    wp.atomic_add(sc_dcount, a1, 1)
+                if ((fmt >> 0) & 1) == 0 and ((imt >> 0) & 1) == 0:
+                    wp.atomic_add(sc_dcorr_fixed, b0, 0, int(dmath.negate(nx) * s2 * TO_FIXED))
+                    wp.atomic_add(sc_dcorr_fixed, b0, 1, int(dmath.negate(ny) * s2 * TO_FIXED))
+                    wp.atomic_add(sc_dcorr_fixed, b0, 2, int(dmath.negate(nz) * s2 * TO_FIXED))
+                    wp.atomic_add(sc_dcount, b0, 1)
+                if ((fmt >> 1) & 1) == 0 and ((imt >> 1) & 1) == 0:
+                    wp.atomic_add(sc_dcorr_fixed, b1, 0, int(dmath.negate(nx) * s3 * TO_FIXED))
+                    wp.atomic_add(sc_dcorr_fixed, b1, 1, int(dmath.negate(ny) * s3 * TO_FIXED))
+                    wp.atomic_add(sc_dcorr_fixed, b1, 2, int(dmath.negate(nz) * s3 * TO_FIXED))
+                    wp.atomic_add(sc_dcount, b1, 1)
+
+
+@wp.kernel
+def phase_40_points(ee_enable: wp.array(dtype=int),
+             ee_my: wp.array(dtype=int),
+             ee_n: wp.array2d(dtype=float),
+             ee_s: wp.array(dtype=float),
+             ee_t: wp.array(dtype=float),
+             ee_target: wp.array(dtype=int),
+             ee_thickness: wp.array(dtype=float),
+             p_next_positions: wp.array2d(dtype=float),
+             pt_enable: wp.array(dtype=int),
+             pt_my: wp.array(dtype=int),
+             pt_sign: wp.array(dtype=float),
+             pt_target: wp.array(dtype=int),
+             pt_thickness: wp.array(dtype=float),
+             sc_dcorr_fixed: wp.array2d(dtype=int),
+             sc_dcount: wp.array(dtype=int),
+             scl_counts: wp.array(dtype=int),
+             sfe_fix: wp.array(dtype=int),
+             sfe_intersect: wp.array(dtype=int),
+             sfe_inv_mass: wp.array2d(dtype=float),
+             sfe_particles: wp.array2d(dtype=int),
+             sfp_fix: wp.array(dtype=int),
+             sfp_intersect: wp.array(dtype=int),
+             sfp_inv_mass: wp.array2d(dtype=float),
+             sfp_particles: wp.array2d(dtype=int),
+             sft_fix: wp.array(dtype=int),
+             sft_intersect: wp.array(dtype=int),
+             sft_inv_mass: wp.array2d(dtype=float),
+             sft_particles: wp.array2d(dtype=int)):
+    e = wp.tid()
+    pt_count2 = scl_counts[SCL_PT_COUNT]
+    pt_lim2 = pt_count2 if pt_count2 < pt_my.shape[0] else pt_my.shape[0]
+    if e < pt_lim2:
+        if pt_enable[e] != 0:
+            my = pt_my[e]
+            tgt = pt_target[e]
+            sign = pt_sign[e]
+            thk = pt_thickness[e]
+            pp = sfp_particles[my, 0]
+            t0 = sft_particles[tgt, 0]
+            t1 = sft_particles[tgt, 1]
+            t2 = sft_particles[tgt, 2]
+            npx = p_next_positions[pp, 0]
+            npy = p_next_positions[pp, 1]
+            npz = p_next_positions[pp, 2]
+            t0x = p_next_positions[t0, 0]
+            t0y = p_next_positions[t0, 1]
+            t0z = p_next_positions[t0, 2]
+            t1x = p_next_positions[t1, 0]
+            t1y = p_next_positions[t1, 1]
+            t1z = p_next_positions[t1, 2]
+            t2x = p_next_positions[t2, 0]
+            t2y = p_next_positions[t2, 1]
+            t2z = p_next_positions[t2, 2]
+            tnx, tny, tnz = dmath.triangle_normal(t0x, t0y, t0z, t1x, t1y, t1z,
+                                                  t2x, t2y, t2z)
+            nx = tnx * sign
+            ny = tny * sign
+            nz = tnz * sign
+            dist = nx * (npx - t0x) + ny * (npy - t0y) + nz * (npz - t0z)
+            cx, cy, cz, u, v, w = dmath.closest_pt_point_triangle(
+                npx, npy, npz, t0x, t0y, t0z, t1x, t1y, t1z, t2x, t2y, t2z)
+            c = dist - thk
+            imp = sfp_inv_mass[my, 0]
+            imt0 = sft_inv_mass[tgt, 0]
+            imt1 = sft_inv_mass[tgt, 1]
+            imt2 = sft_inv_mass[tgt, 2]
+            denom = imp + imt0 * u * u + imt1 * v * v + imt2 * w * w
+            if dist < thk and denom != 0.0:
+                scale = c / denom
+                sp = scale * imp
+                st0 = scale * imt0 * u
+                st1 = scale * imt1 * v
+                st2 = scale * imt2 * w
+                fp = sfp_fix[my]
+                ipk = sfp_intersect[my]
+                ft = sft_fix[tgt]
+                itk = sft_intersect[tgt]
+                if ((fp >> 0) & 1) == 0 and ((ipk >> 0) & 1) == 0:
+                    wp.atomic_add(sc_dcorr_fixed, pp, 0, int(dmath.negate(nx) * sp * TO_FIXED))
+                    wp.atomic_add(sc_dcorr_fixed, pp, 1, int(dmath.negate(ny) * sp * TO_FIXED))
+                    wp.atomic_add(sc_dcorr_fixed, pp, 2, int(dmath.negate(nz) * sp * TO_FIXED))
+                    wp.atomic_add(sc_dcount, pp, 1)
+                if ((ft >> 0) & 1) == 0 and ((itk >> 0) & 1) == 0:
+                    wp.atomic_add(sc_dcorr_fixed, t0, 0, int(nx * st0 * TO_FIXED))
+                    wp.atomic_add(sc_dcorr_fixed, t0, 1, int(ny * st0 * TO_FIXED))
+                    wp.atomic_add(sc_dcorr_fixed, t0, 2, int(nz * st0 * TO_FIXED))
+                    wp.atomic_add(sc_dcount, t0, 1)
+                if ((ft >> 1) & 1) == 0 and ((itk >> 1) & 1) == 0:
+                    wp.atomic_add(sc_dcorr_fixed, t1, 0, int(nx * st1 * TO_FIXED))
+                    wp.atomic_add(sc_dcorr_fixed, t1, 1, int(ny * st1 * TO_FIXED))
+                    wp.atomic_add(sc_dcorr_fixed, t1, 2, int(nz * st1 * TO_FIXED))
+                    wp.atomic_add(sc_dcount, t1, 1)
+                if ((ft >> 2) & 1) == 0 and ((itk >> 2) & 1) == 0:
+                    wp.atomic_add(sc_dcorr_fixed, t2, 0, int(nx * st2 * TO_FIXED))
+                    wp.atomic_add(sc_dcorr_fixed, t2, 1, int(ny * st2 * TO_FIXED))
+                    wp.atomic_add(sc_dcorr_fixed, t2, 2, int(nz * st2 * TO_FIXED))
+                    wp.atomic_add(sc_dcount, t2, 1)
+
+
+@wp.kernel
+def phase_41(k: int,
+             p_next_positions: wp.array2d(dtype=float),
+             p_team: wp.array(dtype=int),
+             sc_dcorr_fixed: wp.array2d(dtype=int),
+             sc_dcount: wp.array(dtype=int),
+             t_cws: wp.array2d(dtype=float),
+             t_enabled: wp.array(dtype=int),
+             t_update_count: wp.array(dtype=int),
+             t_valid: wp.array(dtype=int)):
+    p = wp.tid()
+    cnt = sc_dcount[p]
+    if cnt > 0:
+        mt = p_team[p]
+        if kernels.team_frame_mask(t_enabled, t_valid, t_cws, mt) and t_update_count[mt] > k:
+            inv = 1.0 / float(cnt)
+            p_next_positions[p, 0] = (p_next_positions[p, 0]
+                                      + float(sc_dcorr_fixed[p, 0]) / TO_FIXED * inv)
+            p_next_positions[p, 1] = (p_next_positions[p, 1]
+                                      + float(sc_dcorr_fixed[p, 1]) / TO_FIXED * inv)
+            p_next_positions[p, 2] = (p_next_positions[p, 2]
+                                      + float(sc_dcorr_fixed[p, 2]) / TO_FIXED * inv)
+    sc_dcorr_fixed[p, 0] = 0
+    sc_dcorr_fixed[p, 1] = 0
+    sc_dcorr_fixed[p, 2] = 0
+    sc_dcount[p] = 0
+
+
+@wp.kernel
 def phase_42(k: int,
              p_collision_normals: wp.array2d(dtype=float),
              p_depth: wp.array(dtype=float),
@@ -3303,60 +3795,69 @@ REPEAT_COUNT_FROM_MODULE_CONSTANT = "module_constant"
 REPEAT_COUNT_RULES = (REPEAT_COUNT_FROM_OFFSET_PLANES, REPEAT_COUNT_FROM_MODULE_CONSTANT)
 
 PHASE_TABLE = (
-    ("phase_00", (), ((phase_00_resolve_top, "t_enabled"),
-                      (phase_00_snapshot, "t_enabled"),
-                      (phase_00_apply, "t_enabled"))),
-    ("phase_01", (), ((phase_01, "t_enabled"),)),
-    ("phase_02", (), ((phase_02, "p_team"),)),
-    ("phase_03", (), ((phase_03, "t_enabled"),)),
-    ("phase_03b", (), ((phase_03b, "t_enabled"),)),
-    ("phase_04", (), ((phase_04, "p_team"),)),
-    ("phase_05", (), ((phase_05, "c_team"),)),
-    ("phase_10", (), ((phase_10, "t_enabled"),)),
-    ("phase_11", (), ((phase_11, "c_team"),)),
-    ("phase_12", (), ((phase_12_animate, "p_team"),
-                      (phase_12_force, "st_move_particle"))),
-    ("phase_13", (), ((phase_13_fixed, "st_fixed_particle"),
-                      (phase_13_spring, "st_spring_particle"))),
+    ("phase_00", (), ((phase_00_resolve_top, ("t_enabled",)),
+                      (phase_00_snapshot, ("t_enabled",)),
+                      (phase_00_apply, ("t_enabled",)))),
+    ("phase_01", (), ((phase_01, ("t_enabled",)),)),
+    ("phase_02", (), ((phase_02, ("p_team",)),)),
+    ("phase_03", (), ((phase_03, ("t_enabled",)),)),
+    ("phase_03b", (), ((phase_03b, ("t_enabled",)),)),
+    ("phase_04", (), ((phase_04, ("p_team",)),)),
+    ("phase_05", (), ((phase_05, ("c_team",)),)),
+    ("phase_07", (), ((phase_07, ("scl_counts",)),)),
+    ("phase_08", (), ((phase_08, ("ip_edge",)),)),
+    ("phase_10", (), ((phase_10, ("t_enabled",)),)),
+    ("phase_11", (), ((phase_11, ("c_team",)),)),
+    ("phase_12", (), ((phase_12_animate, ("p_team",)),
+                      (phase_12_force, ("st_move_particle",)))),
+    ("phase_13", (), ((phase_13_fixed, ("st_fixed_particle",)),
+                      (phase_13_spring, ("st_spring_particle",)))),
     ("phase_14", (("level", REPEAT_COUNT_FROM_OFFSET_PLANES,
                    ("fk_yes_offsets", "fk_no_offsets")),),
-     ((phase_14_yes, "fk_yes"), (phase_14_no, "fk_no"))),
-    ("phase_15", (), ((phase_15, "baseline_entries"),)),
-    ("phase_16", (), ((phase_16, "st_tether_particle"),)),
-    ("phase_17", (), ((phase_17, "p_team"),)),
-    ("phase_18", (), ((phase_18, "p_team"),)),
-    ("phase_19", (), ((phase_19_baseline, "baseline_entries"),
-                      (phase_19_buffered, "st_angle_buffered_particle"))),
+     ((phase_14_yes, ("fk_yes",)), (phase_14_no, ("fk_no",)))),
+    ("phase_15", (), ((phase_15, ("baseline_entries",)),)),
+    ("phase_16", (), ((phase_16, ("st_tether_particle",)),)),
+    ("phase_17", (), ((phase_17, ("p_team",)),)),
+    ("phase_18", (), ((phase_18, ("p_team",)),)),
+    ("phase_19", (), ((phase_19_baseline, ("baseline_entries",)),
+                      (phase_19_buffered, ("st_angle_buffered_particle",)))),
     ("phase_20", (("iteration", REPEAT_COUNT_FROM_MODULE_CONSTANT, ANGLE_LIMIT_ITERATION),
                   ("level", REPEAT_COUNT_FROM_OFFSET_PLANES, ("angle_pass_offsets",))),
-     ((phase_20, "angle_pass_vertices"),)),
-    ("phase_21", (), ((phase_21, "p_team"),)),
-    ("phase_22", (), ((phase_22, "st_bending_team"),)),
-    ("phase_23", (), ((phase_23, "p_team"),)),
-    ("phase_24", (), ((phase_24, "p_team"),)),
-    ("phase_25", (), ((phase_25, "p_team"),)),
-    ("phase_26", (), ((phase_26, "st_collision_edge"),)),
-    ("phase_27", (), ((phase_27, "p_team"),)),
-    ("phase_28", (), ((phase_28, "p_team"),)),
-    ("phase_29", (), ((phase_29, "p_team"),)),
-    ("phase_30", (), ((phase_30, "st_motion_particle"),)),
-    ("phase_33", (), ((phase_33, "t_enabled"),)),
-    ("phase_34", (), ((phase_34_points, "sfp_team"),
-                      (phase_34_edges, "sfe_team"),
-                      (phase_34_triangles, "sft_team"))),
-    ("phase_35", (), ((phase_35, "t_enabled"),)),
-    ("phase_36", (), ((phase_36, "scl_counts"),)),
-    ("phase_42", (), ((phase_42, "st_move_particle"),)),
-    ("phase_43", (), ((phase_43, "p_team"),)),
-    ("phase_44", (), ((phase_44, "c_team"),)),
-    ("phase_45", (), ((phase_45, "p_team"),)),
-    ("phase_46", (), ((phase_46, "ip_edge"),)),
-    ("phase_47", (), ((phase_47, "p_team"),)),
+     ((phase_20, ("angle_pass_vertices",)),)),
+    ("phase_21", (), ((phase_21, ("p_team",)),)),
+    ("phase_22", (), ((phase_22, ("st_bending_team",)),)),
+    ("phase_23", (), ((phase_23, ("p_team",)),)),
+    ("phase_24", (), ((phase_24, ("p_team",)),)),
+    ("phase_25", (), ((phase_25, ("p_team",)),)),
+    ("phase_26", (), ((phase_26, ("st_collision_edge",)),)),
+    ("phase_27", (), ((phase_27, ("p_team",)),)),
+    ("phase_28", (), ((phase_28, ("p_team",)),)),
+    ("phase_29", (), ((phase_29, ("p_team",)),)),
+    ("phase_30", (), ((phase_30, ("st_motion_particle",)),)),
+    ("phase_33", (), ((phase_33, ("t_enabled",)),)),
+    ("phase_34", (), ((phase_34_points, ("sfp_team",)),
+                      (phase_34_edges, ("sfe_team",)),
+                      (phase_34_triangles, ("sft_team",)))),
+    ("phase_35", (), ((phase_35, ("t_enabled",)),)),
+    ("phase_36", (), ((phase_36, ("scl_counts",)),)),
+    ("phase_37", (), ((phase_37, ("ee_my", "pt_my")),)),
+    ("phase_38", (), ((phase_38_edges, ("ee_my",)),
+                      (phase_38_points, ("pt_my",)))),
+    ("phase_39", (), ((phase_39, ("p_team",)),)),
+    ("phase_40", (), ((phase_40_edges, ("ee_my",)),
+                      (phase_40_points, ("pt_my",)))),
+    ("phase_41", (), ((phase_41, ("p_team",)),)),
+    ("phase_42", (), ((phase_42, ("st_move_particle",)),)),
+    ("phase_43", (), ((phase_43, ("p_team",)),)),
+    ("phase_44", (), ((phase_44, ("c_team",)),)),
+    ("phase_45", (), ((phase_45, ("p_team",)),)),
+    ("phase_46", (), ((phase_46, ("ip_edge",)),)),
+    ("phase_47", (), ((phase_47, ("p_team",)),)),
     ("phase_48", (("level", REPEAT_COUNT_FROM_OFFSET_PLANES, ("postline_entry_offsets",)),),
-     ((phase_48, "postline_entry_vertices"),)),
-    ("phase_49", (), ((phase_49, "st_triangle_team"),)),
-    ("phase_50", (), ((phase_50, "p_team"),)),
-    ("phase_51", (), ((phase_51, "p_team"),)),
-    ("phase_52", (), ((phase_52, "c_team"),)),
-    ("phase_53", (), ((phase_53, "t_enabled"),)),
+     ((phase_48, ("postline_entry_vertices",)),)),
+    ("phase_49", (), ((phase_49, ("st_triangle_team",)),)),
+    ("phase_50", (), ((phase_50, ("p_team",)),)),
+    ("phase_51", (), ((phase_51, ("p_team",)),)),
+    ("phase_52", (), ((phase_52, ("c_team",)),)),
+    ("phase_53", (), ((phase_53, ("t_enabled",)),)),
 )

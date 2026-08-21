@@ -48,6 +48,20 @@ SLOT_BINDINGS = (
     ("csr_point_pair_order", "derived", "point_pair_csr_order"),
     ("csr_v2t_offsets", "derived", "v2t_csr_offsets"),
     ("csr_v2t_order", "derived", "v2t_csr_order"),
+    ("ct_kind", "derived", "self_contact_task_kind"),
+    ("ct_my_start", "derived", "self_contact_task_source_start"),
+    ("ct_pair_off", "derived", "self_contact_task_pair_offsets"),
+    ("ct_same", "derived", "self_contact_task_same_team"),
+    ("ct_tgt_count", "derived", "self_contact_task_target_count"),
+    ("ct_tgt_start", "derived", "self_contact_task_target_start"),
+    ("ct_tgt_team", "derived", "self_contact_task_target_team"),
+    ("ee_enable", "derived", "self_edge_contact_enabled"),
+    ("ee_my", "derived", "self_edge_contact_source"),
+    ("ee_n", "derived", "self_edge_contact_normal"),
+    ("ee_s", "derived", "self_edge_contact_source_parameter"),
+    ("ee_t", "derived", "self_edge_contact_target_parameter"),
+    ("ee_target", "derived", "self_edge_contact_target"),
+    ("ee_thickness", "derived", "self_edge_contact_thickness"),
     ("fk_no", "derived", "fk_no"),
     ("fk_no_offsets", "derived", "fk_no_offsets"),
     ("fk_yes", "derived", "fk_yes"),
@@ -55,6 +69,12 @@ SLOT_BINDINGS = (
     ("fk_yes_parent", "derived", "fk_yes_parent"),
     ("ip_edge", "derived", "self_intersect_pair_edge"),
     ("ip_tri", "derived", "self_intersect_pair_triangle"),
+    ("it_edge_start", "derived", "self_intersect_task_edge_start"),
+    ("it_pair_off", "derived", "self_intersect_task_pair_offsets"),
+    ("it_same", "derived", "self_intersect_task_same_team"),
+    ("it_tri_count", "derived", "self_intersect_task_triangle_count"),
+    ("it_tri_start", "derived", "self_intersect_task_triangle_start"),
+    ("it_tri_team", "derived", "self_intersect_task_triangle_team"),
     ("p_albuf_length", "particle", "albuf_length"),
     ("p_albuf_local_pos", "particle", "albuf_local_pos"),
     ("p_albuf_local_rot", "particle", "albuf_local_rot"),
@@ -105,6 +125,11 @@ SLOT_BINDINGS = (
     ("postline_child_vertices", "derived", "postline_child_vertices"),
     ("postline_entry_offsets", "derived", "postline_entry_offsets"),
     ("postline_entry_vertices", "derived", "postline_entry_vertices"),
+    ("pt_enable", "derived", "self_point_contact_enabled"),
+    ("pt_my", "derived", "self_point_contact_source"),
+    ("pt_sign", "derived", "self_point_contact_sign"),
+    ("pt_target", "derived", "self_point_contact_target"),
+    ("pt_thickness", "derived", "self_point_contact_thickness"),
     ("sc_col_friction_fixed", "derived", "collision_friction_fixed"),
     ("sc_col_normal_fixed", "derived", "collision_normal_fixed"),
     ("sc_dcorr", "derived", "distance_correction"),
@@ -119,6 +144,7 @@ SLOT_BINDINGS = (
     ("scl_max_fixed", "derived", "self_max_fixed_size"),
     ("sfe_aabb_max", "self_edges", "aabb_max"),
     ("sfe_aabb_min", "self_edges", "aabb_min"),
+    ("sfe_all_fix", "self_edges", "all_fix"),
     ("sfe_fix", "self_edges", "fix"),
     ("sfe_ignore", "self_edges", "ignore"),
     ("sfe_intersect", "self_edges", "intersect"),
@@ -130,6 +156,7 @@ SLOT_BINDINGS = (
     ("sfe_use", "self_edges", "use"),
     ("sfp_aabb_max", "self_points", "aabb_max"),
     ("sfp_aabb_min", "self_points", "aabb_min"),
+    ("sfp_all_fix", "self_points", "all_fix"),
     ("sfp_fix", "self_points", "fix"),
     ("sfp_ignore", "self_points", "ignore"),
     ("sfp_intersect", "self_points", "intersect"),
@@ -141,6 +168,7 @@ SLOT_BINDINGS = (
     ("sfp_use", "self_points", "use"),
     ("sft_aabb_max", "self_triangles", "aabb_max"),
     ("sft_aabb_min", "self_triangles", "aabb_min"),
+    ("sft_all_fix", "self_triangles", "all_fix"),
     ("sft_fix", "self_triangles", "fix"),
     ("sft_ignore", "self_triangles", "ignore"),
     ("sft_intersect", "self_triangles", "intersect"),
@@ -455,13 +483,23 @@ def _validate_repeat_dimension(phase_name, dimension, names, pass_count, seen_na
 
 
 def _validate_pass_slots(phase_name, row, names):
-    slot_name = row[1]
-    assert slot_name in SLOT_SOURCE, \
-        "phase %s launches a pass over %r which is not a bound slot" % (phase_name, slot_name)
-    assert slot_name in names, \
-        "phase %s launches a pass over %r but the kernel %s does not take that slot, a " \
-        "launch extent comes from an array the pass itself reads" \
-        % (phase_name, slot_name, row[0].key)
+    slot_names = row[1]
+    assert isinstance(slot_names, tuple) and slot_names, \
+        "phase %s declares the launch width of a pass as a non empty tuple of slot names, " \
+        "the row carries %r" % (phase_name, (slot_names,))
+    seen = set()
+    for slot_name in slot_names:
+        assert slot_name not in seen, \
+            "phase %s names the slot %r twice in the launch width of one pass" \
+            % (phase_name, slot_name)
+        seen.add(slot_name)
+        assert slot_name in SLOT_SOURCE, \
+            "phase %s launches a pass over %r which is not a bound slot" \
+            % (phase_name, slot_name)
+        assert slot_name in names, \
+            "phase %s launches a pass over %r but the kernel %s does not take that slot, a " \
+            "launch extent comes from arrays the pass itself reads" \
+            % (phase_name, slot_name, row[0].key)
 
 
 def _validate_signature(phase_name, kernel, names, dimension_names):
@@ -519,6 +557,10 @@ def slot_extent(state, slot_name):
     return state.plane_element_count(storage_name, field_name)
 
 
+def pass_extent(state, slot_names):
+    return sum(slot_extent(state, slot_name) for slot_name in slot_names)
+
+
 def repeat_dimension_extent(state, phase_name, dimension):
     dimension_name, count_rule, count_source = dimension
     if count_rule == _phases.REPEAT_COUNT_FROM_MODULE_CONSTANT:
@@ -547,9 +589,9 @@ def phase_launches(state, phase_name):
     extents = phase_repeat_extents(state, phase_name)
     launches = []
     for indices in itertools.product(*(range(extent) for extent in extents)):
-        for kernel, slot_name in passes:
+        for kernel, slot_names in passes:
             launches.append((kernel,
-                             _plan.launch_dimension(slot_extent(state, slot_name)),
+                             _plan.launch_dimension(pass_extent(state, slot_names)),
                              dict(zip(dimension_names, indices))))
     return tuple(launches)
 

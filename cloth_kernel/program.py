@@ -52,6 +52,38 @@ DERIVED_PLANE_SPECIFICATION = (
     ("self_max_fixed_size", DERIVED_SOURCE_SCRATCH, "num_teams", I4, ()),
     ("self_intersect_pair_edge", DERIVED_SOURCE_SCRATCH, "self_cap_ip", I4, ()),
     ("self_intersect_pair_triangle", DERIVED_SOURCE_SCRATCH, "self_cap_ip", I4, ()),
+    ("self_edge_contact_source", DERIVED_SOURCE_SCRATCH, "self_cap_ee", I4, ()),
+    ("self_edge_contact_target", DERIVED_SOURCE_SCRATCH, "self_cap_ee", I4, ()),
+    ("self_edge_contact_thickness", DERIVED_SOURCE_SCRATCH, "self_cap_ee", F4, ()),
+    ("self_edge_contact_source_parameter", DERIVED_SOURCE_SCRATCH, "self_cap_ee", F4, ()),
+    ("self_edge_contact_target_parameter", DERIVED_SOURCE_SCRATCH, "self_cap_ee", F4, ()),
+    ("self_edge_contact_normal", DERIVED_SOURCE_SCRATCH, "self_cap_ee", F4, (3,)),
+    ("self_edge_contact_enabled", DERIVED_SOURCE_SCRATCH, "self_cap_ee", U1, ()),
+    ("self_point_contact_source", DERIVED_SOURCE_SCRATCH, "self_cap_pt", I4, ()),
+    ("self_point_contact_target", DERIVED_SOURCE_SCRATCH, "self_cap_pt", I4, ()),
+    ("self_point_contact_thickness", DERIVED_SOURCE_SCRATCH, "self_cap_pt", F4, ()),
+    ("self_point_contact_sign", DERIVED_SOURCE_SCRATCH, "self_cap_pt", F4, ()),
+    ("self_point_contact_enabled", DERIVED_SOURCE_SCRATCH, "self_cap_pt", U1, ()),
+    ("self_contact_task_kind", DERIVED_SOURCE_SCRATCH, "self_max_contact_tasks", I4, ()),
+    ("self_contact_task_source_start", DERIVED_SOURCE_SCRATCH, "self_max_contact_tasks", I4, ()),
+    ("self_contact_task_target_team", DERIVED_SOURCE_SCRATCH, "self_max_contact_tasks", I4, ()),
+    ("self_contact_task_target_start", DERIVED_SOURCE_SCRATCH, "self_max_contact_tasks", I4, ()),
+    ("self_contact_task_target_count", DERIVED_SOURCE_SCRATCH, "self_max_contact_tasks", I4, ()),
+    ("self_contact_task_same_team", DERIVED_SOURCE_SCRATCH, "self_max_contact_tasks", U1, ()),
+    ("self_contact_task_pair_offsets", DERIVED_SOURCE_SCRATCH, "self_contact_task_offset_slots",
+     I4, ()),
+    ("self_intersect_task_edge_start", DERIVED_SOURCE_SCRATCH, "self_max_intersect_tasks",
+     I4, ()),
+    ("self_intersect_task_triangle_team", DERIVED_SOURCE_SCRATCH, "self_max_intersect_tasks",
+     I4, ()),
+    ("self_intersect_task_triangle_start", DERIVED_SOURCE_SCRATCH, "self_max_intersect_tasks",
+     I4, ()),
+    ("self_intersect_task_triangle_count", DERIVED_SOURCE_SCRATCH, "self_max_intersect_tasks",
+     I4, ()),
+    ("self_intersect_task_same_team", DERIVED_SOURCE_SCRATCH, "self_max_intersect_tasks",
+     U1, ()),
+    ("self_intersect_task_pair_offsets", DERIVED_SOURCE_SCRATCH,
+     "self_intersect_task_offset_slots", I4, ()),
 )
 
 
@@ -148,6 +180,8 @@ class Program:
         self.self_cap_ip = 1
         self.self_max_contact_tasks = 1
         self.self_max_intersect_tasks = 1
+        self.self_contact_task_offset_slots = 2
+        self.self_intersect_task_offset_slots = 2
         self.self_counter_slots = int(defs.SCL_LEN)
 
         self.distance_csr = None
@@ -365,6 +399,8 @@ def _compute_self_capacities(program, world):
     program.self_cap_ip = max(cap_ip, 1)
     program.self_max_contact_tasks = max(nt * 5, 1)
     program.self_max_intersect_tasks = max(nt * 3, 1)
+    program.self_contact_task_offset_slots = program.self_max_contact_tasks + 1
+    program.self_intersect_task_offset_slots = program.self_max_intersect_tasks + 1
 
 
 def _flatten_postline(levels, level_csr):
