@@ -1,0 +1,64 @@
+import math
+
+import numpy as np
+
+from . import armature
+from ..cloth_kernel import host_math
+
+RADIAL_MODE = 'SPHERE_RADIAL'
+SPHERE_MODES = {'SPHERE_DIRECTION', 'SPHERE_RADIAL'}
+BOX_MODE = 'BOX_DIRECTION'
+
+DISPLAY_TYPE = {
+    'GLOBAL_DIRECTION': 'SINGLE_ARROW',
+    'SPHERE_DIRECTION': 'SPHERE',
+    'SPHERE_RADIAL': 'SPHERE',
+    BOX_MODE: 'CUBE',
+}
+
+
+def sync_display(obj, wind):
+    obj.empty_display_type = DISPLAY_TYPE.get(wind.mode, 'SINGLE_ARROW')
+
+
+def zone_matrix(obj, depsgraph):
+    source = obj.evaluated_get(depsgraph) if depsgraph is not None else obj
+    return armature.read_matrix(source.matrix_world)
+
+
+def zone_display_size(obj, depsgraph):
+    source = obj.evaluated_get(depsgraph) if depsgraph is not None else obj
+    return float(source.empty_display_size)
+
+
+def local_extent(size, wind):
+    if wind.mode == BOX_MODE:
+        return np.full(3, size * 2.0, dtype=np.float32)
+    return np.full(3, size, dtype=np.float32)
+
+
+def zone_volume(size, wind, world_scale):
+    if wind.mode == BOX_MODE:
+        extent = size * 2.0 * np.asarray(world_scale, dtype=np.float64)
+        return float(extent[0] * extent[1] * extent[2])
+    if wind.mode in SPHERE_MODES:
+        radius = size * float(world_scale[0])
+        return (4.0 / 3.0) * radius * radius * radius * math.pi
+    return float("inf")
+
+
+def local_direction(wind):
+    deflection = host_math.euler_yx(np.float32(wind.direction_angle_x),
+                                    np.float32(wind.direction_angle_y))
+    return host_math.quat_to_tangent(deflection[None])[0].astype(np.float32)
+
+
+def world_direction(matrix_world, wind):
+    rotation = armature.matrix_to_quat(matrix_world).astype(np.float32)
+    direction = host_math.quat_rotate(rotation[None], local_direction(wind)[None])[0]
+    length = float(np.linalg.norm(direction))
+    if length > 1e-30:
+        return (direction / length).astype(np.float32)
+    return direction
+
+

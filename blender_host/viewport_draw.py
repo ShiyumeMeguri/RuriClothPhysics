@@ -1,0 +1,91 @@
+import bpy
+import gpu
+from bpy.app.handlers import persistent
+from gpu_extras.batch import batch_for_shader
+
+from . import shapes
+from . import viewport
+
+GHOST_FACTOR = 0.02
+GHOST_MINIMUM = 0.005
+GHOST_MAXIMUM = 0.02
+
+_handle = None
+
+
+def _ghosts(context, canvas):
+    for handle in viewport.collect_handles(context):
+        origin = handle.matrix.translation
+        radius = min(max(handle.scale * GHOST_FACTOR, GHOST_MINIMUM), GHOST_MAXIMUM)
+        canvas.lines(*shapes.sphere(origin, radius, segments=12), color=handle.color)
+
+
+def _draw():
+    context = bpy.context
+    scene = context.scene
+    if scene is None or not scene.ruri_cloth_physics.overlay_enabled:
+        return
+
+    canvas = viewport.collect(context)
+    screen = context.screen
+    if screen is not None and screen.is_animation_playing:
+        _ghosts(context, canvas)
+    shader = gpu.shader.from_builtin('FLAT_COLOR')
+    gpu.state.blend_set('ALPHA')
+    for depth_test, lines, points in canvas.batches():
+        gpu.state.depth_test_set('LESS_EQUAL' if depth_test else 'NONE')
+        if lines is not None:
+            positions, colors = lines
+            gpu.state.line_width_set(1.5)
+            batch_for_shader(shader, 'LINES', {"pos": positions, "color": colors}).draw(shader)
+        if points is not None:
+            positions, colors = points
+            gpu.state.point_size_set(5.0)
+            batch_for_shader(shader, 'POINTS', {"pos": positions, "color": colors}).draw(shader)
+    gpu.state.depth_test_set('NONE')
+    gpu.state.blend_set('NONE')
+    gpu.state.line_width_set(1.0)
+
+
+_MSGBUS_OWNER = object()
+_TRANSFORM_PROPERTIES = ("location", "rotation_euler", "rotation_quaternion",
+                         "rotation_axis_angle", "scale", "matrix_world",
+                         "empty_display_size", "empty_display_type")
+
+
+def _subscribe_transform():
+    bpy.msgbus.clear_by_owner(_MSGBUS_OWNER)
+    for name in _TRANSFORM_PROPERTIES:
+        if bpy.types.Object.bl_rna.properties.get(name) is None:
+            continue
+        bpy.msgbus.subscribe_rna(
+            key=(bpy.types.Object, name),
+            owner=_MSGBUS_OWNER,
+            args=(),
+            notify=viewport.tag_redraw,
+            options={'PERSISTENT'},
+        )
+
+
+@persistent
+def _on_load_post(*args):
+    _subscribe_transform()
+
+
+def register():
+    global _handle
+    if _handle is None:
+        _handle = bpy.types.SpaceView3D.draw_handler_add(_draw, (), 'WINDOW', 'POST_VIEW')
+    if _on_load_post not in bpy.app.handlers.load_post:
+        bpy.app.handlers.load_post.append(_on_load_post)
+    _subscribe_transform()
+
+
+def unregister():
+    global _handle
+    bpy.msgbus.clear_by_owner(_MSGBUS_OWNER)
+    if _on_load_post in bpy.app.handlers.load_post:
+        bpy.app.handlers.load_post.remove(_on_load_post)
+    if _handle is not None:
+        bpy.types.SpaceView3D.draw_handler_remove(_handle, 'WINDOW')
+        _handle = None
