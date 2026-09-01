@@ -96,9 +96,6 @@ TEAM_DTYPE = np.dtype([
     ("spring_normal_limit_ratio", F4), ("spring_noise", F4),
     ("wind_count", np.int8), ("wind_zone_id", I4, (defs.WIND_ZONE_SLOTS,)),
     ("wind_time", F4, (defs.WIND_ZONE_SLOTS,)), ("wind_main", F4, (defs.WIND_ZONE_SLOTS,)),
-    ("wind_direction", F4, (defs.WIND_ZONE_SLOTS, 3)),
-    ("wind_zone_turbulence", F4, (defs.WIND_ZONE_SLOTS,)),
-    ("wind_dirq", F4, (defs.WIND_ZONE_SLOTS, 4)),
     ("moving_wind_time", F4), ("moving_wind_main", F4),
     ("moving_wind_direction", F4, (3,)), ("moving_wind_dirq", F4, (4,)),
 ])
@@ -168,6 +165,12 @@ PARTICLE_FIELDS = {
     "particle_radius": (F4, ()),
     "albuf_length": (F4, ()), "albuf_local_pos": (F4, (3,)), "albuf_local_rot": (F4, (4,)),
     "albuf_restore": (F4, (3,)), "albuf_rotation": (F4, (4,)),
+    "wind_count": (I4, ()),
+    "wind_zone_id": (I4, (defs.WIND_ZONE_SLOTS,)),
+    "wind_main": (F4, (defs.WIND_ZONE_SLOTS,)),
+    "wind_dirq": (F4, (defs.WIND_ZONE_SLOTS, 4)),
+    "wind_zone_turbulence": (F4, (defs.WIND_ZONE_SLOTS,)),
+    "wind_phase_slot": (I4, (defs.WIND_ZONE_SLOTS,)),
 }
 
 TRANSFORM_FIELDS = {

@@ -347,6 +347,22 @@ WIND_ZONE_RESULT_SLOTS = 8
 WIND_ZONE_MIN_MAIN = 1e-6
 WIND_MIN_SPEED = 0.01
 
+WIND_ZONE_SLOTS_REASON = (
+    "the widest wind one particle can stand in is three addition zones and one ordinary "
+    "zone: the addition zones are capped at three where they are gathered and the ordinary "
+    "zones keep only the single smallest volume one that contains the point, so four is the "
+    "exact number of blends a particle ever sums and the per particle result carries four "
+    "slots for that and nothing wider; this is not the number of zones a team may reach, "
+    "because two particles of one team can stand in two different ordinary zones and the "
+    "team then keeps a phase clock for each, so the distinct zones a team's particles reach "
+    "between them can pass four, and when they do the frame is refused rather than quietly "
+    "dropping the zones that did not fit, the same shape of answer a self contact primitive "
+    "gives when it outgrows its slots; the phase clock a zone advances is kept once per team "
+    "and shared by every particle standing in it, so a radial zone's turbulence runs at the "
+    "rate of one representative depth rather than each particle's own, which is what it "
+    "already did before the containment test was moved onto the particle and is left that "
+    "way")
+
 BONE_SPRING_DISTANCE_STIFFNESS = 0.5
 BONE_SPRING_TETHER_COMPRESSION_LIMIT = 0.8
 BONE_SPRING_COLLISION_FRICTION = 0.5

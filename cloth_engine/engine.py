@@ -175,6 +175,10 @@ SELF_OVERFLOW_PLANES = tuple(row[1] for row in SELF_BUDGET_TABLE)
 
 SELF_DEMAND_PLANES = tuple(row[2] for row in SELF_BUDGET_TABLE)
 
+WIND_ZONE_OVERFLOW_PLANE = "wind_zone_overflow"
+
+WIND_ZONE_DEMAND_PLANE = "wind_zone_demand"
+
 SELF_CONTACT_SLOT_COLUMN = "self_contact_slots"
 
 SELF_TASK_OFFSET_PLANES = (CONTACT_TASK_QUERY_OFFSET_PLANE,
@@ -189,7 +193,7 @@ FRAME_OUTPUT_REQUESTS = (
     + tuple(("team", field_name) for field_name in CONSUMABLE_TEAM_FIELDS)
     + tuple((_state.DERIVED_STORAGE_NAME, plane_name)
             for plane_name in SELF_OVERFLOW_PLANES + SELF_DEMAND_PLANES
-            + (SELF_COUNTER_PLANE,)))
+            + (SELF_COUNTER_PLANE, WIND_ZONE_OVERFLOW_PLANE, WIND_ZONE_DEMAND_PLANE)))
 
 RELEASE_DOWNLOAD_REQUESTS = (
     tuple(("team", field_name) for field_name in _state.STORAGE_FIELDS["team"]
@@ -280,6 +284,20 @@ class SelfContactOverflow(RuntimeError):
     pass
 
 
+WIND_ZONE_OVERFLOW_REASON = (
+    "each team keeps one wind phase clock per zone its particles stand in, in a fixed number "
+    "of slots, and the device raised the wind overflow because a team's particles reached "
+    "more distinct zones between them than it has slots for; the zones that did not fit are "
+    "dropped, so the particles standing in them are driven by the wrong wind or by none, and "
+    "a wrong answer nobody is told about is worse than a stopped frame; thin the wind zones "
+    "that overlap the configurations listed below, or split them so that no part of one "
+    "stands in more zones at once than the slot count")
+
+
+class WindZoneOverflow(RuntimeError):
+    pass
+
+
 def _packed_primitive_bits(arena_arrays, field_name, element_count):
     rows = arena_arrays[field_name][:element_count].astype(np.uint8)
     return np.ascontiguousarray(rows[:, 0] | (rows[:, 1] << 1) | (rows[:, 2] << 2))
@@ -308,6 +326,8 @@ class ClothEngine:
         self.self_overflow_counts = {}
         self.self_demand_counts = {}
         self.self_counter_values = np.zeros(int(_defs.SCL_LEN), np.int32)
+        self.wind_zone_overflow_values = np.zeros(0, np.int32)
+        self.wind_zone_demand_values = np.zeros(0, np.int32)
         self.uploaded_field_count = 0
         self.display_plane_shadow = None
         self.display_stale_shadow = self._stale_planes(FRAME_OUTPUT_REQUESTS)
@@ -687,7 +707,27 @@ class ClothEngine:
             plane_name: values[(_state.DERIVED_STORAGE_NAME, plane_name)]
             for plane_name in SELF_DEMAND_PLANES}
         self.self_counter_values = values[(_state.DERIVED_STORAGE_NAME, SELF_COUNTER_PLANE)]
+        self.wind_zone_overflow_values = values[(_state.DERIVED_STORAGE_NAME,
+                                                 WIND_ZONE_OVERFLOW_PLANE)]
+        self.wind_zone_demand_values = values[(_state.DERIVED_STORAGE_NAME,
+                                               WIND_ZONE_DEMAND_PLANE)]
         self._refuse_on_self_contact_overflow(world)
+        self._refuse_on_wind_zone_overflow()
+
+    def _refuse_on_wind_zone_overflow(self):
+        overflow = self.wind_zone_overflow_values
+        if not overflow.any():
+            return
+        demand = self.wind_zone_demand_values
+        lines = []
+        for team_index in range(self.program.num_teams):
+            if not int(overflow[team_index]):
+                continue
+            lines.append(
+                "team %d keeps %d wind slots and its particles reached %d distinct wind zones "
+                "between them"
+                % (team_index, int(_defs.WIND_ZONE_SLOTS), int(demand[team_index])))
+        raise WindZoneOverflow("%s\n%s" % (WIND_ZONE_OVERFLOW_REASON, "\n".join(lines)))
 
     def _refuse_on_self_contact_overflow(self, world):
         if not int(self.self_counter_values[_defs.SCL_ERROR]):

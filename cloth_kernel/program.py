@@ -78,6 +78,8 @@ DERIVED_PLANE_SPECIFICATION = (
     ("self_contact_demand", DERIVED_SOURCE_SCRATCH, "num_teams", I4, ()),
     ("self_intersect_overflow", DERIVED_SOURCE_SCRATCH, "num_teams", I4, ()),
     ("self_intersect_demand", DERIVED_SOURCE_SCRATCH, "num_teams", I4, ()),
+    ("wind_zone_overflow", DERIVED_SOURCE_SCRATCH, "num_teams", I4, ()),
+    ("wind_zone_demand", DERIVED_SOURCE_SCRATCH, "num_teams", I4, ()),
     ("self_intersect_pair_edge", DERIVED_SOURCE_SCRATCH, "self_cap_ip", I4, ()),
     ("self_intersect_pair_triangle", DERIVED_SOURCE_SCRATCH, "self_cap_ip", I4, ()),
     ("self_intersect_pair_gap_key", DERIVED_SOURCE_SCRATCH, "self_cap_ip", I4, ()),

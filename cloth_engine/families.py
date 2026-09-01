@@ -44,6 +44,7 @@ from .kernels import VOLUME_SIGN
 from .kernels import WIND_MAX_TIME
 from .kernels import WIND_MIN_SPEED
 from .kernels import WIND_ZONE_MIN_MAIN
+from .kernels import WIND_ZONE_RESULT_SLOTS
 from .kernels import WIND_ZONE_SLOTS
 from .kernels import ZONE_BOX
 from .kernels import ZONE_SPHERE_DIR
@@ -887,31 +888,24 @@ def resolve_team_world_inertia(state: ClothState, substep: int, level: int, iter
 
 
 @wp.func
-def sample_team_wind_zones_element(state: ClothState, thread_index: int, substep: int, level: int,
-        iteration: int):
-    i = thread_index
-    n_zones = state.frame_scalar.frame_int[SCAL_N_ZONES]
-    res_zone_id = ZONE_RESULT_INDICES()
-    res_time = ZONE_RESULT_VALUES()
-    res_main = ZONE_RESULT_VALUES()
-    res_dx = ZONE_RESULT_VALUES()
-    res_dy = ZONE_RESULT_VALUES()
-    res_dz = ZONE_RESULT_VALUES()
-    res_turb = ZONE_RESULT_VALUES()
-    old_zid = WIND_SLOT_INDICES()
-    old_wt = WIND_SLOT_VALUES()
+def resolve_particle_wind_zones_element(state: ClothState, thread_index: int, substep: int,
+        level: int, iteration: int):
+    p = thread_index
+    mt = state.particle.team[p]
     if kernels.team_frame_mask(state.team.enabled, state.team.valid, state.team.component_world_scale,
-            i):
-        old_count = state.team.wind_count[i]
-        for oc in range(WIND_ZONE_SLOTS):
-            if oc < old_count:
-                old_zid[oc] = state.team.wind_zone_id[i, oc]
-                old_wt[oc] = state.team.wind_time[i, oc]
+            mt):
+        n_zones = state.frame_scalar.frame_int[SCAL_N_ZONES]
+        res_zone_id = ZONE_RESULT_INDICES()
+        res_main = ZONE_RESULT_VALUES()
+        res_dx = ZONE_RESULT_VALUES()
+        res_dy = ZONE_RESULT_VALUES()
+        res_dz = ZONE_RESULT_VALUES()
+        res_turb = ZONE_RESULT_VALUES()
         count = int(0)
-        if n_zones > 0 and state.team.wind_influence[i] > EPSILON:
-            cx64 = wp.float64(state.team.frame_world_position[i, 0])
-            cy64 = wp.float64(state.team.frame_world_position[i, 1])
-            cz64 = wp.float64(state.team.frame_world_position[i, 2])
+        if n_zones > 0 and state.team.wind_influence[mt] > EPSILON:
+            cx64 = wp.float64(state.particle.positions[p, 0])
+            cy64 = wp.float64(state.particle.positions[p, 1])
+            cz64 = wp.float64(state.particle.positions[p, 2])
             min_volume = float(wp.inf)
             addition_count = int(0)
             latest_valid = wp.bool(False)
@@ -963,16 +957,11 @@ def sample_team_wind_zones_element(state: ClothState, thread_index: int, substep
                     zmain = zmain * dmath.evaluate_team_lut_clamp01(state.zone.attenuation_lut,
                             zi, wp.float32(depth))
                 zid = state.zone.zone_id[zi]
-                t_prev = dmath.negate(WIND_MAX_TIME)
-                for oi in range(WIND_ZONE_SLOTS):
-                    if oi < old_count and old_zid[oi] == zid:
-                        t_prev = old_wt[oi]
                 zturb = state.zone.turbulence[zi]
                 registrable = zmain > WIND_ZONE_MIN_MAIN
                 if is_add:
                     if registrable:
                         res_zone_id[count] = zid
-                        res_time[count] = t_prev
                         res_main[count] = zmain
                         res_dx[count] = dirx
                         res_dy[count] = diry
@@ -986,7 +975,6 @@ def sample_team_wind_zones_element(state: ClothState, thread_index: int, substep
                         for r in range(count):
                             if res_zone_id[r] != latest_id:
                                 res_zone_id[w] = res_zone_id[r]
-                                res_time[w] = res_time[r]
                                 res_main[w] = res_main[r]
                                 res_dx[w] = res_dx[r]
                                 res_dy[w] = res_dy[r]
@@ -996,7 +984,6 @@ def sample_team_wind_zones_element(state: ClothState, thread_index: int, substep
                         count = w
                     if registrable:
                         res_zone_id[count] = zid
-                        res_time[count] = t_prev
                         res_main[count] = zmain
                         res_dx[count] = dirx
                         res_dy[count] = diry
@@ -1007,20 +994,79 @@ def sample_team_wind_zones_element(state: ClothState, thread_index: int, substep
                     latest_id = zid
                     latest_valid = wp.bool(True)
         final = count if count < WIND_ZONE_SLOTS else WIND_ZONE_SLOTS
-        state.team.wind_count[i] = final
+        state.particle.wind_count[p] = final
         for s in range(final):
-            state.team.wind_zone_id[i, s] = res_zone_id[s]
-            state.team.wind_time[i, s] = res_time[s]
-            state.team.wind_main[i, s] = res_main[s]
-            state.team.wind_direction[i, s, 0] = res_dx[s]
-            state.team.wind_direction[i, s, 1] = res_dy[s]
-            state.team.wind_direction[i, s, 2] = res_dz[s]
-            state.team.wind_zone_turbulence[i, s] = res_turb[s]
+            state.particle.wind_zone_id[p, s] = res_zone_id[s]
+            state.particle.wind_main[p, s] = res_main[s]
+            state.particle.wind_zone_turbulence[p, s] = res_turb[s]
             (dqx, dqy, dqz, dqw) = dmath.axis_quaternion(res_dx[s], res_dy[s], res_dz[s])
-            state.team.wind_dirq[i, s, 0] = dqx
-            state.team.wind_dirq[i, s, 1] = dqy
-            state.team.wind_dirq[i, s, 2] = dqz
-            state.team.wind_dirq[i, s, 3] = dqw
+            state.particle.wind_dirq[p, s, 0] = dqx
+            state.particle.wind_dirq[p, s, 1] = dqy
+            state.particle.wind_dirq[p, s, 2] = dqz
+            state.particle.wind_dirq[p, s, 3] = dqw
+
+
+@wp.kernel
+def resolve_particle_wind_zones(state: ClothState, substep: int, level: int, iteration: int):
+    resolve_particle_wind_zones_element(state, wp.tid(), substep, level, iteration)
+
+
+@wp.func
+def sample_team_wind_zones_element(state: ClothState, thread_index: int, substep: int, level: int,
+        iteration: int):
+    i = thread_index
+    state.derived.wind_zone_overflow[i] = 0
+    state.derived.wind_zone_demand[i] = 0
+    if kernels.team_frame_mask(state.team.enabled, state.team.valid, state.team.component_world_scale,
+            i):
+        old_count = state.team.wind_count[i]
+        old_zid = WIND_SLOT_INDICES()
+        old_wt = WIND_SLOT_VALUES()
+        for oc in range(WIND_ZONE_SLOTS):
+            if oc < old_count:
+                old_zid[oc] = state.team.wind_zone_id[i, oc]
+                old_wt[oc] = state.team.wind_time[i, oc]
+        union_zid = ZONE_RESULT_INDICES()
+        union_main = ZONE_RESULT_VALUES()
+        fill = int(0)
+        demand = int(0)
+        p0 = state.team.p_start[i]
+        p1 = p0 + state.team.p_count[i]
+        for p in range(p0, p1):
+            wc = state.particle.wind_count[p]
+            for s in range(WIND_ZONE_SLOTS):
+                if s < wc:
+                    zid = state.particle.wind_zone_id[p, s]
+                    idx = int(-1)
+                    for u in range(WIND_ZONE_RESULT_SLOTS):
+                        if u < fill and union_zid[u] == zid:
+                            idx = u
+                    if idx < 0:
+                        if fill < WIND_ZONE_RESULT_SLOTS:
+                            union_zid[fill] = zid
+                            union_main[fill] = state.particle.wind_main[p, s]
+                            idx = fill
+                            fill += 1
+                        demand += 1
+                    slot = int(0)
+                    if idx >= 0 and idx < WIND_ZONE_SLOTS:
+                        slot = idx
+                    state.particle.wind_phase_slot[p, s] = slot
+        assigned = fill if fill < WIND_ZONE_SLOTS else WIND_ZONE_SLOTS
+        state.team.wind_count[i] = assigned
+        for u in range(WIND_ZONE_SLOTS):
+            if u < assigned:
+                zid = union_zid[u]
+                t_prev = dmath.negate(WIND_MAX_TIME)
+                for oi in range(WIND_ZONE_SLOTS):
+                    if oi < old_count and old_zid[oi] == zid:
+                        t_prev = old_wt[oi]
+                state.team.wind_zone_id[i, u] = zid
+                state.team.wind_time[i, u] = t_prev
+                state.team.wind_main[i, u] = union_main[u]
+        if demand > WIND_ZONE_SLOTS:
+            state.derived.wind_zone_overflow[i] = 1
+            state.derived.wind_zone_demand[i] = demand
 
 
 @wp.kernel
@@ -1436,14 +1482,15 @@ def integrate_particle_motion_element(state: ClothState, thread_index: int, subs
         wfx = float(0.0)
         wfy = float(0.0)
         wfz = float(0.0)
-        wc = state.team.wind_count[mt]
+        wc = state.particle.wind_count[pmi]
         for s in range(WIND_ZONE_SLOTS):
             if s < wc:
-                (cx, cy, cz) = kernels.do_wind_blend(state.team.wind_main[mt, s], state.team.wind_time[mt,
-                        s], state.team.wind_dirq[mt, s, 0], state.team.wind_dirq[mt, s, 1],
-                        state.team.wind_dirq[mt, s, 2], state.team.wind_dirq[mt, s, 3],
-                        state.team.wind_zone_turbulence[mt, s], blend, turbulence_param,
-                        wind_position)
+                ps = state.particle.wind_phase_slot[pmi, s]
+                (cx, cy, cz) = kernels.do_wind_blend(state.particle.wind_main[pmi, s],
+                        state.team.wind_time[mt, ps], state.particle.wind_dirq[pmi, s, 0],
+                        state.particle.wind_dirq[pmi, s, 1], state.particle.wind_dirq[pmi, s, 2],
+                        state.particle.wind_dirq[pmi, s, 3], state.particle.wind_zone_turbulence[pmi, s],
+                        blend, turbulence_param, wind_position)
                 wfx = wfx + cx
                 wfy = wfy + cy
                 wfz = wfz + cz
