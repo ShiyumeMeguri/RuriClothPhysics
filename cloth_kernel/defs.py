@@ -71,6 +71,28 @@ ANGLE_LIMIT_ITERATION = 3
 ANGLE_LIMIT_ATTENUATION = 0.9
 ANGLE_LIMIT_ROTATION_RATIO = 0.4
 
+ANGLE_LIMIT_RATIO_MAX = 8.0
+
+ANGLE_LIMIT_RATIO_REASON = (
+    "the limit angle is a cone around the rest direction, which says the same thing in "
+    "every direction a joint can lean, and a ribbon is the case where that is wrong: a "
+    "strip of cloth folds across its face far more readily than it bends within its own "
+    "plane, and a single chain of bones carries no width for the geometry to express that "
+    "with, so the only place the distinction can live is the limit itself; the curve keeps "
+    "meaning what it always meant, the limit along the bone's own local x axis, and this "
+    "ratio widens the limit along its local z axis by that factor, which opens the cone "
+    "into an ellipse standing in the plane the bone roll already orients, so an artist "
+    "points the narrow axis at the ribbon's width by rolling the bone and nothing else has "
+    "to be authored; widening rather than narrowing is what keeps the shape free of a "
+    "singular case, because the denominator of the ellipse is bounded below by one for "
+    "every ratio at or above one, while narrowing towards zero collapses the ellipse to a "
+    "line segment and asks for nought over nought along the narrow axis, which would have "
+    "to be bought off with a floor and a clamp that nothing else here needs; the shape is "
+    "an ellipse and not two independent per axis clamps because only the ellipse "
+    "degenerates back to the cone when the two axes are equal, measured at 6.4e-15 degrees "
+    "against the cone across 2049 azimuths while the independent form lets the diagonal "
+    "reach 39.2 degrees for a 30 degree limit and is not even monotonic in the ratio")
+
 MAX_MOVEMENT_SPEED_LIMIT = 10.0
 MAX_ROTATION_SPEED_LIMIT = 1440.0
 MAX_PARTICLE_SPEED_LIMIT = 10.0

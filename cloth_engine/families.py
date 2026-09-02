@@ -1883,7 +1883,7 @@ def solve_angle_constraint_element(state: ClothState, thread_index: int, substep
                                     state.particle.velocity_positions, state.particle.albuf_rotation,
                                     state.particle.albuf_local_pos, state.particle.albuf_local_rot,
                                     state.particle.albuf_length, state.particle.depth, state.team.angle_limit_lut,
-                                    state.team.angle_limit_stiffness)
+                                    state.team.angle_limit_stiffness, state.team.angle_limit_ratio)
                         if ur:
                             kernels.do_angle_restoration(v, p, vt, c_inv, p_inv, p_mv, angle_rot_ratio,
                                     power3, state.particle.next_positions, state.particle.velocity_positions,

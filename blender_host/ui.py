@@ -496,6 +496,7 @@ class RCP_PT_angle_limit(_ConfigPanel, bpy.types.Panel):
         layout.enabled = limit.use
         draw_curve(layout, limit, "limit_angle", "最大弯曲角")
         layout.prop(limit, "stiffness")
+        layout.prop(limit, "axis_ratio")
 
 
 class RCP_PT_shape_restoration(_NonSpringPanel, bpy.types.Panel):

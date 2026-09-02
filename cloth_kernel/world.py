@@ -77,6 +77,7 @@ TEAM_DTYPE = np.dtype([
     ("angle_use_restoration", B1), ("angle_restoration_lut", F4, (16,)),
     ("angle_restoration_attenuation", F4), ("angle_restoration_gravity_falloff", F4),
     ("angle_use_limit", B1), ("angle_limit_lut", F4, (16,)), ("angle_limit_stiffness", F4),
+    ("angle_limit_ratio", F4),
     ("motion_use_max_distance", B1), ("motion_max_distance_lut", F4, (16,)),
     ("motion_use_backstop", B1), ("motion_backstop_radius", F4),
     ("motion_backstop_lut", F4, (16,)), ("motion_stiffness", F4),
@@ -952,6 +953,7 @@ class World:
         row["old_world_rotation"] = (0, 0, 0, 1)
         row["step_rotation"] = (0, 0, 0, 1)
         row["inertia_rotation"] = (0, 0, 0, 1)
+        row["angle_limit_ratio"] = 1.0
         row["velocity_weight"] = 1.0
         row["blend_weight"] = 1.0
         row["distance_weight"] = 1.0

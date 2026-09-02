@@ -3222,6 +3222,49 @@ def self_pt_geometry(point_prim: int, tri_prim: int, thickness: float,
     return (interior and (resting or not settled)), tnx, tny, tnz, u, v, w
 
 
+ANGLE_LIMIT_REACH_REASON = (
+    "%s; the reach is asked for in the direction the joint is actually leaning rather "
+    "than being a property of the joint, so the caller keeps one number and the shape of "
+    "the limit lives here: the lean is split against the bone's own local x and z axes "
+    "carried into the plane perpendicular to the rest direction, and the ellipse through "
+    "those two half angles is evaluated at that azimuth; a ratio of one returns the limit "
+    "untouched through the branch at the top rather than through the ellipse, because the "
+    "ellipse is only an identity there in exact arithmetic and its float32 form moves the "
+    "answer by a fraction of an ulp, which is enough to change a solved position and with "
+    "it every asset that never asked for this" % _defs.ANGLE_LIMIT_RATIO_REASON)
+
+
+@wp.func
+def angle_limit_reach(max_angle: float, ratio: float,
+                      vx: float, vy: float, vz: float,
+                      tvx: float, tvy: float, tvz: float,
+                      prx: float, pry: float, prz: float, prw: float):
+    if ratio <= 1.0:
+        return max_angle
+    sx, sy, sz = dmath.quat_rotate(prx, pry, prz, prw, 1.0, 0.0, 0.0)
+    along = sx * tvx + sy * tvy + sz * tvz
+    ax = sx - along * tvx
+    ay = sy - along * tvy
+    az = sz - along * tvz
+    if dmath.length3(ax, ay, az) < 1.0e-4:
+        sx, sy, sz = dmath.quat_rotate(prx, pry, prz, prw, 0.0, 0.0, 1.0)
+        along = sx * tvx + sy * tvy + sz * tvz
+        ax = sx - along * tvx
+        ay = sy - along * tvy
+        az = sz - along * tvz
+    ex, ey, ez = dmath.normalize3(ax, ay, az)
+    fx, fy, fz = dmath.cross3(tvx, tvy, tvz, ex, ey, ez)
+    lean_x = vx * ex + vy * ey + vz * ez
+    lean_z = vx * fx + vy * fy + vz * fz
+    span = wp.sqrt(lean_x * lean_x + lean_z * lean_z)
+    if span < 1.0e-20:
+        return max_angle
+    unit_x = lean_x / span
+    unit_z = lean_z / span
+    return max_angle * ratio / wp.sqrt(ratio * ratio * unit_x * unit_x
+                                       + unit_z * unit_z)
+
+
 @wp.func
 def do_angle_limit(v: int, p: int, vt: int, c_inv: float, p_inv: float, p_move: bool,
                    p_next_positions: wp.array2d(dtype=float),
@@ -3232,7 +3275,8 @@ def do_angle_limit(v: int, p: int, vt: int, c_inv: float, p_inv: float, p_move: 
                    p_albuf_length: wp.array(dtype=float),
                    p_depth: wp.array(dtype=float),
                    t_angle_limit_lut: wp.array2d(dtype=float),
-                   t_angle_limit_stiffness: wp.array(dtype=float)):
+                   t_angle_limit_stiffness: wp.array(dtype=float),
+                   t_angle_limit_ratio: wp.array(dtype=float)):
     prx = p_albuf_rotation[p, 0]
     pry = p_albuf_rotation[p, 1]
     prz = p_albuf_rotation[p, 2]
@@ -3289,7 +3333,9 @@ def do_angle_limit(v: int, p: int, vt: int, c_inv: float, p_inv: float, p_move: 
     vsy = uvy * vlen2
     vsz = uvz * vlen2
     ang = dmath.angle_between(vsx, vsy, vsz, utvx, utvy, utvz)
-    max_angle = DEG2RAD * dmath.evaluate_team_lut(t_angle_limit_lut, vt, p_depth[v])
+    max_angle = angle_limit_reach(
+        DEG2RAD * dmath.evaluate_team_lut(t_angle_limit_lut, vt, p_depth[v]),
+        t_angle_limit_ratio[vt], vsx, vsy, vsz, utvx, utvy, utvz, prx, pry, prz, prw)
     over = ang > max_angle
     recovery = dmath.lerp(ang, max_angle, t_angle_limit_stiffness[vt])
     clx, cly, clz = dmath.clamp_angle_vector(vsx, vsy, vsz, utvx, utvy, utvz, recovery)

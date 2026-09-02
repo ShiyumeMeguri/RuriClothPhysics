@@ -299,6 +299,7 @@ def _build_params(config):
         "angle_use_limit": config.angle_limit.use,
         "angle_limit_lut": curve_host.get_lut(config.angle_limit.limit_angle),
         "angle_limit_stiffness": config.angle_limit.stiffness,
+        "angle_limit_ratio": config.angle_limit.axis_ratio,
         "motion_use_max_distance": use_max_distance,
         "motion_max_distance_lut": curve_host.get_lut(config.motion.max_distance),
         "motion_use_backstop": use_backstop,

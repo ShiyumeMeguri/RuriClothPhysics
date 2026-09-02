@@ -17,6 +17,7 @@ from . import bone_binding
 from . import collider_binding
 from . import curve_host
 from ..cloth_engine import target as cloth_target
+from ..cloth_kernel import defs
 
 _CONFIG_PATH_PATTERN = re.compile(r"ruri_cloth_physics\.configs\[(\d+)\]")
 
@@ -525,6 +526,15 @@ class RCPAngleLimitSettings(bpy.types.PropertyGroup):
         name="钳位强度", default=1.0, min=0.0, max=1.0,
         description="超出限制角时掰回去的力度: 1 = 一步到位压回限制角内(最硬), "
                     "调低 = 每步只掰回一部分, 观感更软, 但允许暂时超出限制角。",
+        update=_param_update)
+    axis_ratio: FloatProperty(
+        name="侧向放宽", default=1.0, min=1.0, max=defs.ANGLE_LIMIT_RATIO_MAX,
+        description="骨骼局部 Z 轴方向的限制角是上面那条曲线的多少倍, 把圆锥的口沿一个"
+                    "方向撑开成椭圆锥。曲线本身始终是 X 轴方向的限制角。"
+                    "1 = 圆锥, 各方向一样(与不启用本项完全一致); "
+                    "调大 = Z 轴方向摆得更开、X 轴方向照旧, 用于飘带这类一个方向该硬、"
+                    "另一个方向该软的部件。椭圆的朝向由骨骼自身的 roll 决定, "
+                    "在编辑模式里转骨骼 roll 就能把放开的那一侧对准飘带的面外方向。",
         update=_param_update)
 
 
