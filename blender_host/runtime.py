@@ -10,6 +10,7 @@ from . import bone_binding
 from . import collider_binding
 from . import collider_geom
 from . import curve_host
+from . import handler_registry
 from . import viewport
 from . import wind_geom
 from ..cloth_engine import pipeline as cloth_pipeline
@@ -1090,41 +1091,24 @@ def _on_save_post(*args):
     flush_pose_writes(POSE_WRITE_REFRESH)
 
 
+_HANDLERS = (
+    ("frame_change_pre", "_on_frame_change_pre"),
+    ("frame_change_post", "_on_frame_change_post"),
+    ("depsgraph_update_post", "_on_depsgraph_update_post"),
+    ("load_post", "_on_load_post"),
+    ("undo_post", "_on_undo_post"),
+    ("redo_post", "_on_undo_post"),
+    ("save_pre", "_on_save_pre"),
+    ("save_post", "_on_save_post"),
+)
+
+
 def register():
-    if _on_frame_change_pre not in bpy.app.handlers.frame_change_pre:
-        bpy.app.handlers.frame_change_pre.append(_on_frame_change_pre)
-    if _on_frame_change_post not in bpy.app.handlers.frame_change_post:
-        bpy.app.handlers.frame_change_post.append(_on_frame_change_post)
-    names = {getattr(handler, "__name__", "") for handler in
-             bpy.app.handlers.depsgraph_update_post}
-    if _on_depsgraph_update_post.__name__ not in names:
-        bpy.app.handlers.depsgraph_update_post.append(_on_depsgraph_update_post)
-    if _on_load_post not in bpy.app.handlers.load_post:
-        bpy.app.handlers.load_post.append(_on_load_post)
-    for handlers in (bpy.app.handlers.undo_post, bpy.app.handlers.redo_post):
-        if _on_undo_post not in handlers:
-            handlers.append(_on_undo_post)
-    if _on_save_pre not in bpy.app.handlers.save_pre:
-        bpy.app.handlers.save_pre.append(_on_save_pre)
-    if _on_save_post not in bpy.app.handlers.save_post:
-        bpy.app.handlers.save_post.append(_on_save_post)
+    for slot, function in _HANDLERS:
+        handler_registry.install(getattr(bpy.app.handlers, slot), globals()[function])
 
 
 def unregister():
-    if _on_frame_change_pre in bpy.app.handlers.frame_change_pre:
-        bpy.app.handlers.frame_change_pre.remove(_on_frame_change_pre)
-    if _on_frame_change_post in bpy.app.handlers.frame_change_post:
-        bpy.app.handlers.frame_change_post.remove(_on_frame_change_post)
-    for handler in list(bpy.app.handlers.depsgraph_update_post):
-        if getattr(handler, "__name__", "") == _on_depsgraph_update_post.__name__:
-            bpy.app.handlers.depsgraph_update_post.remove(handler)
-    if _on_load_post in bpy.app.handlers.load_post:
-        bpy.app.handlers.load_post.remove(_on_load_post)
-    for handlers in (bpy.app.handlers.undo_post, bpy.app.handlers.redo_post):
-        if _on_undo_post in handlers:
-            handlers.remove(_on_undo_post)
-    if _on_save_pre in bpy.app.handlers.save_pre:
-        bpy.app.handlers.save_pre.remove(_on_save_pre)
-    if _on_save_post in bpy.app.handlers.save_post:
-        bpy.app.handlers.save_post.remove(_on_save_post)
+    for slot, function in _HANDLERS:
+        handler_registry.uninstall(getattr(bpy.app.handlers, slot), globals()[function])
     clear_registry()

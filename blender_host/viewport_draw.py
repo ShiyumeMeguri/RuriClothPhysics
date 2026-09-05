@@ -4,13 +4,12 @@ from bpy.app.handlers import persistent
 from gpu_extras.batch import batch_for_shader
 
 from . import shapes
+from . import handler_registry
 from . import viewport
 
 GHOST_FACTOR = 0.02
 GHOST_MINIMUM = 0.005
 GHOST_MAXIMUM = 0.02
-
-_handle = None
 
 
 def _ghosts(context, canvas):
@@ -72,20 +71,19 @@ def _on_load_post(*args):
     _subscribe_transform()
 
 
+_DRAW = "viewport_draw"
+
+
 def register():
-    global _handle
-    if _handle is None:
-        _handle = bpy.types.SpaceView3D.draw_handler_add(_draw, (), 'WINDOW', 'POST_VIEW')
-    if _on_load_post not in bpy.app.handlers.load_post:
-        bpy.app.handlers.load_post.append(_on_load_post)
+    handler_registry.install_draw(
+        _DRAW,
+        lambda: bpy.types.SpaceView3D.draw_handler_add(_draw, (), 'WINDOW', 'POST_VIEW'),
+        lambda handle: bpy.types.SpaceView3D.draw_handler_remove(handle, 'WINDOW'))
+    handler_registry.install(bpy.app.handlers.load_post, _on_load_post)
     _subscribe_transform()
 
 
 def unregister():
-    global _handle
     bpy.msgbus.clear_by_owner(_MSGBUS_OWNER)
-    if _on_load_post in bpy.app.handlers.load_post:
-        bpy.app.handlers.load_post.remove(_on_load_post)
-    if _handle is not None:
-        bpy.types.SpaceView3D.draw_handler_remove(_handle, 'WINDOW')
-        _handle = None
+    handler_registry.uninstall(bpy.app.handlers.load_post, _on_load_post)
+    handler_registry.uninstall_draw(_DRAW)

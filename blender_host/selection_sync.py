@@ -2,6 +2,7 @@ import bpy
 from bpy.app.handlers import persistent
 
 from . import chain
+from . import handler_registry
 
 _last_active = {}
 _suppressed = False
@@ -81,15 +82,13 @@ def _on_load_post(*args):
 
 
 def register():
-    if _on_depsgraph_update_post not in bpy.app.handlers.depsgraph_update_post:
-        bpy.app.handlers.depsgraph_update_post.append(_on_depsgraph_update_post)
-    if _on_load_post not in bpy.app.handlers.load_post:
-        bpy.app.handlers.load_post.append(_on_load_post)
+    handler_registry.install(bpy.app.handlers.depsgraph_update_post,
+                             _on_depsgraph_update_post)
+    handler_registry.install(bpy.app.handlers.load_post, _on_load_post)
 
 
 def unregister():
-    if _on_depsgraph_update_post in bpy.app.handlers.depsgraph_update_post:
-        bpy.app.handlers.depsgraph_update_post.remove(_on_depsgraph_update_post)
-    if _on_load_post in bpy.app.handlers.load_post:
-        bpy.app.handlers.load_post.remove(_on_load_post)
+    handler_registry.uninstall(bpy.app.handlers.depsgraph_update_post,
+                               _on_depsgraph_update_post)
+    handler_registry.uninstall(bpy.app.handlers.load_post, _on_load_post)
     _last_active.clear()
