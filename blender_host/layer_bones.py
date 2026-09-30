@@ -1,6 +1,7 @@
 import numpy as np
 
 from . import chain
+from . import scene_index
 from . import shapes
 from . import viewport
 
@@ -16,8 +17,8 @@ def _armatures(context):
     scene = context.scene
     if scene is None:
         return
-    for obj in scene.objects:
-        if obj.type != 'ARMATURE' or getattr(obj, "ruri_cloth_physics", None) is None:
+    for obj in scene_index.armatures(scene):
+        if getattr(obj, "ruri_cloth_physics", None) is None:
             continue
         if not obj.visible_get():
             continue

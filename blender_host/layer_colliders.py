@@ -1,4 +1,5 @@
 from . import collider_geom
+from . import scene_index
 from . import shapes
 from . import viewport
 from ..cloth_kernel import defs
@@ -13,7 +14,7 @@ def _colliders(context):
     scene = context.scene
     if scene is None:
         return
-    for obj in scene.objects:
+    for obj in scene_index.colliders(scene):
         settings = collider_geom.settings_of(obj)
         if settings is None or not settings.is_collider or not obj.visible_get():
             continue

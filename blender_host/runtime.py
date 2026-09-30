@@ -11,6 +11,7 @@ from . import collider_binding
 from . import collider_geom
 from . import curve_host
 from . import handler_registry
+from . import scene_index
 from . import viewport
 from . import wind_geom
 from ..cloth_engine import pipeline as cloth_pipeline
@@ -166,9 +167,7 @@ def get_entry(obj, config_index):
 
 
 def iter_entries(scene):
-    for obj in scene.objects:
-        if obj.type != 'ARMATURE':
-            continue
+    for obj in scene_index.armatures(scene):
         settings = getattr(obj, "ruri_cloth_physics", None)
         if settings is None:
             continue
@@ -548,7 +547,7 @@ def _collider_followers(scene, obj, driven):
         return held
     rows = []
     if driven:
-        for candidate in scene.objects:
+        for candidate in scene_index.colliders(scene):
             settings = collider_geom.settings_of(candidate)
             if settings is None or not settings.is_collider:
                 continue
@@ -662,7 +661,7 @@ def _gather_wind_zones(scene, depsgraph=None):
     if depsgraph is None:
         depsgraph = bpy.context.evaluated_depsgraph_get()
     zones = []
-    for obj in scene.objects:
+    for obj in scene_index.wind_zones(scene):
         wind = getattr(obj, "ruri_cloth_physics_wind", None)
         if wind is None or not wind.is_wind_zone or not wind.enabled:
             continue
@@ -694,9 +693,7 @@ def _gather_wind_zones(scene, depsgraph=None):
 
 def _active_armatures(scene):
     result = []
-    for obj in scene.objects:
-        if obj.type != 'ARMATURE':
-            continue
+    for obj in scene_index.armatures(scene):
         settings = getattr(obj, "ruri_cloth_physics", None)
         if settings is None or not settings.live or len(settings.configs) == 0:
             continue
@@ -996,9 +993,7 @@ def _entry_driven_bones(entry):
 
 
 def _solver_driven_entries(scene):
-    for obj in scene.objects if scene is not None else ():
-        if obj.type != 'ARMATURE':
-            continue
+    for obj in scene_index.armatures(scene) if scene is not None else ():
         settings = getattr(obj, "ruri_cloth_physics", None)
         if settings is None:
             continue

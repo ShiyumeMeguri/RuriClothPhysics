@@ -2,6 +2,7 @@ import numpy as np
 
 from . import chain
 from . import runtime
+from . import scene_index
 from . import shapes
 from . import viewport
 from ..cloth_kernel import defs
@@ -36,9 +37,7 @@ GIZMO_PLANE_TABLE = (
 
 def planes(scene):
     found = set()
-    for obj in scene.objects:
-        if obj.type != 'ARMATURE':
-            continue
+    for obj in scene_index.armatures(scene):
         settings = getattr(obj, "ruri_cloth_physics", None)
         if settings is None:
             continue

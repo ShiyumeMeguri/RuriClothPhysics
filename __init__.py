@@ -15,6 +15,7 @@ dependencies.ensure_installed()
 def _blender_modules():
     from .blender_host import (
         properties,
+        scene_index,
         operators,
         bake,
         presets,
@@ -30,6 +31,7 @@ def _blender_modules():
     )
     return (
         properties,
+        scene_index,
         operators,
         bake,
         presets,

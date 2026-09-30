@@ -98,6 +98,12 @@ def _compile_target_update(self, context):
     runtime.notify_compile_target_changed()
 
 
+def _wind_zone_update(self, context):
+    from . import scene_index
+    scene_index.invalidate()
+    _redraw(self, context)
+
+
 def _wind_mode_update(self, context):
     from . import wind_geom
     obj = _owner_object(self)
@@ -108,6 +114,8 @@ def _wind_mode_update(self, context):
 
 def _collider_shape_update(self, context):
     from . import collider_geom
+    from . import scene_index
+    scene_index.invalidate()
     obj = _owner_object(self)
     if obj is not None and self.is_collider:
         wanted = collider_geom.shape_for_object(obj, self.shape)
@@ -962,7 +970,7 @@ WIND_ZONE_MODE_ITEMS = (
 
 
 class RCPWindZoneSettings(bpy.types.PropertyGroup):
-    is_wind_zone: BoolProperty(default=False, options={'HIDDEN'}, update=_redraw)
+    is_wind_zone: BoolProperty(default=False, options={'HIDDEN'}, update=_wind_zone_update)
     enabled: BoolProperty(name="启用", default=True, update=_redraw,
                           description="关闭后本风区不再影响任何布料。")
     mode: EnumProperty(name="模式", items=WIND_ZONE_MODE_ITEMS, default='GLOBAL_DIRECTION',

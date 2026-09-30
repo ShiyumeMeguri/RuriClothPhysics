@@ -6,6 +6,7 @@ import mathutils
 import numpy as np
 
 from . import armature
+from . import scene_index
 from ..cloth_kernel import defs
 
 SIDE_FLIP = {"l": "r", "r": "l", "left": "right", "right": "left"}
@@ -145,7 +146,7 @@ def end_object(settings):
 def owner_of(scene, obj):
     if scene is None or obj is None:
         return None
-    for candidate in scene.objects:
+    for candidate in scene_index.colliders(scene):
         settings = settings_of(candidate)
         if settings is None or not settings.is_collider:
             continue
@@ -189,7 +190,7 @@ def collection_for(scene, armature_object, create=False):
     for collection in scene.collection.children_recursive:
         if collection.name == name:
             return collection
-    for obj in scene.objects:
+    for obj in scene_index.colliders(scene):
         constraint = bone_constraint(obj) if is_collider(obj) else None
         if constraint is not None and constraint.target is armature_object and obj.users_collection:
             return obj.users_collection[0]
@@ -229,7 +230,7 @@ GLOBAL_COLLIDER_REASON = (
 
 def global_colliders(scene):
     found = []
-    for obj in scene.objects:
+    for obj in scene_index.colliders(scene):
         settings = settings_of(obj)
         if settings is not None and settings.is_collider and settings.is_global:
             found.append((obj, settings))

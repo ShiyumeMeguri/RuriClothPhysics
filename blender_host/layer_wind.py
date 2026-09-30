@@ -1,5 +1,6 @@
 import numpy as np
 
+from . import scene_index
 from . import shapes
 from . import viewport
 from . import wind_geom
@@ -49,7 +50,7 @@ def _zones(context):
     scene = context.scene
     if scene is None:
         return
-    for obj in scene.objects:
+    for obj in scene_index.wind_zones(scene):
         wind = getattr(obj, "ruri_cloth_physics_wind", None)
         if wind is None or not wind.is_wind_zone or obj.hide_viewport:
             continue
