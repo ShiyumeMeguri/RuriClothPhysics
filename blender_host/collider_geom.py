@@ -6,7 +6,7 @@ import mathutils
 import numpy as np
 
 from . import armature
-from . import scene_index
+from . import world
 from ..cloth_kernel import defs
 
 SIDE_FLIP = {"l": "r", "r": "l", "left": "right", "right": "left"}
@@ -143,14 +143,26 @@ def end_object(settings):
     return end
 
 
+END_OWNER_PATH_REASON = (
+    "an end circle is found from the capsules that can reach it, never from the scene: the "
+    "capsules the scene's bodies and scene colliders reach, and the capsules in the collider "
+    "collection of the rig the circle itself follows, which is where every capsule built on "
+    "a bone lands before any configuration has been told to use it")
+
+
 def owner_of(scene, obj):
-    if scene is None or obj is None:
+    if scene is None or obj is None or obj.type != EMPTY_OBJECT_TYPE:
         return None
-    for candidate in scene_index.colliders(scene):
+    candidates = list(world.reachable_colliders(scene))
+    constraint = bone_constraint(obj)
+    rig = constraint.target if constraint is not None else None
+    if rig is not None and rig.type == 'ARMATURE':
+        home = rig.ruri_cloth_physics.collider_collection
+        if home is not None:
+            candidates.extend(home.objects)
+    for candidate in candidates:
         settings = settings_of(candidate)
-        if settings is None or not settings.is_collider:
-            continue
-        if settings.end_object is obj:
+        if settings is not None and settings.is_collider and settings.end_object is obj:
             return candidate
     return None
 
@@ -186,18 +198,13 @@ def collection_name(armature_object):
 
 
 def collection_for(scene, armature_object, create=False):
-    name = collection_name(armature_object)
-    for collection in scene.collection.children_recursive:
-        if collection.name == name:
-            return collection
-    for obj in scene_index.colliders(scene):
-        constraint = bone_constraint(obj) if is_collider(obj) else None
-        if constraint is not None and constraint.target is armature_object and obj.users_collection:
-            return obj.users_collection[0]
-    if not create:
-        return None
-    collection = bpy.data.collections.new(name)
+    settings = armature_object.ruri_cloth_physics
+    collection = settings.collider_collection
+    if collection is not None or not create:
+        return collection
+    collection = bpy.data.collections.new(collection_name(armature_object))
     scene.collection.children.link(collection)
+    settings.collider_collection = collection
     return collection
 
 
@@ -217,25 +224,14 @@ def layer_collection_for(view_layer, collection):
     return walk(view_layer.layer_collection)
 
 
-GLOBAL_COLLIDER_REASON = (
-    "a wall is not a property of one piece of cloth, so it is stated once on the collider "
-    "itself rather than as a row in every configuration that must not pass through it: the "
-    "alternative is a list that has to be edited again for every configuration anyone adds "
-    "later, and a wall silently missing from the one nobody remembered. The order is by "
-    "name and not by whatever order the scene happens to hold its objects in, because this "
-    "list is concatenated onto each configuration's own references to lay out the collider "
-    "block, and a block whose rows move around between two frames is a collider swapping "
-    "identity underneath the solver's stored history")
-
-
-def global_colliders(scene):
-    found = []
-    for obj in scene_index.colliders(scene):
-        settings = settings_of(obj)
-        if settings is not None and settings.is_collider and settings.is_global:
-            found.append((obj, settings))
-    found.sort(key=lambda pair: pair[0].name)
-    return found
+SCENE_COLLIDER_REASON = (
+    "a wall is not a property of one piece of cloth, so it is registered once in the scene's "
+    "own collider list rather than as a row in every configuration that must not pass "
+    "through it; nothing collides scene wide unless it was put on that list. The list is "
+    "read in name order and not in the order it was filled, because it is concatenated onto "
+    "each configuration's own references to lay out the collider block, and a block whose "
+    "rows move around between two frames is a collider swapping identity underneath the "
+    "solver's stored history")
 
 
 def owned_colliders(scene, armature_object):

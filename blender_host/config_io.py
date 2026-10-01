@@ -3,7 +3,7 @@ import os
 
 import bpy
 
-FORMAT_VERSION = 5
+FORMAT_VERSION = 6
 
 SCOPE_OBJECT = 'OBJECT'
 SCOPE_CONFIG = 'CONFIG'
@@ -15,7 +15,7 @@ MODE_APPEND = 'APPEND'
 COLLIDER_REFERENCE_GROUP = 'RCPColliderReference'
 
 SKIP_EXACT = frozenset({
-    "rna_type", "node_name", "param_serial", "rebuild_pending",
+    "rna_type", "node_name", "param_serial", "rebuild_pending", "collider_collection",
 })
 
 
@@ -80,11 +80,10 @@ COLLIDER_NAME_IS_PRESET_LOCAL_REASON = (
 
 
 def _write_collider_reference(owner, value, state):
-    from . import collider_binding
     target = state.colliders.get(value) if value else None
     if value and target is None:
         state.report.setdefault("missing_colliders", []).append(value)
-    owner.collider_uid = collider_binding.bind(target) if target is not None else ""
+    owner.collider = target
 
 
 def _write_value(owner, prop, value, state):
@@ -131,13 +130,9 @@ def write_group(group, data, state):
 
 
 def _referenced_colliders(configs):
-    from . import collider_binding
-    from . import collider_geom
+    from . import world
     for config in configs:
-        for reference in config.collider_collision.collider_references:
-            target = collider_binding.resolve(reference.collider_uid)
-            if collider_geom.is_collider(target):
-                yield target
+        yield from world.config_colliders(config)
 
 
 def collider_set(configs, scene, armature_object, include_owned):
@@ -222,7 +217,6 @@ def _create_colliders(payload, state):
 
 
 def _apply_assignments(settings, payload, mode, state):
-    from . import collider_binding
     by_name = {config.name: config for config in settings.configs}
     for config_name, keys in (payload.get("assignments") or {}).items():
         config = by_name.get(config_name)
@@ -232,16 +226,16 @@ def _apply_assignments(settings, payload, mode, state):
         references = config.collider_collision.collider_references
         if mode == MODE_REPLACE:
             references.clear()
-        present = {reference.collider_uid for reference in references}
+        present = {reference.collider.as_pointer() for reference in references
+                   if reference.collider is not None}
         for key in keys:
             target = state.colliders.get(key)
             if target is None:
                 state.report.setdefault("missing_colliders", []).append(key)
                 continue
-            uid = collider_binding.bind(target)
-            if uid not in present:
-                references.add().collider_uid = uid
-                present.add(uid)
+            if target.as_pointer() not in present:
+                references.add().collider = target
+                present.add(target.as_pointer())
 
 
 def deserialize(settings, payload, mode, context):
@@ -280,6 +274,9 @@ def deserialize(settings, payload, mode, context):
             state.report["unresolved_bones"] = True
         config.rebuild_pending = True
     settings.param_serial += 1
+    if len(settings.configs):
+        from . import world
+        world.enroll_body(state.context.scene, state.armature_object)
     return state.report
 
 

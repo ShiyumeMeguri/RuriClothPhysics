@@ -6,6 +6,7 @@ from bpy.props import BoolProperty, IntProperty
 from . import chain
 from . import compat
 from . import runtime
+from . import world
 
 _BONE_PATH = 'pose.bones["%s"].%s'
 
@@ -111,7 +112,6 @@ class RCP_OT_bake(bpy.types.Operator):
     def execute(self, context):
         obj = context.object
         scene = context.scene
-        settings = obj.ruri_cloth_physics
         if self.frame_end < self.frame_start:
             self.report({'ERROR'}, "帧范围无效")
             return {'CANCELLED'}
@@ -145,8 +145,9 @@ class RCP_OT_bake(bpy.types.Operator):
                     muted.append(fcurve)
 
         original_frame = scene.frame_current
-        original_live = settings.live
-        settings.live = True
+        body = world.enroll_body(scene, obj)
+        original_live = body.live
+        body.live = True
         runtime.request_reset(obj, 'FULL')
 
         frame_count = self.frame_end - self.frame_start + 1
@@ -186,7 +187,7 @@ class RCP_OT_bake(bpy.types.Operator):
             for fcurve in written:
                 fcurve.mute = False
 
-            settings.live = original_live and not self.disable_live
+            body.live = original_live and not self.disable_live
             scene.frame_set(original_frame)
 
         self.report({'INFO'}, "已烘焙 %d 根骨骼 × %d 帧" % (len(channel_table), frame_count))

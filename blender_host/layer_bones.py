@@ -1,9 +1,9 @@
 import numpy as np
 
 from . import chain
-from . import scene_index
 from . import shapes
 from . import viewport
+from . import world
 
 COLOR_ROOT = (1.00, 0.78, 0.10, 1.0)
 COLOR_CHILD = (0.10, 0.85, 0.95, 1.0)
@@ -14,20 +14,13 @@ COLOR_EXCLUDED = (0.85, 0.15, 0.15, 0.60)
 
 
 def _armatures(context):
-    scene = context.scene
-    if scene is None:
-        return
-    for obj in scene_index.armatures(scene):
-        if getattr(obj, "ruri_cloth_physics", None) is None:
-            continue
-        if not obj.visible_get():
-            continue
-        yield obj
+    for obj in world.bodies(context.scene):
+        if obj.visible_get():
+            yield obj
 
 
 def _showing(obj):
-    settings = obj.ruri_cloth_physics
-    return settings.show_bones and len(settings.configs) > 0
+    return obj.ruri_cloth_physics.show_bones
 
 
 def poll(context):

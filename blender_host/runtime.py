@@ -7,13 +7,12 @@ from bpy.app.handlers import persistent
 
 from . import armature
 from . import bone_binding
-from . import collider_binding
 from . import collider_geom
 from . import curve_host
 from . import handler_registry
-from . import scene_index
 from . import viewport
 from . import wind_geom
+from . import world as scene_world
 from ..cloth_engine import pipeline as cloth_pipeline
 from ..cloth_engine import target as cloth_target
 from ..cloth_kernel import compile as kernel_compile
@@ -167,10 +166,8 @@ def get_entry(obj, config_index):
 
 
 def iter_entries(scene):
-    for obj in scene_index.armatures(scene):
-        settings = getattr(obj, "ruri_cloth_physics", None)
-        if settings is None:
-            continue
+    for obj in scene_world.bodies(scene):
+        settings = obj.ruri_cloth_physics
         for index in range(len(settings.configs)):
             entry = _registry.get((obj.session_uid, index))
             if entry is not None and entry.team is not None:
@@ -343,40 +340,36 @@ def _build_params(config):
 
 
 FRAME_COLLIDER_RESOLUTION_REASON = (
-    "which colliders a config collides against is the config's own references plus every "
-    "collider the scene declared global, globals last in the stable order global_colliders "
-    "already sorts them and a collider that is both counted once, and it is resolved here "
-    "and nowhere else because four readers lay out that same block in that same order or the "
+    "which colliders a config collides against is the colliders it points at plus the ones "
+    "the scene registered for every cloth, the scene's last in the stable order the world "
+    "reads them in and a collider that is both counted once, and it is resolved here and "
+    "nowhere else because four readers lay out that same block in that same order or the "
     "solver reads one collider's history against another's shape: the identity token that "
     "decides whether the binding still stands, the binding itself, the per frame poses and "
     "the mesh vertices. The scene half of that answer is the same for every config, so the "
-    "frame reads the global colliders once and resolves each config's list once rather than "
-    "walking the whole scene three times a config every frame for the same answer, which on "
-    "a scene of a few dozen colliders and a couple dozen configs was one eighty object scan "
-    "run seventy times a frame; the resolution is rebuilt from scratch every frame, so a "
-    "collider added, removed, retargeted or made global between two frames is seen the frame "
-    "the per-call scan used to see it")
+    "frame reads the scene's list once and resolves each config's list once; the resolution "
+    "is rebuilt from scratch every frame, so a collider added, removed, retargeted or "
+    "registered between two frames is seen the next frame")
 
 
-def _resolve_config_colliders(config, global_colliders):
+def _resolve_config_colliders(config, scene_colliders):
     taken = set()
     resolved = []
-    for reference in config.collider_collision.collider_references:
-        target = collider_binding.resolve(reference.collider_uid)
-        settings = collider_geom.settings_of(target)
-        if settings is None or not settings.is_collider:
+    for target in scene_world.config_colliders(config):
+        key = target.as_pointer()
+        if key in taken:
             continue
-        taken.add(target.name)
-        resolved.append((target, settings))
-    for target, settings in global_colliders:
-        if target.name not in taken:
+        taken.add(key)
+        resolved.append((target, target.ruri_cloth_physics_collider))
+    for target, settings in scene_colliders:
+        if target.as_pointer() not in taken:
             resolved.append((target, settings))
     return resolved
 
 
 class FrameColliders:
     def __init__(self, scene):
-        self._global = collider_geom.global_colliders(scene)
+        self._global = scene_world.scene_colliders(scene)
         self._per_config = {}
 
     def resolve(self, obj, config_index, config):
@@ -532,12 +525,13 @@ def ensure_entry(obj, config_index, config, depsgraph, frame_colliders=None, mes
 
 
 COLLIDER_FOLLOW_REASON = (
-    "which colliders ride a bone this armature's solver drives is walked once and kept, "
-    "because the walk is over every object in the scene and every constraint on it while "
-    "the answer changes only when somebody reparents a collider or edits a configuration; "
-    "the empty answer is never kept, because the first frame asks before the registry that "
-    "names the driven bones has been filled and would otherwise pin an empty answer over "
-    "the whole of playback")
+    "which of the colliders this armature's configurations collide against ride a bone its "
+    "solver drives is walked once and kept, because the answer changes only when somebody "
+    "reparents a collider or edits a configuration; the walk covers exactly the colliders "
+    "the override is applied to, the ones its configurations point at and the scene's own, "
+    "and the empty answer is never kept, because the first frame asks before the registry "
+    "that names the driven bones has been filled and would otherwise pin an empty answer "
+    "over the whole of playback")
 
 
 def _collider_followers(scene, obj, driven):
@@ -547,10 +541,14 @@ def _collider_followers(scene, obj, driven):
         return held
     rows = []
     if driven:
-        for candidate in scene_index.colliders(scene):
-            settings = collider_geom.settings_of(candidate)
-            if settings is None or not settings.is_collider:
-                continue
+        candidates = {}
+        for config in obj.ruri_cloth_physics.configs:
+            for target in scene_world.config_colliders(config):
+                candidates[target.as_pointer()] = target
+        for target, _settings in scene_world.scene_colliders(scene):
+            candidates[target.as_pointer()] = target
+        for candidate in candidates.values():
+            settings = candidate.ruri_cloth_physics_collider
             for target in (candidate, collider_geom.end_object(settings)):
                 if target is None:
                     continue
@@ -661,11 +659,9 @@ def _gather_wind_zones(scene, depsgraph=None):
     if depsgraph is None:
         depsgraph = bpy.context.evaluated_depsgraph_get()
     zones = []
-    for obj in scene_index.wind_zones(scene):
-        wind = getattr(obj, "ruri_cloth_physics_wind", None)
-        if wind is None or not wind.is_wind_zone or not wind.enabled:
-            continue
-        if obj.hide_viewport:
+    for obj in scene_world.winds(scene):
+        wind = obj.ruri_cloth_physics_wind
+        if not wind.enabled or obj.hide_viewport:
             continue
         zone = kernel_io.WindZoneInput()
         zone.zone_id = obj.session_uid
@@ -691,17 +687,6 @@ def _gather_wind_zones(scene, depsgraph=None):
     return zones
 
 
-def _active_armatures(scene):
-    result = []
-    for obj in scene_index.armatures(scene):
-        settings = getattr(obj, "ruri_cloth_physics", None)
-        if settings is None or not settings.live or len(settings.configs) == 0:
-            continue
-        result.append(obj)
-    result.sort(key=lambda o: o.name)
-    return result
-
-
 def _ensure_batch(obj, entries):
     key = obj.session_uid
     token = tuple((id(entry), id(entry.setup), entry.gate_signature) for entry in entries)
@@ -723,6 +708,11 @@ def sync_params(obj, config_index):
 
 
 def run_frame(scene, frame_delta_time):
+    global _last_display
+    bodies = scene_world.live_bodies(scene)
+    if not bodies:
+        _last_display = None
+        return
     scene_settings = scene.ruri_cloth_physics
     frame_globals = kernel_io.FrameGlobals()
     frame_globals.frame_delta_time = frame_delta_time
@@ -739,7 +729,7 @@ def run_frame(scene, frame_delta_time):
     frame_colliders = None
     collider_cache = {}
     collider_mesh_cache = {}
-    for obj in _active_armatures(scene):
+    for obj in bodies:
         settings = obj.ruri_cloth_physics
         if depsgraph is None:
             depsgraph = bpy.context.evaluated_depsgraph_get()
@@ -833,7 +823,6 @@ def run_frame(scene, frame_delta_time):
     _sync_display_planes(scene)
     cloth_pipeline.run_frame(_world, frame_globals, scene_compile_target(scene))
 
-    global _last_display
     _last_display = collected
     _solve_pose_writes(collected)
 
@@ -975,7 +964,6 @@ def _on_frame_change_post(scene, depsgraph=None):
 def _on_load_post(*args):
     clear_registry()
     bone_binding.invalidate()
-    collider_binding.invalidate()
 
 
 @persistent
@@ -983,7 +971,6 @@ def _on_undo_post(*args):
     global _last_display
     _last_display = None
     bone_binding.invalidate()
-    collider_binding.invalidate()
 
 
 def _entry_driven_bones(entry):
@@ -993,10 +980,8 @@ def _entry_driven_bones(entry):
 
 
 def _solver_driven_entries(scene):
-    for obj in scene_index.armatures(scene) if scene is not None else ():
-        settings = getattr(obj, "ruri_cloth_physics", None)
-        if settings is None:
-            continue
+    for obj in scene_world.bodies(scene):
+        settings = obj.ruri_cloth_physics
         for index in range(len(settings.configs)):
             entry = _registry.get((obj.session_uid, index))
             if entry is not None:
@@ -1055,6 +1040,24 @@ def release_armature_pose(obj):
     for (uid, _index), entry in _registry.items():
         if uid == obj.session_uid:
             release_entry_pose(obj, entry)
+
+
+def forget_body(obj):
+    global _last_display
+    release_armature_pose(obj)
+    uid = obj.session_uid
+    doomed = [key for key in _registry if key[0] == uid]
+    if doomed:
+        _flush_solver()
+    for key in doomed:
+        entry = _registry.pop(key)
+        if entry.team is not None:
+            _world.unregister_team(entry.team)
+    _batch_registry.pop(uid, None)
+    _pose_buffers.pop(uid, None)
+    _collider_follow_cache.pop(uid, None)
+    _pending_writes[:] = [write for write in _pending_writes if write[0] != obj]
+    _last_display = None
 
 
 PRE_FRAME_TAG_REASON = (

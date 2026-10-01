@@ -14,7 +14,6 @@ from bpy.props import (
 )
 
 from . import bone_binding
-from . import collider_binding
 from . import curve_host
 from ..cloth_engine import target as cloth_target
 from ..cloth_kernel import defs
@@ -83,11 +82,10 @@ def _enabled_update(self, context):
         runtime.notify_config_enabled_changed(obj, int(match.group(1)))
 
 
-def _live_update(self, context):
-    if self.live:
-        return
-    obj = _owner_object(self)
-    if obj is None or obj.type != 'ARMATURE':
+def _body_live_update(self, context):
+    _redraw()
+    obj = self.object
+    if self.live or obj is None or obj.type != 'ARMATURE':
         return
     from . import runtime
     runtime.release_armature_pose(obj)
@@ -96,12 +94,6 @@ def _live_update(self, context):
 def _compile_target_update(self, context):
     from . import runtime
     runtime.notify_compile_target_changed()
-
-
-def _wind_zone_update(self, context):
-    from . import scene_index
-    scene_index.invalidate()
-    _redraw(self, context)
 
 
 def _wind_mode_update(self, context):
@@ -114,8 +106,6 @@ def _wind_mode_update(self, context):
 
 def _collider_shape_update(self, context):
     from . import collider_geom
-    from . import scene_index
-    scene_index.invalidate()
     obj = _owner_object(self)
     if obj is not None and self.is_collider:
         wanted = collider_geom.shape_for_object(obj, self.shape)
@@ -369,7 +359,7 @@ def _collider_reference_index_update(self, context):
     index = self.active_collider_reference_index
     if not 0 <= index < len(self.collider_references):
         return
-    target = collider_binding.resolve(self.collider_references[index].collider_uid)
+    target = self.collider_references[index].collider
     view_layer = context.view_layer if context is not None else None
     if not collider_geom.is_collider(target) or view_layer is None:
         return
@@ -381,20 +371,27 @@ def _collider_reference_index_update(self, context):
         target.select_set(True)
 
 
-_collider_getter, _collider_setter = collider_binding.make_accessors(
-    "collider_uid", _adopt_collider)
+def _collider_reference_poll(self, obj):
+    from . import collider_geom
+    return collider_geom.can_be_collider(obj)
+
+
+def _collider_reference_update(self, context):
+    target = self.collider
+    if target is not None and not _adopt_collider(target):
+        self.collider = None
+        return
+    _redraw()
 
 
 class RCPColliderReference(bpy.types.PropertyGroup):
-    collider_uid: StringProperty(default="", options={'HIDDEN'})
-    collider: StringProperty(
-        name="碰撞体", get=_collider_getter, set=_collider_setter,
-        description="参与本配置碰撞的碰撞体。搜索框列出场景里的物体, 能当碰撞体的是"
-                    "空物体(球/胶囊/平面)和网格物体(网格碰撞体)。"
-                    "在这里选中一个还没标记的物体, 会自动把它标记成碰撞体, "
-                    "网格物体会被标记成网格碰撞体。"
-                    "记下的是碰撞体自己身上的标识而不是指向它的指针, 所以改名不会断, "
-                    "而复制骨架也不会把碰撞体一起带走")
+    collider: PointerProperty(
+        name="碰撞体", type=bpy.types.Object, poll=_collider_reference_poll,
+        update=_collider_reference_update,
+        description="参与本配置碰撞的碰撞体。能当碰撞体的是空物体(球/胶囊/平面)和网格物体"
+                    "(网格碰撞体)。在这里选中一个还没标记的物体, 会自动把它标记成碰撞体, "
+                    "网格物体会被标记成网格碰撞体。这是直接引用: 复制或追加骨架时它用到的"
+                    "碰撞体随之而来, 改名不会断")
 
 
 ATTRIBUTE_OVERRIDE_ITEMS = (
@@ -457,14 +454,6 @@ class RCPColliderSettings(bpy.types.PropertyGroup):
         description="碰撞体的几何形状。球最快, 胶囊适合四肢躯干, 平面用来做地面。"
                     "形状会同步切换空物体的显示方式。",
         update=_collider_shape_update)
-    is_global: BoolProperty(
-        name="全局", default=False,
-        description="本碰撞体对场景里每一条布料配置都生效, 谁都不用去引用它: "
-                    "场景的墙面、地面这种所有角色都要挡的东西开这个。"
-                    "形状不限, 网格碰撞体照样可以开。"
-                    "跟着某个角色走的身体碰撞体不要开 —— 逐条引用只算该角色自己的配置, "
-                    "开了全局等于让场上每条配置都去算它",
-        update=_collider_update)
     end_object: PointerProperty(
         name="终点圆", type=bpy.types.Object, poll=_collider_end_poll,
         description="胶囊另一端的圆形空物体: 它的位置 = 终点球心, 它的显示尺寸 × 缩放 = 终点半径。"
@@ -970,7 +959,6 @@ WIND_ZONE_MODE_ITEMS = (
 
 
 class RCPWindZoneSettings(bpy.types.PropertyGroup):
-    is_wind_zone: BoolProperty(default=False, options={'HIDDEN'}, update=_wind_zone_update)
     enabled: BoolProperty(name="启用", default=True, update=_redraw,
                           description="关闭后本风区不再影响任何布料。")
     mode: EnumProperty(name="模式", items=WIND_ZONE_MODE_ITEMS, default='GLOBAL_DIRECTION',
@@ -1027,9 +1015,9 @@ def _show_colliders_set(self, value):
 
 
 class RCPObjectSettings(bpy.types.PropertyGroup):
-    live: BoolProperty(name="实时模拟", default=False, update=_live_update,
-                       description="在播放/拖动时间轴时实时模拟布料; "
-                                   "关闭时立即把被驱动的骨骼交还给动画")
+    collider_collection: PointerProperty(
+        type=bpy.types.Collection, options={'HIDDEN'},
+        description="本骨架新建的碰撞体放进的集合")
     show_colliders: BoolProperty(
         name="显示碰撞体", get=_show_colliders_get, set=_show_colliders_set,
         description="开关本骨架碰撞体集合的显示。这只是视图里的眼睛, 碰撞照常参与模拟; "
@@ -1064,7 +1052,38 @@ class RCPObjectSettings(bpy.types.PropertyGroup):
     param_serial: IntProperty(default=0, options={'HIDDEN'})
 
 
+def _body_poll(self, obj):
+    return obj.type == 'ARMATURE'
+
+
+def _scene_collider_poll(self, obj):
+    from . import collider_geom
+    return collider_geom.can_be_collider(obj)
+
+
+def _wind_poll(self, obj):
+    return obj.type == 'EMPTY'
+
+
+class RCPWorldBody(bpy.types.PropertyGroup):
+    object: PointerProperty(type=bpy.types.Object, poll=_body_poll)
+    live: BoolProperty(name="实时模拟", default=False, update=_body_live_update,
+                       description="在本场景里播放/拖动时间轴时实时模拟这副骨架的布料; "
+                                   "关闭时立即把被驱动的骨骼交还给动画")
+
+
+class RCPWorldCollider(bpy.types.PropertyGroup):
+    object: PointerProperty(type=bpy.types.Object, poll=_scene_collider_poll)
+
+
+class RCPWorldWind(bpy.types.PropertyGroup):
+    object: PointerProperty(type=bpy.types.Object, poll=_wind_poll)
+
+
 class RCPSceneSettings(bpy.types.PropertyGroup):
+    bodies: CollectionProperty(type=RCPWorldBody)
+    colliders: CollectionProperty(type=RCPWorldCollider)
+    winds: CollectionProperty(type=RCPWorldWind)
     compile_target: EnumProperty(
         name="编译目标", items=cloth_target.TARGET_ITEMS, default=cloth_target.DEFAULT_TARGET,
         description="同一份 Warp kernel 源编译到哪里跑。默认 CUDA; CPU 目标是同一份 kernel 源"
@@ -1108,6 +1127,9 @@ _CLASSES = tuple(_curve_classes) + tuple(_check_classes) + (
     RCPWindZoneSettings,
     RCPColliderSettings,
     RCPObjectSettings,
+    RCPWorldBody,
+    RCPWorldCollider,
+    RCPWorldWind,
     RCPSceneSettings,
 )
 

@@ -1,7 +1,7 @@
 from . import collider_geom
-from . import scene_index
 from . import shapes
 from . import viewport
+from . import world
 from ..cloth_kernel import defs
 from ..cloth_kernel import host_math
 
@@ -10,15 +10,20 @@ COLOR_IDLE = (0.10, 0.45, 0.70, 0.55)
 COLOR_OFF = (0.40, 0.40, 0.40, 0.30)
 
 
+DRAWN_COLLIDERS_REASON = (
+    "the colliders drawn are the ones some simulation can reach, the ones the scene's bodies "
+    "point at and the scene's own, plus the active object while it is a collider so a "
+    "collider being built is visible before anything uses it")
+
+
 def _colliders(context):
-    scene = context.scene
-    if scene is None:
-        return
-    for obj in scene_index.colliders(scene):
-        settings = collider_geom.settings_of(obj)
-        if settings is None or not settings.is_collider or not obj.visible_get():
-            continue
-        yield obj, settings
+    candidates = world.reachable_colliders(context.scene)
+    active = context.object
+    if collider_geom.is_collider(active) and active not in candidates:
+        candidates.append(active)
+    for obj in candidates:
+        if obj.visible_get():
+            yield obj, obj.ruri_cloth_physics_collider
 
 
 def poll(context):

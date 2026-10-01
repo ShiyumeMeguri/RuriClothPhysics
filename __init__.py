@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Ruri Cloth Physics",
     "author": "ShiyumeMeguri",
-    "version": (7, 0, 0),
+    "version": (8, 0, 0),
     "blender": (4, 2, 0),
     "location": "Properties > Physics > Ruri 布料物理 (Armature) / 风区·碰撞体 (Empty)",
     "description": "骨架骨骼的布料与弹簧物理: 粒子图微内核全场景单竞技场模拟、碰撞体、风场、自碰撞与关键帧烘焙",
@@ -15,7 +15,6 @@ dependencies.ensure_installed()
 def _blender_modules():
     from .blender_host import (
         properties,
-        scene_index,
         operators,
         bake,
         presets,
@@ -31,7 +30,6 @@ def _blender_modules():
     )
     return (
         properties,
-        scene_index,
         operators,
         bake,
         presets,

@@ -1,11 +1,11 @@
 import bpy
 
 from . import chain
-from . import collider_binding
 from . import collider_geom
 from . import curve_host
 from . import layer_particles
 from . import runtime
+from . import world
 from ..cloth_engine import target as cloth_target
 
 CLOTH_TYPE_ICONS = {'BONE_CLOTH': 'MOD_CLOTH', 'BONE_SPRING': 'FORCE_HARMONIC'}
@@ -73,14 +73,13 @@ def draw_collider_references(layout, config, scene):
     row.operator("ruri_cloth_physics.collider_reference_add_selected", icon='ADD')
     row.operator("ruri_cloth_physics.collider_reference_clean", icon='BRUSH_DATA')
     invalid = sum(1 for reference in collision.collider_references
-                  if not collider_geom.is_collider(
-                      collider_binding.resolve(reference.collider_uid)))
+                  if not collider_geom.is_collider(reference.collider))
     if invalid:
         layout.label(text="有 %d 行引用没指向碰撞体" % invalid, icon='ERROR')
-    everywhere = collider_geom.global_colliders(scene)
+    everywhere = world.scene_colliders(scene)
     if everywhere:
         box = layout.box()
-        box.label(text="另有 %d 个全局碰撞体也在挡本配置(不用列进上面)" % len(everywhere),
+        box.label(text="另有 %d 个场景级碰撞体也在挡本配置(不用列进上面)" % len(everywhere),
                   icon='WORLD')
         for obj, _settings in everywhere[:4]:
             box.label(text=obj.name, icon=COLLIDER_SHAPE_ICONS[
@@ -128,7 +127,7 @@ class RCP_UL_attribute_overrides(bpy.types.UIList):
 class RCP_UL_collider_references(bpy.types.UIList):
     def draw_item(self, context, layout, data, item, icon, active_data, active_property,
                   index=0, flt_flag=0):
-        settings = collider_geom.settings_of(collider_binding.resolve(item.collider_uid))
+        settings = collider_geom.settings_of(item.collider)
         row = layout.row(align=True)
         if settings is None or not settings.is_collider:
             row.label(icon='ERROR')
@@ -136,7 +135,7 @@ class RCP_UL_collider_references(bpy.types.UIList):
             row.prop(settings, "enabled", text="", emboss=False,
                      icon='CHECKBOX_HLT' if settings.enabled else 'CHECKBOX_DEHLT')
             row.label(icon=COLLIDER_SHAPE_ICONS[settings.shape])
-        row.prop_search(item, "collider", context.scene, "objects", text="")
+        row.prop(item, "collider", text="")
 
 
 class RCP_PT_ruri_cloth_physics(bpy.types.Panel):
@@ -151,12 +150,20 @@ class RCP_PT_ruri_cloth_physics(bpy.types.Panel):
         return _is_armature(context)
 
     def draw_header(self, context):
-        settings = context.object.ruri_cloth_physics
-        self.layout.prop(settings, "live", text="", icon='PLAY')
+        body = world.body_entry(context.scene, context.object)
+        if body is None:
+            self.layout.operator("ruri_cloth_physics.body_enroll", text="", icon='PLAY')
+        else:
+            self.layout.prop(body, "live", text="", icon='PLAY')
 
     def draw(self, context):
         layout = self.layout
         settings = context.object.ruri_cloth_physics
+
+        if len(settings.configs) and world.body_entry(context.scene, context.object) is None:
+            row = layout.row(align=True)
+            row.label(text="这副骨架还没加入本场景的模拟", icon='INFO')
+            row.operator("ruri_cloth_physics.body_enroll", text="加入", icon='PLAY')
 
         row = layout.row()
         row.template_list("RCP_UL_configs", "", settings, "configs", settings,
@@ -254,8 +261,8 @@ class RCP_PT_config_main(_ConfigPanel, bpy.types.Panel):
         handle.prop(settings, "gizmo_size", text="控制器")
         if settings.show_collision_radius:
             absence = layer_particles.collision_volume_absence(
-                settings, runtime.get_entry(context.object,
-                                            chain.active_config_index(settings)))
+                context.scene, context.object,
+                runtime.get_entry(context.object, chain.active_config_index(settings)))
             if absence:
                 layout.label(text=absence, icon='INFO')
         if settings.show_bones:
@@ -742,11 +749,13 @@ class RCP_PT_collider(bpy.types.Panel):
 
         if obj.type != collider_geom.MESH_OBJECT_TYPE:
             layout.prop(settings, "shape")
+        scene_wide = world.has_collider(context.scene, obj)
         row = layout.row()
-        row.prop(settings, "is_global", toggle=True,
-                 icon='WORLD' if settings.is_global else 'WORLD_DATA')
-        if settings.is_global:
-            layout.label(text="场上每一条布料配置都会算它, 不用逐条引用", icon='INFO')
+        row.operator("ruri_cloth_physics.collider_scene_toggle", depress=scene_wide,
+                     icon='WORLD' if scene_wide else 'WORLD_DATA',
+                     text="场景级碰撞体: 本场景每条布料都碰它" if scene_wide else "设为场景级碰撞体")
+        if not scene_wide:
+            layout.label(text="只有引用了它的配置才会碰它", icon='INFO')
         _kind, _position, _rotation, _tip, radii, live = collider_geom.solve(
             obj, settings, context.evaluated_depsgraph_get())
 
@@ -853,15 +862,15 @@ class RCP_PT_wind_zone(bpy.types.Panel):
         return context.object is not None and context.object.type == 'EMPTY'
 
     def draw_header(self, context):
-        wind = context.object.ruri_cloth_physics_wind
-        if wind.is_wind_zone:
-            self.layout.prop(wind, "enabled", text="", icon='FORCE_WIND')
+        if world.has_wind(context.scene, context.object):
+            self.layout.prop(context.object.ruri_cloth_physics_wind, "enabled", text="",
+                             icon='FORCE_WIND')
 
     def draw(self, context):
         layout = self.layout
         _setup_layout(layout)
         wind = context.object.ruri_cloth_physics_wind
-        if not wind.is_wind_zone:
+        if not world.has_wind(context.scene, context.object):
             layout.operator("ruri_cloth_physics.wind_zone_convert", icon='FORCE_WIND')
             return
         layout.prop(wind, "mode")

@@ -1,9 +1,9 @@
 import numpy as np
 
-from . import scene_index
 from . import shapes
 from . import viewport
 from . import wind_geom
+from . import world
 
 COLOR_ACTIVE = (1.0, 0.62, 0.15, 1.0)
 COLOR_IDLE = (0.35, 0.75, 1.0, 0.75)
@@ -47,14 +47,9 @@ ARROW_REACH_REASON = (
 
 
 def _zones(context):
-    scene = context.scene
-    if scene is None:
-        return
-    for obj in scene_index.wind_zones(scene):
-        wind = getattr(obj, "ruri_cloth_physics_wind", None)
-        if wind is None or not wind.is_wind_zone or obj.hide_viewport:
-            continue
-        yield obj, wind
+    for obj in world.winds(context.scene):
+        if not obj.hide_viewport:
+            yield obj, obj.ruri_cloth_physics_wind
 
 
 def poll(context):

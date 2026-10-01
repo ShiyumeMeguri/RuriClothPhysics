@@ -3,13 +3,13 @@ import mathutils
 from bpy.props import BoolProperty, EnumProperty, StringProperty
 
 from . import chain
-from . import collider_binding
 from . import collider_geom
 from . import config_io
 from . import properties
 from . import runtime
 from . import selection_sync
 from . import wind_geom
+from . import world
 
 
 def _active_settings(context):
@@ -71,6 +71,28 @@ class RCP_OT_config_add(bpy.types.Operator):
         config = settings.configs.add()
         config.name = _unique_name(settings.configs, "骨骼布料")
         settings.active_config_index = len(settings.configs) - 1
+        world.enroll_body(context.scene, context.object)
+        return {'FINISHED'}
+
+
+def _retire_body(context, obj):
+    runtime.forget_body(obj)
+    world.withdraw_body(context.scene, obj)
+
+
+class RCP_OT_body_enroll(bpy.types.Operator):
+    bl_idname = "ruri_cloth_physics.body_enroll"
+    bl_label = "加入本场景模拟"
+    bl_description = "把这副骨架登记进本场景的模拟并打开实时模拟; 只有登记过的骨架才会被模拟和画出来"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        settings = _active_settings(context)
+        return settings is not None and len(settings.configs) > 0
+
+    def execute(self, context):
+        world.enroll_body(context.scene, context.object).live = True
         return {'FINISHED'}
 
 
@@ -90,6 +112,8 @@ class RCP_OT_config_remove(bpy.types.Operator):
         config = settings.configs[index]
         if config.disable_mode == 'RESET':
             runtime.notify_config_enabled_changed(context.object, index)
+        if len(settings.configs) == 1:
+            _retire_body(context, context.object)
         settings.configs.remove(index)
         settings.active_config_index = min(index, len(settings.configs) - 1)
         for other in settings.configs:
@@ -134,17 +158,15 @@ def _link_empty(context, collection, name, display_type, display_size, location)
     return empty
 
 
-def _reference_collider(config, empty):
+def _reference_collider(config, target):
     if config is None:
         return
-    uid = collider_binding.bind(empty)
-    for reference in config.collider_collision.collider_references:
-        if reference.collider_uid == uid:
-            return
+    references = config.collider_collision.collider_references
+    if any(reference.collider == target for reference in references):
+        return
     with selection_sync.suppressed():
-        config.collider_collision.collider_references.add().collider_uid = uid
-        config.collider_collision.active_collider_reference_index = \
-            len(config.collider_collision.collider_references) - 1
+        references.add().collider = target
+        config.collider_collision.active_collider_reference_index = len(references) - 1
 
 
 def _make_collider(context, collection, name, shape, location, radius):
@@ -289,6 +311,28 @@ class RCP_OT_collider_clear(bpy.types.Operator):
 
     def execute(self, context):
         context.object.ruri_cloth_physics_collider.is_collider = False
+        world.withdraw_collider(context.scene, context.object)
+        return {'FINISHED'}
+
+
+class RCP_OT_collider_scene_toggle(bpy.types.Operator):
+    bl_idname = "ruri_cloth_physics.collider_scene_toggle"
+    bl_label = "场景级碰撞体"
+    bl_description = ("登记进本场景的碰撞体列表: 本场景每一条布料配置都碰它, 不用逐条引用。"
+                      "墙面、地面这种所有角色都要挡的东西才登记; 跟着某个角色走的身体碰撞体不要登记, "
+                      "否则场上每条配置都要去算它。再按一次取消登记")
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        return collider_geom.is_collider(context.object)
+
+    def execute(self, context):
+        obj = context.object
+        if world.has_collider(context.scene, obj):
+            world.withdraw_collider(context.scene, obj)
+        else:
+            world.enroll_collider(context.scene, obj)
         return {'FINISHED'}
 
 
@@ -608,8 +652,7 @@ class RCP_OT_collider_reference_clean(bpy.types.Operator):
             collision = config.collider_collision
             references = collision.collider_references
             for index in range(len(references) - 1, -1, -1):
-                target = collider_binding.resolve(references[index].collider_uid)
-                if not collider_geom.is_collider(target):
+                if not collider_geom.is_collider(references[index].collider):
                     references.remove(index)
                     removed += 1
             collision.active_collider_reference_index = max(0, min(
@@ -791,7 +834,7 @@ class RCP_OT_bones_from_selected(bpy.types.Operator):
 class RCP_OT_wind_zone_add(bpy.types.Operator):
     bl_idname = "ruri_cloth_physics.wind_zone_add"
     bl_label = "新建风区"
-    bl_description = "在游标处创建一个风区空物体"
+    bl_description = "在游标处创建一个风区空物体并登记进本场景的风区列表"
     bl_options = {'REGISTER', 'UNDO'}
 
     def execute(self, context):
@@ -799,9 +842,8 @@ class RCP_OT_wind_zone_add(bpy.types.Operator):
         empty.empty_display_size = 1.0
         empty.location = context.scene.cursor.location
         context.collection.objects.link(empty)
-        wind = empty.ruri_cloth_physics_wind
-        wind.is_wind_zone = True
-        wind_geom.sync_display(empty, wind)
+        world.enroll_wind(context.scene, empty)
+        wind_geom.sync_display(empty, empty.ruri_cloth_physics_wind)
         context.view_layer.objects.active = empty
         return {'FINISHED'}
 
@@ -809,7 +851,7 @@ class RCP_OT_wind_zone_add(bpy.types.Operator):
 class RCP_OT_wind_zone_convert(bpy.types.Operator):
     bl_idname = "ruri_cloth_physics.wind_zone_convert"
     bl_label = "设为风区"
-    bl_description = "把当前空物体标记为风区"
+    bl_description = "把当前空物体登记进本场景的风区列表; 只有登记过的风区才会吹本场景的布料"
     bl_options = {'REGISTER', 'UNDO'}
 
     @classmethod
@@ -817,7 +859,8 @@ class RCP_OT_wind_zone_convert(bpy.types.Operator):
         return context.object is not None and context.object.type == 'EMPTY'
 
     def execute(self, context):
-        context.object.ruri_cloth_physics_wind.is_wind_zone = True
+        world.enroll_wind(context.scene, context.object)
+        wind_geom.sync_display(context.object, context.object.ruri_cloth_physics_wind)
         return {'FINISHED'}
 
 
@@ -828,12 +871,10 @@ class RCP_OT_wind_zone_remove(bpy.types.Operator):
 
     @classmethod
     def poll(cls, context):
-        obj = context.object
-        return obj is not None and getattr(obj, "ruri_cloth_physics_wind", None) is not None \
-            and obj.ruri_cloth_physics_wind.is_wind_zone
+        return world.has_wind(context.scene, context.object)
 
     def execute(self, context):
-        context.object.ruri_cloth_physics_wind.is_wind_zone = False
+        world.withdraw_wind(context.scene, context.object)
         return {'FINISHED'}
 
 
@@ -891,6 +932,7 @@ class RCP_OT_configs_clear(bpy.types.Operator):
         settings.configs.clear()
         settings.active_config_index = 0
         runtime.clear_registry()
+        _retire_body(context, obj)
         obj.update_tag(refresh={'DATA'})
         context.view_layer.update()
         self.report({'INFO'}, "已清空 %d 条配置, 删掉 %d 个碰撞体" % (count, removed))
@@ -1090,6 +1132,7 @@ class RCP_OT_config_from_selected(bpy.types.Operator):
         config.active_root_bone_index = len(config.root_bones) - 1
         _mark_rebuild(config)
         settings.show_bones = True
+        world.enroll_body(context.scene, context.object)
         self.report({'INFO'}, "已新建配置 %s (%d 根)" % (config.name, len(names)))
         return {'FINISHED'}
 
@@ -1217,11 +1260,13 @@ _MENUS = ("VIEW3D_MT_pose_context_menu", "VIEW3D_MT_armature_context_menu",
 
 _CLASSES = (
     RCP_OT_config_add,
+    RCP_OT_body_enroll,
     RCP_OT_config_remove,
     RCP_OT_config_move,
     RCP_OT_collider_create,
     RCP_OT_collider_convert,
     RCP_OT_collider_clear,
+    RCP_OT_collider_scene_toggle,
     RCP_OT_collider_end_create,
     RCP_OT_collider_attach_bone,
     RCP_OT_collider_detach,

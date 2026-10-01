@@ -2,9 +2,9 @@ import numpy as np
 
 from . import chain
 from . import runtime
-from . import scene_index
 from . import shapes
 from . import viewport
+from . import world
 from ..cloth_kernel import defs
 from ..cloth_kernel import host_math
 from ..cloth_kernel import io as kernel_io
@@ -37,10 +37,8 @@ GIZMO_PLANE_TABLE = (
 
 def planes(scene):
     found = set()
-    for obj in scene_index.armatures(scene):
-        settings = getattr(obj, "ruri_cloth_physics", None)
-        if settings is None:
-            continue
+    for obj in world.bodies(scene):
+        settings = obj.ruri_cloth_physics
         if settings.show_collision_radius:
             found.update(RADIUS_PLANES)
         for config in settings.configs:
@@ -113,8 +111,9 @@ RADIUS_ABSENT_NO_COLLISION = "这条配置的碰撞方式是不碰撞, 没有碰
 RADIUS_ABSENT_NO_BONES = "这条配置没有骨骼参与碰撞"
 
 
-def collision_volume_absence(settings, entry):
-    if not settings.live:
+def collision_volume_absence(scene, obj, entry):
+    body = world.body_entry(scene, obj)
+    if body is None or not body.live:
         return RADIUS_ABSENT_NOT_LIVE
     if entry is None or entry.setup is None or entry.team is None:
         return RADIUS_ABSENT_NO_DATA
@@ -176,7 +175,7 @@ def collect(context, canvas):
         in_scope = (settings.display_scope == 'ALL'
                     or index == chain.active_config_index(settings))
         want_radius = (settings.show_collision_radius and in_scope
-                       and not collision_volume_absence(settings, entry))
+                       and not collision_volume_absence(scene, obj, entry))
         want_gizmos = gizmos.enable and (gizmos.always or obj.name in selected)
         if not want_radius and not want_gizmos:
             continue
@@ -235,7 +234,7 @@ def handles(context):
         return ()
     index = chain.active_config_index(settings)
     entry = runtime.get_entry(obj, index)
-    if collision_volume_absence(settings, entry):
+    if collision_volume_absence(context.scene, obj, entry):
         return ()
 
     config = settings.configs[index]
