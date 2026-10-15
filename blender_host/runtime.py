@@ -739,6 +739,9 @@ def run_frame(scene, frame_delta_time):
             frame_globals.zones = _gather_wind_zones(scene, depsgraph)
 
         matrix_world = armature.read_matrix(obj.matrix_world)
+        if armature.matrix_scale(matrix_world).min() < defs.COMPONENT_SCALE_EPSILON:
+            request_reset(obj, 'FULL')
+            continue
         matrix_world_inverse = np.linalg.inv(matrix_world)
         component_position, component_rotation, component_scale, component_reflected = \
             _component_pose(obj)
@@ -944,6 +947,11 @@ def _report_once(action, *arguments):
 def _on_frame_change_post(scene, depsgraph=None):
     global _last_frame
     if scene is None:
+        return
+    if depsgraph is not None and depsgraph.mode != 'VIEWPORT':
+        return
+    window = bpy.context.window
+    if window is not None and window.scene != scene:
         return
     frame = scene.frame_current
     fps = scene.render.fps / scene.render.fps_base
