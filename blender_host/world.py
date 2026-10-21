@@ -45,15 +45,6 @@ def live_bodies(scene):
     return found
 
 
-def interactive_bodies(scene):
-    world = of(scene)
-    if world is None:
-        return ()
-    found = [obj for entry, obj in _present(world.bodies) if entry.interactive and _is_body(obj)]
-    found.sort(key=lambda obj: obj.name)
-    return found
-
-
 def body_entry(scene, obj):
     world = of(scene)
     if world is None or obj is None:

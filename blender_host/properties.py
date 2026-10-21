@@ -85,29 +85,13 @@ def _enabled_update(self, context):
 def _body_live_update(self, context):
     _redraw()
     obj = self.object
-    if self.live and self.interactive:
-        self.interactive = False
     if self.live:
         from . import runtime
-        runtime.ensure_step_timer()
+        runtime.ensure_paused_edit_timer()
         return
     if obj is None or obj.type != 'ARMATURE':
         return
     from . import runtime
-    runtime.release_armature_pose(obj)
-
-
-def _body_interactive_update(self, context):
-    _redraw()
-    obj = self.object
-    if obj is None or obj.type != 'ARMATURE':
-        return
-    from . import runtime
-    if self.interactive:
-        if self.live:
-            self.live = False
-        runtime.interactive_begin(obj)
-        return
     runtime.release_armature_pose(obj)
 
 
@@ -1093,12 +1077,7 @@ class RCPWorldBody(bpy.types.PropertyGroup):
         description="本骨架新建的碰撞体放进的集合")
     live: BoolProperty(name="实时模拟", default=False, update=_body_live_update,
                        description="在本场景里播放/拖动时间轴时实时模拟这副骨架的布料; "
-                                   "关闭时立即把被驱动的骨骼交还给动画。与'拖拽模拟'互斥")
-    interactive: BoolProperty(
-        name="拖拽模拟", default=False, options={'SKIP_SAVE'}, update=_body_interactive_update,
-        description="不依赖时间轴: 拖动骨骼、碰撞体或改参数时自动模拟, 即使没有动画、时间轴暂停也行, "
-                    "方便配置骨骼和快速预览。每一步会手动更新一次动画再求解。"
-                    "与'实时模拟'互斥, 防止同一帧被算两遍; 不随文件保存")
+                                   "关闭时立即把被驱动的骨骼交还给动画")
 
 
 class RCPWorldCollider(bpy.types.PropertyGroup):
@@ -1129,10 +1108,10 @@ class RCPSceneSettings(bpy.types.PropertyGroup):
         name="单帧最大步数", default=3, min=1, max=5,
         description="一帧之内最多跑几步物理。帧率低时需要的步数会变多, 这个上限用来防止卡顿雪崩; "
                     "被截断的步数会通过整体平移补偿, 不会导致布料落后于身体。")
-    interactive_settle: FloatProperty(
-        name="拖拽后继续模拟 (秒)", default=2.0, min=0.0, max=10.0,
-        description="拖拽模拟, 以及实时模拟暂停时改碰撞体或参数之后, 在最后一次操作之后继续求解多久, "
-                    "让布料自然摆动到静止。两者都沿用上一帧的运动状态, 不重置")
+    paused_edit_settle: FloatProperty(
+        name="暂停改动后继续模拟 (秒)", default=2.0, min=0.0, max=10.0,
+        description="实时模拟开着、时间轴暂停时, 改了碰撞体或配置参数之后继续求解多久, "
+                    "让布料自然摆动到静止。沿用上一帧的运动状态, 不重置")
     global_time_scale: FloatProperty(
         name="全局时间流速", default=1.0, min=0.0, max=1.0,
         description="所有布料的统一时间倍率, 会与每条配置自己的'时间流速'相乘。0 = 全部冻结。")

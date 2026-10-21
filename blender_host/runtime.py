@@ -43,11 +43,9 @@ EDIT_REVISION_REASON = (
 
 @persistent
 def _on_depsgraph_update_post(scene, depsgraph=None):
-    global _animation_revision, _interactive_dirty
+    global _animation_revision
     _animation_revision += 1
     _collider_follow_cache.clear()
-    if not _interactive_stepping:
-        _interactive_dirty = True
 _last_frame = None
 _last_display = None
 _display_planes = None
@@ -964,7 +962,7 @@ def _on_frame_change_post(scene, depsgraph=None):
     window = bpy.context.window
     if window is not None and window.scene != scene:
         return
-    if _interactive_stepping:
+    if _paused_edit_stepping:
         return
     if not scene_world.live_bodies(scene):
         _last_frame = None
@@ -984,35 +982,27 @@ def _on_frame_change_post(scene, depsgraph=None):
     _report_once(solve_frame, scene, delta)
 
 
-INTERACTIVE_REASON = (
-    "the stepping is a timer and not a frame handler because nothing about it is tied to "
-    "the timeline: it solves while the inputs are changing and for a settling time after, "
-    "with a step of the real time that passed, and it updates the animation by hand before "
-    "each solve because the animation is what gives keyed driven bones back to the rest pose "
-    "the solver reads; the frame handler ignores the frame changes that update makes. The "
-    "drag mode is exclusive with the live switch, so one frame is never solved twice, and a "
-    "body that is live is stepped by the timer only while the timeline is paused and only "
-    "after an edit of a collider, a parameter or an unsolved bone: a frame change is not an "
-    "edit, the handler has already solved it. Neither path resets the cloth, the state the "
-    "last frame left is what the next step continues from")
+PAUSED_EDIT_REASON = (
+    "a live body is stepped by a timer while the timeline is paused and only after an edit of "
+    "a collider, a parameter or a bone nobody solves: a frame change is not an edit, the frame "
+    "handler has already solved it, and the handler ignores the frame changes the timer makes "
+    "to bring the animation back. The cloth is not reset, the state the last frame left is "
+    "what each step continues from")
 
-INTERACTIVE_POLL_INTERVAL = 0.1
-INTERACTIVE_STEP_INTERVAL = 1.0 / 60.0
-INTERACTIVE_MINIMUM_DELTA = 1.0 / 240.0
-INTERACTIVE_MAXIMUM_DELTA = 0.1
+PAUSED_EDIT_POLL_INTERVAL = 0.1
+PAUSED_EDIT_STEP_INTERVAL = 1.0 / 60.0
+PAUSED_EDIT_MINIMUM_DELTA = 1.0 / 240.0
+PAUSED_EDIT_MAXIMUM_DELTA = 0.1
 
-_interactive_stepping = False
-_interactive_dirty = False
+_paused_edit_stepping = False
+_paused_edit_state = {"signature": None, "deadline": 0.0, "last_tick": None, "frame": None}
 
 
-def _new_step_state():
-    return {"signature": None, "deadline": 0.0, "last_tick": None, "frame": None}
+def _reset_paused_edit_state():
+    _paused_edit_state.update(signature=None, deadline=0.0, last_tick=None, frame=None)
 
 
-_step_states = {"interactive": _new_step_state(), "live": _new_step_state()}
-
-
-def _interactive_signature(scene, bodies):
+def _paused_edit_signature(scene, bodies):
     parts = []
     tokens = []
     for obj in bodies:
@@ -1051,106 +1041,77 @@ def _rna_values(group):
     return tuple(values)
 
 
-def _interactive_animated(bodies):
-    return any(armature.animated_bone_names(obj) for obj in bodies)
+def _any_live():
+    return any(scene_world.live_bodies(scene) for scene in bpy.data.scenes)
 
 
-def _any_stepping():
-    return any(scene_world.interactive_bodies(scene) or scene_world.live_bodies(scene)
-               for scene in bpy.data.scenes)
-
-
-def ensure_step_timer():
-    if not bpy.app.timers.is_registered(_interactive_tick):
-        bpy.app.timers.register(_interactive_tick, first_interval=INTERACTIVE_STEP_INTERVAL,
+def ensure_paused_edit_timer():
+    if not bpy.app.timers.is_registered(_paused_edit_tick):
+        bpy.app.timers.register(_paused_edit_tick, first_interval=PAUSED_EDIT_STEP_INTERVAL,
                                 persistent=True)
 
 
-def interactive_begin(obj):
-    global _interactive_dirty
-    request_reset(obj, 'FULL')
-    _step_states["interactive"] = _new_step_state()
-    _interactive_dirty = True
-    ensure_step_timer()
-
-
-def _interactive_step(scene, bodies, delta):
-    global _interactive_stepping
-    _interactive_stepping = True
+def _paused_edit_step(scene, bodies, delta):
+    global _paused_edit_stepping
+    _paused_edit_stepping = True
     try:
-        if _interactive_animated(bodies):
+        if any(armature.animated_bone_names(obj) for obj in bodies):
             scene.frame_set(scene.frame_current)
         solve_frame(scene, delta, bodies)
         bpy.context.view_layer.update()
     finally:
-        _interactive_stepping = False
+        _paused_edit_stepping = False
 
 
-def _drive(scene, bodies, key, now, woken, rebaseline_on_frame_change):
-    state = _step_states[key]
-    signature = _interactive_signature(scene, bodies)
+def _paused_edit_drive(scene, bodies, now):
+    state = _paused_edit_state
+    signature = _paused_edit_signature(scene, bodies)
     frame = scene.frame_current
-    if rebaseline_on_frame_change and frame != state["frame"]:
+    if frame != state["frame"]:
         state.update(frame=frame, signature=signature, deadline=0.0, last_tick=None)
         return False
-    state["frame"] = frame
-    if woken or signature != state["signature"]:
-        state["deadline"] = now + scene.ruri_cloth_physics.interactive_settle
+    if signature != state["signature"]:
+        state["deadline"] = now + scene.ruri_cloth_physics.paused_edit_settle
     state["signature"] = signature
     if now >= state["deadline"]:
         state["last_tick"] = None
         return False
     last = state["last_tick"]
-    delta = INTERACTIVE_STEP_INTERVAL if last is None else min(
-        max(now - last, INTERACTIVE_MINIMUM_DELTA), INTERACTIVE_MAXIMUM_DELTA)
+    delta = PAUSED_EDIT_STEP_INTERVAL if last is None else min(
+        max(now - last, PAUSED_EDIT_MINIMUM_DELTA), PAUSED_EDIT_MAXIMUM_DELTA)
     state["last_tick"] = now
     try:
-        _interactive_step(scene, bodies, delta)
+        _paused_edit_step(scene, bodies, delta)
     except Exception:
         for obj in bodies:
             entry = scene_world.body_entry(scene, obj)
             if entry is not None:
-                if key == "interactive":
-                    entry.interactive = False
-                else:
-                    entry.live = False
+                entry.live = False
         raise
-    state["signature"] = _interactive_signature(scene, bodies)
+    state["signature"] = _paused_edit_signature(scene, bodies)
     return True
 
 
-def _interactive_tick():
-    global _interactive_dirty
+def _paused_edit_tick():
     scene = bpy.context.scene
     if scene is None:
-        return INTERACTIVE_POLL_INTERVAL if _any_stepping() else None
+        return PAUSED_EDIT_POLL_INTERVAL if _any_live() else None
     screen = bpy.context.screen
     playing = screen is not None and screen.is_animation_playing
-    interactive = scene_world.interactive_bodies(scene)
-    live = () if playing else scene_world.live_bodies(scene)
-    woken = _interactive_dirty
-    _interactive_dirty = False
-    if not interactive:
-        _step_states["interactive"] = _new_step_state()
-    if not live:
-        _step_states["live"] = _new_step_state()
-    if not interactive and not live:
-        return INTERACTIVE_POLL_INTERVAL if _any_stepping() else None
-    now = time.perf_counter()
-    stepped = False
-    if interactive:
-        stepped = _drive(scene, interactive, "interactive", now, woken, False) or stepped
-    if live:
-        stepped = _drive(scene, live, "live", now, False, True) or stepped
-    return INTERACTIVE_STEP_INTERVAL if stepped else INTERACTIVE_POLL_INTERVAL
+    bodies = () if playing else scene_world.live_bodies(scene)
+    if not bodies:
+        _reset_paused_edit_state()
+        return PAUSED_EDIT_POLL_INTERVAL if _any_live() else None
+    stepped = _paused_edit_drive(scene, bodies, time.perf_counter())
+    return PAUSED_EDIT_STEP_INTERVAL if stepped else PAUSED_EDIT_POLL_INTERVAL
 
 
 @persistent
 def _on_load_post(*args):
     clear_registry()
     bone_binding.invalidate()
-    if _any_stepping():
-        ensure_step_timer()
+    if _any_live():
+        ensure_paused_edit_timer()
 
 
 @persistent
