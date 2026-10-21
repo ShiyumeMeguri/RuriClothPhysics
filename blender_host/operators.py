@@ -8,6 +8,7 @@ from . import config_io
 from . import properties
 from . import runtime
 from . import selection_sync
+from . import world
 from . import wind_geom
 from . import world
 
@@ -158,14 +159,15 @@ def _link_empty(context, collection, name, display_type, display_size, location)
     return empty
 
 
-def _reference_collider(config, target):
+def _reference_collider(context, config, target):
     if config is None:
         return
     references = config.collider_collision.collider_references
-    if any(reference.collider == target for reference in references):
+    uid = collider_geom.bind(context.scene, target)
+    if any(reference.collider_uid == uid for reference in references):
         return
     with selection_sync.suppressed():
-        references.add().collider = target
+        references.add().collider_uid = uid
         config.collider_collision.active_collider_reference_index = len(references) - 1
 
 
@@ -242,7 +244,7 @@ class RCP_OT_collider_create(bpy.types.Operator):
             for part in parts:
                 collider_geom.attach_to_bone(context.view_layer, part, armature_object,
                                              pose_bone.name)
-        _reference_collider(config, empty)
+        _reference_collider(context, config, empty)
         self.report({'INFO'}, "已新建 %s" % empty.name)
         return {'FINISHED'}
 
@@ -292,7 +294,7 @@ class RCP_OT_collider_convert(bpy.types.Operator):
         converted = 0
         for obj in targets:
             collider_geom.mark(obj)
-            _reference_collider(config, obj)
+            _reference_collider(context, config, obj)
             converted += 1
         self.report({'INFO'}, "已设为碰撞体: %d 个" % converted)
         for notice in notices:
@@ -588,7 +590,7 @@ class RCP_OT_collider_mirror(bpy.types.Operator):
             else:
                 updated.append(target.name)
             self._apply(context, source, target)
-            _reference_collider(config, target)
+            _reference_collider(context, config, target)
         if not created and not updated:
             self.report({'WARNING'}, "没有选中任何碰撞体")
             return {'CANCELLED'}
@@ -627,7 +629,7 @@ class RCP_OT_colliders_from_selected(bpy.types.Operator):
                                        matrix @ pose_bone.head, matrix @ pose_bone.tail, radius)
             for part in (empty, end):
                 collider_geom.attach_to_bone(context.view_layer, part, obj, name)
-            _reference_collider(config, empty)
+            _reference_collider(context, config, empty)
             created += 1
         if not created:
             self.report({'WARNING'}, "选中的骨骼都不在姿态里")
@@ -652,7 +654,7 @@ class RCP_OT_collider_reference_clean(bpy.types.Operator):
             collision = config.collider_collision
             references = collision.collider_references
             for index in range(len(references) - 1, -1, -1):
-                if not collider_geom.is_collider(references[index].collider):
+                if world.reference_target(context.scene, references[index]) is None:
                     references.remove(index)
                     removed += 1
             collision.active_collider_reference_index = max(0, min(
@@ -681,7 +683,7 @@ class RCP_OT_collider_reference_add_selected(bpy.types.Operator):
             if not collider_geom.is_collider(empty):
                 continue
             before = len(config.collider_collision.collider_references)
-            _reference_collider(config, empty)
+            _reference_collider(context, config, empty)
             added += len(config.collider_collision.collider_references) - before
         if not added:
             self.report({'WARNING'}, "选中的对象里没有新的碰撞体")

@@ -85,9 +85,29 @@ def _enabled_update(self, context):
 def _body_live_update(self, context):
     _redraw()
     obj = self.object
-    if self.live or obj is None or obj.type != 'ARMATURE':
+    if self.live and self.interactive:
+        self.interactive = False
+    if self.live:
+        from . import runtime
+        runtime.live_refresh_begin()
+        return
+    if obj is None or obj.type != 'ARMATURE':
         return
     from . import runtime
+    runtime.release_armature_pose(obj)
+
+
+def _body_interactive_update(self, context):
+    _redraw()
+    obj = self.object
+    if obj is None or obj.type != 'ARMATURE':
+        return
+    from . import runtime
+    if self.interactive:
+        if self.live:
+            self.live = False
+        runtime.interactive_begin(obj)
+        return
     runtime.release_armature_pose(obj)
 
 
@@ -359,9 +379,10 @@ def _collider_reference_index_update(self, context):
     index = self.active_collider_reference_index
     if not 0 <= index < len(self.collider_references):
         return
-    target = self.collider_references[index].collider
+    from . import world
+    target = world.reference_target(context.scene, self.collider_references[index])
     view_layer = context.view_layer if context is not None else None
-    if not collider_geom.is_collider(target) or view_layer is None:
+    if target is None or view_layer is None:
         return
     if target.name not in view_layer.objects or not target.visible_get():
         return
@@ -371,27 +392,29 @@ def _collider_reference_index_update(self, context):
         target.select_set(True)
 
 
-def _collider_reference_poll(self, obj):
+def _collider_reference_get(self):
+    from . import world
+    target = world.reference_target(bpy.context.scene, self)
+    return target.name if target is not None else ""
+
+
+def _collider_reference_set(self, value):
     from . import collider_geom
-    return collider_geom.can_be_collider(obj)
-
-
-def _collider_reference_update(self, context):
-    target = self.collider
+    target = bpy.data.objects.get(value) if value else None
     if target is not None and not _adopt_collider(target):
-        self.collider = None
         return
+    self.collider_uid = collider_geom.bind(bpy.context.scene, target) if target is not None else ""
     _redraw()
 
 
 class RCPColliderReference(bpy.types.PropertyGroup):
-    collider: PointerProperty(
-        name="碰撞体", type=bpy.types.Object, poll=_collider_reference_poll,
-        update=_collider_reference_update,
+    collider_uid: StringProperty(default="", options={'HIDDEN'})
+    collider: StringProperty(
+        name="碰撞体", get=_collider_reference_get, set=_collider_reference_set,
         description="参与本配置碰撞的碰撞体。能当碰撞体的是空物体(球/胶囊/平面)和网格物体"
                     "(网格碰撞体)。在这里选中一个还没标记的物体, 会自动把它标记成碰撞体, "
-                    "网格物体会被标记成网格碰撞体。这是直接引用: 复制或追加骨架时它用到的"
-                    "碰撞体随之而来, 改名不会断")
+                    "网格物体会被标记成网格碰撞体。这里存的是碰撞体自己的标识而不是物体指针: "
+                    "复制或追加骨架时碰撞体不会跟着来, 改名也不会断")
 
 
 ATTRIBUTE_OVERRIDE_ITEMS = (
@@ -442,6 +465,7 @@ def _collider_end_poll(self, obj):
 
 class RCPColliderSettings(bpy.types.PropertyGroup):
     is_collider: BoolProperty(default=False, options={'HIDDEN'}, update=_collider_shape_update)
+    uid: StringProperty(default="", options={'HIDDEN'})
     enabled: BoolProperty(
         name="启用", default=True,
         description="关闭后本碰撞体对所有配置立即失效, 中途重新启用是安全的: "
@@ -1015,9 +1039,6 @@ def _show_colliders_set(self, value):
 
 
 class RCPObjectSettings(bpy.types.PropertyGroup):
-    collider_collection: PointerProperty(
-        type=bpy.types.Collection, options={'HIDDEN'},
-        description="本骨架新建的碰撞体放进的集合")
     show_colliders: BoolProperty(
         name="显示碰撞体", get=_show_colliders_get, set=_show_colliders_set,
         description="开关本骨架碰撞体集合的显示。这只是视图里的眼睛, 碰撞照常参与模拟; "
@@ -1067,9 +1088,17 @@ def _wind_poll(self, obj):
 
 class RCPWorldBody(bpy.types.PropertyGroup):
     object: PointerProperty(type=bpy.types.Object, poll=_body_poll)
+    collider_collection: PointerProperty(
+        type=bpy.types.Collection, options={'HIDDEN'},
+        description="本骨架新建的碰撞体放进的集合")
     live: BoolProperty(name="实时模拟", default=False, update=_body_live_update,
                        description="在本场景里播放/拖动时间轴时实时模拟这副骨架的布料; "
-                                   "关闭时立即把被驱动的骨骼交还给动画")
+                                   "关闭时立即把被驱动的骨骼交还给动画。与'拖拽模拟'互斥")
+    interactive: BoolProperty(
+        name="拖拽模拟", default=False, options={'SKIP_SAVE'}, update=_body_interactive_update,
+        description="不依赖时间轴: 拖动骨骼、碰撞体或改参数时自动模拟, 即使没有动画、时间轴暂停也行, "
+                    "方便配置骨骼和快速预览。每一步会手动更新一次动画再求解。"
+                    "与'实时模拟'互斥, 防止同一帧被算两遍; 不随文件保存")
 
 
 class RCPWorldCollider(bpy.types.PropertyGroup):
@@ -1083,6 +1112,7 @@ class RCPWorldWind(bpy.types.PropertyGroup):
 class RCPSceneSettings(bpy.types.PropertyGroup):
     bodies: CollectionProperty(type=RCPWorldBody)
     colliders: CollectionProperty(type=RCPWorldCollider)
+    pool: CollectionProperty(type=RCPWorldCollider)
     winds: CollectionProperty(type=RCPWorldWind)
     compile_target: EnumProperty(
         name="编译目标", items=cloth_target.TARGET_ITEMS, default=cloth_target.DEFAULT_TARGET,
@@ -1099,6 +1129,13 @@ class RCPSceneSettings(bpy.types.PropertyGroup):
         name="单帧最大步数", default=3, min=1, max=5,
         description="一帧之内最多跑几步物理。帧率低时需要的步数会变多, 这个上限用来防止卡顿雪崩; "
                     "被截断的步数会通过整体平移补偿, 不会导致布料落后于身体。")
+    live_refresh_frames: IntProperty(
+        name="改碰撞体后回溯帧数", default=12, min=0, max=60,
+        description="实时模拟开着、时间轴暂停时, 改了碰撞体或配置参数会自动从这么多帧之前重新模拟到当前帧。"
+                    "0 = 只在当前帧重新求解一次(布料状态沿用, 不重新积累); 越大越接近真实播放的结果, 但每次更新越慢")
+    interactive_settle: FloatProperty(
+        name="拖拽后继续模拟 (秒)", default=2.0, min=0.0, max=10.0,
+        description="拖拽模拟在最后一次操作之后继续求解多久, 让布料自然摆动到静止")
     global_time_scale: FloatProperty(
         name="全局时间流速", default=1.0, min=0.0, max=1.0,
         description="所有布料的统一时间倍率, 会与每条配置自己的'时间流速'相乘。0 = 全部冻结。")

@@ -117,8 +117,7 @@ def collision_volume_absence(scene, obj, entry):
         return RADIUS_ABSENT_NOT_LIVE
     if entry is None or entry.setup is None or entry.team is None:
         return RADIUS_ABSENT_NO_DATA
-    world = runtime.get_world()
-    if int(kernel_io.team_display(world, entry.team, "collision_mode")) == defs.COLLISION_NONE:
+    if int(kernel_io.team_display(runtime.get_world(), entry.team, "collision_mode")) == defs.COLLISION_NONE:
         return RADIUS_ABSENT_NO_COLLISION
     if not len(entry.setup.collision_process_index):
         return RADIUS_ABSENT_NO_BONES

@@ -8,7 +8,10 @@ WORLD_REGISTRY_REASON = (
     "and the panels only ever walk outward from these lists, so nothing anywhere enumerates "
     "the scene, an object nobody registered is never read, and a scene with empty lists "
     "costs nothing at all. An entry whose object was deleted reads as no object and is "
-    "skipped where it is read and dropped where the lists are written")
+    "skipped where it is read and dropped where the lists are written. A configuration "
+    "names a collider by the uid written on that collider and the scene's pool resolves "
+    "the uid, so nothing on the rig points at a collider object and copying or appending "
+    "the rig never carries one with it")
 
 
 def of(scene):
@@ -38,6 +41,15 @@ def live_bodies(scene):
     if world is None:
         return ()
     found = [obj for entry, obj in _present(world.bodies) if entry.live and _is_body(obj)]
+    found.sort(key=lambda obj: obj.name)
+    return found
+
+
+def interactive_bodies(scene):
+    world = of(scene)
+    if world is None:
+        return ()
+    found = [obj for entry, obj in _present(world.bodies) if entry.interactive and _is_body(obj)]
     found.sort(key=lambda obj: obj.name)
     return found
 
@@ -131,18 +143,51 @@ def withdraw_wind(scene, obj):
     return _withdraw(of(scene).winds, obj)
 
 
-def config_colliders(config):
+def pool_targets(scene):
+    world = of(scene)
+    if world is None:
+        return ()
+    return tuple(obj for _entry, obj in _present(world.pool))
+
+
+def pool_index(scene):
+    index = {}
+    for obj in pool_targets(scene):
+        uid = obj.ruri_cloth_physics_collider.uid
+        if uid and uid not in index:
+            index[uid] = obj
+    return index
+
+
+def enroll_pooled(scene, obj):
+    return _enroll(of(scene).pool, obj)
+
+
+def reference_target(scene, reference, index=None):
+    uid = reference.collider_uid
+    if not uid:
+        return None
+    target = (index if index is not None else pool_index(scene)).get(uid)
+    if target is not None and target.ruri_cloth_physics_collider.is_collider:
+        return target
+    return None
+
+
+def config_colliders(scene, config, index=None):
+    if index is None:
+        index = pool_index(scene)
     for reference in config.collider_collision.collider_references:
-        target = reference.collider
-        if target is not None and target.ruri_cloth_physics_collider.is_collider:
+        target = reference_target(scene, reference, index)
+        if target is not None:
             yield target
 
 
 def reachable_colliders(scene):
     seen = set()
     ordered = []
+    index = pool_index(scene)
     candidates = [target for obj in bodies(scene) for config in obj.ruri_cloth_physics.configs
-                  for target in config_colliders(config)]
+                  for target in config_colliders(scene, config, index)]
     candidates.extend(obj for obj, _settings in scene_colliders(scene))
     for target in candidates:
         key = target.as_pointer()

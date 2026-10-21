@@ -72,8 +72,9 @@ def draw_collider_references(layout, config, scene):
     row = layout.row(align=True)
     row.operator("ruri_cloth_physics.collider_reference_add_selected", icon='ADD')
     row.operator("ruri_cloth_physics.collider_reference_clean", icon='BRUSH_DATA')
+    index = world.pool_index(scene)
     invalid = sum(1 for reference in collision.collider_references
-                  if not collider_geom.is_collider(reference.collider))
+                  if world.reference_target(scene, reference, index) is None)
     if invalid:
         layout.label(text="有 %d 行引用没指向碰撞体" % invalid, icon='ERROR')
     everywhere = world.scene_colliders(scene)
@@ -127,7 +128,7 @@ class RCP_UL_attribute_overrides(bpy.types.UIList):
 class RCP_UL_collider_references(bpy.types.UIList):
     def draw_item(self, context, layout, data, item, icon, active_data, active_property,
                   index=0, flt_flag=0):
-        settings = collider_geom.settings_of(item.collider)
+        settings = collider_geom.settings_of(world.reference_target(context.scene, item))
         row = layout.row(align=True)
         if settings is None or not settings.is_collider:
             row.label(icon='ERROR')
@@ -135,7 +136,7 @@ class RCP_UL_collider_references(bpy.types.UIList):
             row.prop(settings, "enabled", text="", emboss=False,
                      icon='CHECKBOX_HLT' if settings.enabled else 'CHECKBOX_DEHLT')
             row.label(icon=COLLIDER_SHAPE_ICONS[settings.shape])
-        row.prop(item, "collider", text="")
+        row.prop_search(item, "collider", bpy.data, "objects", text="")
 
 
 class RCP_PT_ruri_cloth_physics(bpy.types.Panel):
@@ -154,7 +155,9 @@ class RCP_PT_ruri_cloth_physics(bpy.types.Panel):
         if body is None:
             self.layout.operator("ruri_cloth_physics.body_enroll", text="", icon='PLAY')
         else:
-            self.layout.prop(body, "live", text="", icon='PLAY')
+            row = self.layout.row(align=True)
+            row.prop(body, "interactive", text="", icon='HAND')
+            row.prop(body, "live", text="", icon='PLAY')
 
     def draw(self, context):
         layout = self.layout
@@ -203,6 +206,8 @@ class RCP_PT_scene_settings(bpy.types.Panel):
         layout.prop(scene_settings, "simulation_frequency")
         layout.prop(scene_settings, "max_simulation_count")
         layout.prop(scene_settings, "global_time_scale")
+        layout.prop(scene_settings, "interactive_settle")
+        layout.prop(scene_settings, "live_refresh_frames")
         layout.prop(scene_settings, "overlay_enabled")
 
 

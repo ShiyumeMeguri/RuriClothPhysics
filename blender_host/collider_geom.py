@@ -1,4 +1,5 @@
 import re
+import uuid
 import zlib
 
 import bpy
@@ -157,7 +158,7 @@ def owner_of(scene, obj):
     constraint = bone_constraint(obj)
     rig = constraint.target if constraint is not None else None
     if rig is not None and rig.type == 'ARMATURE':
-        home = rig.ruri_cloth_physics.collider_collection
+        home = collection_for(scene, rig)
         if home is not None:
             candidates.extend(home.objects)
     for candidate in candidates:
@@ -197,15 +198,39 @@ def collection_name(armature_object):
     return "%s.%s" % (armature_object.name, COLLECTION_SUFFIX)
 
 
+COLLECTION_HOME_REASON = (
+    "the collection a rig's colliders live in is recorded on the scene's entry for that "
+    "rig and not on the rig: a pointer from the rig to a collection is a dependency, and "
+    "copying or appending the rig follows dependencies, so it would carry every collider "
+    "along; the scene is not copied with a rig, so the scene is where the link is kept")
+
+
 def collection_for(scene, armature_object, create=False):
-    settings = armature_object.ruri_cloth_physics
-    collection = settings.collider_collection
+    entry = world.body_entry(scene, armature_object)
+    if entry is None:
+        if not create:
+            return None
+        entry = world.enroll_body(scene, armature_object)
+    collection = entry.collider_collection
     if collection is not None or not create:
         return collection
     collection = bpy.data.collections.new(collection_name(armature_object))
     scene.collection.children.link(collection)
-    settings.collider_collection = collection
+    entry.collider_collection = collection
     return collection
+
+
+def bind(scene, obj):
+    settings = settings_of(obj)
+    uid = settings.uid
+    holder = world.pool_index(scene).get(uid) if uid else None
+    if holder is not None and holder != obj:
+        uid = ""
+    if not uid:
+        uid = uuid.uuid4().hex
+        settings.uid = uid
+    world.enroll_pooled(scene, obj)
+    return uid
 
 
 def layer_collection_for(view_layer, collection):

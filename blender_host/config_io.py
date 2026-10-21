@@ -83,7 +83,8 @@ def _write_collider_reference(owner, value, state):
     target = state.colliders.get(value) if value else None
     if value and target is None:
         state.report.setdefault("missing_colliders", []).append(value)
-    owner.collider = target
+    from . import collider_geom
+    owner.collider_uid = collider_geom.bind(state.context.scene, target) if target is not None else ""
 
 
 def _write_value(owner, prop, value, state):
@@ -129,15 +130,16 @@ def write_group(group, data, state):
             state.report.setdefault("rejected", []).append("%s: %s" % (key, error))
 
 
-def _referenced_colliders(configs):
+def _referenced_colliders(configs, scene):
     from . import world
+    index = world.pool_index(scene)
     for config in configs:
-        yield from world.config_colliders(config)
+        yield from world.config_colliders(scene, config, index)
 
 
 def collider_set(configs, scene, armature_object, include_owned):
     from . import collider_geom
-    candidates = list(_referenced_colliders(configs))
+    candidates = list(_referenced_colliders(configs, scene))
     if include_owned:
         candidates.extend(collider_geom.owned_colliders(scene, armature_object))
     ordered = []
@@ -156,8 +158,8 @@ def _collider_table(colliders, armature_object):
             if not collider_geom.is_mesh_collider(target)]
 
 
-def _assignments(configs):
-    return {config.name: [target.name for target in _referenced_colliders([config])]
+def _assignments(configs, scene):
+    return {config.name: [target.name for target in _referenced_colliders([config], scene)]
             for config in configs}
 
 
@@ -169,7 +171,7 @@ def serialize(settings, scope, scene, config_index=0):
                "addon": "RuriClothPhysics",
                "colliders": _collider_table(colliders, armature_object)}
     if scope == SCOPE_COLLIDERS:
-        payload["assignments"] = _assignments(configs)
+        payload["assignments"] = _assignments(configs, scene)
         return payload
     if scope == SCOPE_CONFIG:
         payload["config"] = read_group(configs[0])
@@ -226,16 +228,17 @@ def _apply_assignments(settings, payload, mode, state):
         references = config.collider_collision.collider_references
         if mode == MODE_REPLACE:
             references.clear()
-        present = {reference.collider.as_pointer() for reference in references
-                   if reference.collider is not None}
+        from . import collider_geom
+        present = {reference.collider_uid for reference in references if reference.collider_uid}
         for key in keys:
             target = state.colliders.get(key)
             if target is None:
                 state.report.setdefault("missing_colliders", []).append(key)
                 continue
-            if target.as_pointer() not in present:
-                references.add().collider = target
-                present.add(target.as_pointer())
+            uid = collider_geom.bind(state.context.scene, target)
+            if uid not in present:
+                references.add().collider_uid = uid
+                present.add(uid)
 
 
 def deserialize(settings, payload, mode, context):

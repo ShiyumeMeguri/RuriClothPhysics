@@ -1,3 +1,4 @@
+import time
 import zlib
 
 import numpy as np
@@ -42,9 +43,11 @@ EDIT_REVISION_REASON = (
 
 @persistent
 def _on_depsgraph_update_post(scene, depsgraph=None):
-    global _animation_revision
+    global _animation_revision, _interactive_dirty
     _animation_revision += 1
     _collider_follow_cache.clear()
+    if not _interactive_stepping:
+        _interactive_dirty = True
 _last_frame = None
 _last_display = None
 _display_planes = None
@@ -352,10 +355,10 @@ FRAME_COLLIDER_RESOLUTION_REASON = (
     "registered between two frames is seen the next frame")
 
 
-def _resolve_config_colliders(config, scene_colliders):
+def _resolve_config_colliders(scene, config, index, scene_colliders):
     taken = set()
     resolved = []
-    for target in scene_world.config_colliders(config):
+    for target in scene_world.config_colliders(scene, config, index):
         key = target.as_pointer()
         if key in taken:
             continue
@@ -369,6 +372,8 @@ def _resolve_config_colliders(config, scene_colliders):
 
 class FrameColliders:
     def __init__(self, scene):
+        self._scene = scene
+        self._index = scene_world.pool_index(scene)
         self._global = scene_world.scene_colliders(scene)
         self._per_config = {}
 
@@ -376,7 +381,7 @@ class FrameColliders:
         key = (obj.session_uid, config_index)
         cached = self._per_config.get(key)
         if cached is None:
-            cached = _resolve_config_colliders(config, self._global)
+            cached = _resolve_config_colliders(self._scene, config, self._index, self._global)
             self._per_config[key] = cached
         return cached
 
@@ -542,8 +547,9 @@ def _collider_followers(scene, obj, driven):
     rows = []
     if driven:
         candidates = {}
+        index = scene_world.pool_index(scene)
         for config in obj.ruri_cloth_physics.configs:
-            for target in scene_world.config_colliders(config):
+            for target in scene_world.config_colliders(scene, config, index):
                 candidates[target.as_pointer()] = target
         for target, _settings in scene_world.scene_colliders(scene):
             candidates[target.as_pointer()] = target
@@ -707,9 +713,10 @@ def sync_params(obj, config_index):
     return True
 
 
-def run_frame(scene, frame_delta_time):
+def run_frame(scene, frame_delta_time, bodies=None):
     global _last_display
-    bodies = scene_world.live_bodies(scene)
+    if bodies is None:
+        bodies = scene_world.live_bodies(scene)
     if not bodies:
         _last_display = None
         return
@@ -832,17 +839,21 @@ def run_frame(scene, frame_delta_time):
 
 DEFERRED_WRITE_REASON = (
     "the solved pose is computed in the frame change handler and written into the armature "
-    "at the start of the next frame rather than at the end of this one, because a write "
-    "after the frame has been evaluated is a second evaluation: blender re-poses the rig "
-    "and re-runs every modifier stack that depends on it, and a stack is re-run from its "
-    "first modifier whatever the change was, so a mirror sitting in front of an armature "
-    "modifier is rebuilt a second time for a change that only moved bones. Writing before "
-    "the frame is evaluated folds the pose into the evaluation the frame was going to do "
-    "anyway -- one evaluation instead of two, measured here as 11.6 of the 15.9 "
-    "milliseconds a frame took. The cloth is therefore one frame behind the animation, "
-    "which at any playback rate is smaller than the delay of the solver itself, and the "
-    "bake asks for the flush explicitly because it samples the pose the instant the frame "
-    "is set and cannot wait for a frame that never comes")
+    "in the same handler, after the frame has been evaluated and not at the start of the "
+    "next one: the animation of a frame is evaluated and flushed onto the original pose "
+    "after the pre handlers and before the post handlers, so a pose written before the "
+    "frame is overwritten for every bone the animation keys, and a rig baked from motion "
+    "capture keys every bone including the ones the solver drives; the cloth then never "
+    "showed during playback and only appeared at save, the one moment no frame change "
+    "follows the write. Writing after the animation is the only order in which the solver "
+    "has the last word on a keyed bone. It costs a second evaluation of the rig, the price "
+    "of being correct for keyed bones; the bake flushes explicitly because it samples the "
+    "pose the instant the frame is set")
+
+
+def solve_frame(scene, frame_delta_time, bodies=None):
+    run_frame(scene, frame_delta_time, bodies)
+    flush_pose_writes(POSE_WRITE_REFRESH)
 
 
 def _solve_pose_writes(collected):
@@ -953,6 +964,11 @@ def _on_frame_change_post(scene, depsgraph=None):
     window = bpy.context.window
     if window is not None and window.scene != scene:
         return
+    if _interactive_stepping:
+        return
+    if not scene_world.live_bodies(scene):
+        _last_frame = None
+        return
     frame = scene.frame_current
     fps = scene.render.fps / scene.render.fps_base
     if _last_frame is None or frame <= _last_frame:
@@ -965,13 +981,209 @@ def _on_frame_change_post(scene, depsgraph=None):
         delta = (frame - _last_frame) / fps
         _last_frame = frame
 
-    _report_once(run_frame, scene, delta)
+    _report_once(solve_frame, scene, delta)
+
+
+INTERACTIVE_REASON = (
+    "the interactive mode is a timer and not a frame handler because nothing about it is tied "
+    "to the timeline: it solves while the inputs are changing and for a settling time after, "
+    "with a step of the real time that passed, and it updates the animation by hand before "
+    "each solve because the animation is what gives keyed driven bones back to the rest pose "
+    "the solver reads; the frame handler ignores the frame changes that update makes and the "
+    "mode is exclusive with the live switch, so one frame is never solved twice")
+
+INTERACTIVE_POLL_INTERVAL = 0.1
+INTERACTIVE_STEP_INTERVAL = 1.0 / 60.0
+INTERACTIVE_MINIMUM_DELTA = 1.0 / 240.0
+INTERACTIVE_MAXIMUM_DELTA = 0.1
+
+_interactive_stepping = False
+_interactive_dirty = False
+_interactive_state = {"signature": None, "deadline": 0.0, "last_tick": None}
+
+
+def _interactive_signature(scene, bodies):
+    parts = []
+    tokens = []
+    for obj in bodies:
+        pose = armature.read_pose_matrices(obj, "matrix")
+        cached = _batch_registry.get(obj.session_uid)
+        if cached is None:
+            parts.append(b"cold")
+        else:
+            driven = cached[1].pose_index
+            keep = np.ones(len(pose), dtype=bool)
+            keep[driven[driven >= 0]] = False
+            pose = pose[keep]
+        parts.append(np.ascontiguousarray(pose).tobytes())
+        parts.append(armature.read_matrix(obj.matrix_world).tobytes())
+        for config in obj.ruri_cloth_physics.configs:
+            tokens.append(_params_token(obj, config))
+    for target in scene_world.pool_targets(scene):
+        parts.append(armature.read_matrix(target.matrix_basis).tobytes())
+        parts.append(armature.read_matrix(target.matrix_world).tobytes())
+    return zlib.crc32(b"".join(parts)), tuple(tokens)
+
+
+def _interactive_animated(bodies):
+    return any(armature.animated_bone_names(obj) for obj in bodies)
+
+
+def interactive_begin(obj):
+    global _interactive_dirty
+    request_reset(obj, 'FULL')
+    _interactive_state["signature"] = None
+    _interactive_state["last_tick"] = None
+    _interactive_dirty = True
+    if not bpy.app.timers.is_registered(_interactive_tick):
+        bpy.app.timers.register(_interactive_tick, first_interval=INTERACTIVE_STEP_INTERVAL,
+                                persistent=True)
+
+
+def _interactive_step(scene, bodies, delta):
+    global _interactive_stepping
+    _interactive_stepping = True
+    try:
+        if _interactive_animated(bodies):
+            scene.frame_set(scene.frame_current)
+        solve_frame(scene, delta, bodies)
+        bpy.context.view_layer.update()
+    finally:
+        _interactive_stepping = False
+
+
+def _any_interactive():
+    return any(scene_world.interactive_bodies(scene) for scene in bpy.data.scenes)
+
+
+def _interactive_tick():
+    global _interactive_dirty
+    scene = bpy.context.scene
+    bodies = scene_world.interactive_bodies(scene) if scene is not None else ()
+    if not bodies:
+        _interactive_state["signature"] = None
+        return INTERACTIVE_POLL_INTERVAL if _any_interactive() else None
+    now = time.perf_counter()
+    signature = _interactive_signature(scene, bodies)
+    if _interactive_dirty or signature != _interactive_state["signature"]:
+        _interactive_dirty = False
+        _interactive_state["deadline"] = now + scene.ruri_cloth_physics.interactive_settle
+    _interactive_state["signature"] = signature
+    if now >= _interactive_state["deadline"]:
+        _interactive_state["last_tick"] = None
+        return INTERACTIVE_POLL_INTERVAL
+    last = _interactive_state["last_tick"]
+    delta = INTERACTIVE_STEP_INTERVAL if last is None else min(
+        max(now - last, INTERACTIVE_MINIMUM_DELTA), INTERACTIVE_MAXIMUM_DELTA)
+    _interactive_state["last_tick"] = now
+    try:
+        _interactive_step(scene, bodies, delta)
+    except Exception:
+        for obj in bodies:
+            entry = scene_world.body_entry(scene, obj)
+            if entry is not None:
+                entry.interactive = False
+        raise
+    _interactive_state["signature"] = _interactive_signature(scene, bodies)
+    return INTERACTIVE_STEP_INTERVAL
+
+
+LIVE_REFRESH_REASON = (
+    "editing a collider while the timeline is paused re-solves the current frame from a few "
+    "frames earlier by stepping the timeline, so the frame handler does the solving and the "
+    "result is what playback would have produced under the new collider; the edit is seen as "
+    "a change of what the collider itself stores (its local transform, size and settings) and "
+    "of the configuration parameters, never of its evaluated pose, because a collider that "
+    "follows a bone moves on every frame change and that is not an edit")
+
+LIVE_REFRESH_POLL_INTERVAL = 0.1
+LIVE_REFRESH_DEBOUNCE = 0.15
+
+_live_refresh_state = {"signature": None, "changed_at": None}
+
+
+def _rna_values(group):
+    values = []
+    for prop in group.bl_rna.properties:
+        if prop.identifier == "rna_type" or prop.type in {'POINTER', 'COLLECTION'}:
+            continue
+        value = getattr(group, prop.identifier)
+        values.append(tuple(value) if hasattr(value, "__len__") and not isinstance(value, str) else value)
+    return tuple(values)
+
+
+def _live_refresh_signature(scene, bodies):
+    parts = []
+    for target in scene_world.pool_targets(scene):
+        settings = collider_geom.settings_of(target)
+        for obj in (target, collider_geom.end_object(settings)):
+            if obj is None:
+                continue
+            parts.append(armature.read_matrix(obj.matrix_basis).tobytes())
+            parts.append(repr((obj.empty_display_size, obj.empty_display_type)).encode())
+        parts.append(repr(_rna_values(settings)).encode())
+    tokens = []
+    for obj in bodies:
+        for config in obj.ruri_cloth_physics.configs:
+            tokens.append(_params_token(obj, config))
+    return zlib.crc32(b"".join(parts)), tuple(tokens)
+
+
+def _any_live():
+    return any(scene_world.live_bodies(scene) for scene in bpy.data.scenes)
+
+
+def live_refresh_begin():
+    _live_refresh_state["signature"] = None
+    _live_refresh_state["changed_at"] = None
+    if not bpy.app.timers.is_registered(_live_refresh_tick):
+        bpy.app.timers.register(_live_refresh_tick, first_interval=LIVE_REFRESH_POLL_INTERVAL,
+                                persistent=True)
+
+
+def _live_refresh_resolve(scene):
+    frame = scene.frame_current
+    start = max(scene.frame_start, frame - int(scene.ruri_cloth_physics.live_refresh_frames))
+    scene.frame_set(start)
+    for step in range(start + 1, frame + 1):
+        scene.frame_set(step)
+    if start == frame:
+        scene.frame_set(frame)
+
+
+def _live_refresh_tick():
+    scene = bpy.context.scene
+    bodies = scene_world.live_bodies(scene) if scene is not None else ()
+    if not bodies:
+        _live_refresh_state["signature"] = None
+        return LIVE_REFRESH_POLL_INTERVAL if _any_live() else None
+    screen = bpy.context.screen
+    if screen is not None and screen.is_animation_playing:
+        _live_refresh_state["signature"] = None
+        _live_refresh_state["changed_at"] = None
+        return LIVE_REFRESH_POLL_INTERVAL
+    now = time.perf_counter()
+    signature = _live_refresh_signature(scene, bodies)
+    previous = _live_refresh_state["signature"]
+    _live_refresh_state["signature"] = signature
+    if previous is None:
+        return LIVE_REFRESH_POLL_INTERVAL
+    if signature != previous:
+        _live_refresh_state["changed_at"] = now
+        return LIVE_REFRESH_POLL_INTERVAL
+    changed_at = _live_refresh_state["changed_at"]
+    if changed_at is not None and now - changed_at >= LIVE_REFRESH_DEBOUNCE:
+        _live_refresh_state["changed_at"] = None
+        _live_refresh_resolve(scene)
+    return LIVE_REFRESH_POLL_INTERVAL
 
 
 @persistent
 def _on_load_post(*args):
     clear_registry()
     bone_binding.invalidate()
+    if _any_live():
+        live_refresh_begin()
 
 
 @persistent
@@ -1068,21 +1280,6 @@ def forget_body(obj):
     _last_display = None
 
 
-PRE_FRAME_TAG_REASON = (
-    "the flush announces the change even though it runs before the frame is evaluated, "
-    "because writing the plane through foreach_set does not invalidate anything on its own "
-    "-- the basis reads back correctly and the evaluated pose does not move, which is the "
-    "same silence that made a still timeline stop updating. Announcing here is free: the "
-    "evaluation that consumes the tag is the one the frame change was going to run anyway, "
-    "so the rig is posed once. Announcing after the frame, which is where this used to "
-    "happen, is what cost a second evaluation of every modifier stack hanging off the rig")
-
-
-@persistent
-def _on_frame_change_pre(scene, depsgraph=None):
-    flush_pose_writes(POSE_WRITE_REFRESH)
-
-
 @persistent
 def _on_save_pre(*args):
     _pending_writes.clear()
@@ -1098,7 +1295,6 @@ def _on_save_post(*args):
 
 
 _HANDLERS = (
-    ("frame_change_pre", "_on_frame_change_pre"),
     ("frame_change_post", "_on_frame_change_post"),
     ("depsgraph_update_post", "_on_depsgraph_update_post"),
     ("load_post", "_on_load_post"),
