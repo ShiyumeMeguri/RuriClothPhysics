@@ -155,7 +155,9 @@ class RCP_PT_ruri_cloth_physics(bpy.types.Panel):
         if body is None:
             self.layout.operator("ruri_cloth_physics.body_enroll", text="", icon='PLAY')
         else:
-            self.layout.prop(body, "live", text="", icon='PLAY')
+            row = self.layout.row(align=True)
+            row.prop(body, "interactive", text="", icon='HAND')
+            row.prop(body, "live", text="", icon='PLAY')
 
     def draw(self, context):
         layout = self.layout
@@ -204,7 +206,7 @@ class RCP_PT_scene_settings(bpy.types.Panel):
         layout.prop(scene_settings, "simulation_frequency")
         layout.prop(scene_settings, "max_simulation_count")
         layout.prop(scene_settings, "global_time_scale")
-        layout.prop(scene_settings, "paused_edit_settle")
+        layout.prop(scene_settings, "interactive_settle")
         layout.prop(scene_settings, "overlay_enabled")
 
 
