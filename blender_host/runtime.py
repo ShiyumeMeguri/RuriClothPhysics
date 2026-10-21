@@ -952,9 +952,25 @@ def _report_once(action, *arguments):
     _handler_failure = None
 
 
+SAME_FRAME_REASON = (
+    "a frame change onto the frame the cloth is already at is a re-evaluation of the same "
+    "moment and not a step in time: other add-ons and operators call it, and an auto backup "
+    "is one of them, and it must neither rewind the cloth, which is what a frame at or before "
+    "the last one used to mean, nor advance it; the animation evaluation has just overwritten "
+    "the pose of every keyed bone the solver drives, so the last solved pose is written back "
+    "and nothing else happens")
+
+
+def _reapply_last_solve():
+    if _last_display is None:
+        return
+    _solve_pose_writes(_last_display)
+    flush_pose_writes(POSE_WRITE_REFRESH)
+
+
 @persistent
 def _on_frame_change_post(scene, depsgraph=None):
-    global _last_frame
+    global _last_frame, _paused_edit_quiet_until
     if scene is None:
         return
     if depsgraph is not None and depsgraph.mode != 'VIEWPORT':
@@ -964,12 +980,16 @@ def _on_frame_change_post(scene, depsgraph=None):
         return
     if _paused_edit_stepping:
         return
+    _paused_edit_quiet_until = time.perf_counter() + PAUSED_EDIT_QUIET
     if not scene_world.live_bodies(scene):
         _last_frame = None
         return
     frame = scene.frame_current
     fps = scene.render.fps / scene.render.fps_base
-    if _last_frame is None or frame <= _last_frame:
+    if _last_frame is not None and frame == _last_frame:
+        _report_once(_reapply_last_solve)
+        return
+    if _last_frame is None or frame < _last_frame:
         for entry in _registry.values():
             if entry.team is not None:
                 _world.request_reset(entry.team, 'FULL')
@@ -995,6 +1015,8 @@ PAUSED_EDIT_MINIMUM_DELTA = 1.0 / 240.0
 PAUSED_EDIT_MAXIMUM_DELTA = 0.1
 
 _paused_edit_stepping = False
+_paused_edit_quiet_until = 0.0
+PAUSED_EDIT_QUIET = 0.8
 _paused_edit_state = {"signature": None, "deadline": 0.0, "last_tick": None, "frame": None}
 
 
@@ -1003,32 +1025,33 @@ def _reset_paused_edit_state():
 
 
 def _paused_edit_signature(scene, bodies):
-    parts = []
+    edited = []
+    evaluated = []
     tokens = []
     for obj in bodies:
         pose = armature.read_pose_matrices(obj, "matrix")
         cached = _batch_registry.get(obj.session_uid)
         if cached is None:
-            parts.append(b"cold")
+            evaluated.append(b"cold")
         else:
             driven = cached[1].pose_index
             keep = np.ones(len(pose), dtype=bool)
             keep[driven[driven >= 0]] = False
             pose = pose[keep]
-        parts.append(np.ascontiguousarray(pose).tobytes())
-        parts.append(armature.read_matrix(obj.matrix_world).tobytes())
+        evaluated.append(np.ascontiguousarray(pose).tobytes())
+        evaluated.append(armature.read_matrix(obj.matrix_world).tobytes())
         for config in obj.ruri_cloth_physics.configs:
             tokens.append(_params_token(obj, config))
     for target in scene_world.pool_targets(scene):
         settings = collider_geom.settings_of(target)
-        parts.append(repr(_rna_values(settings)).encode())
+        edited.append(repr(_rna_values(settings)).encode())
         for obj in (target, collider_geom.end_object(settings)):
             if obj is None:
                 continue
-            parts.append(armature.read_matrix(obj.matrix_basis).tobytes())
-            parts.append(armature.read_matrix(obj.matrix_world).tobytes())
-            parts.append(repr((obj.empty_display_size, obj.empty_display_type)).encode())
-    return zlib.crc32(b"".join(parts)), tuple(tokens)
+            edited.append(armature.read_matrix(obj.matrix_basis).tobytes())
+            edited.append(repr((obj.empty_display_size, obj.empty_display_type)).encode())
+            evaluated.append(armature.read_matrix(obj.matrix_world).tobytes())
+    return zlib.crc32(b"".join(edited)), tuple(tokens), zlib.crc32(b"".join(evaluated))
 
 
 def _rna_values(group):
@@ -1070,7 +1093,11 @@ def _paused_edit_drive(scene, bodies, now):
     if frame != state["frame"]:
         state.update(frame=frame, signature=signature, deadline=0.0, last_tick=None)
         return False
-    if signature != state["signature"]:
+    previous = state["signature"]
+    changed = previous is not None and (
+        signature[:2] != previous[:2]
+        or (now >= _paused_edit_quiet_until and signature[2] != previous[2]))
+    if changed:
         state["deadline"] = now + scene.ruri_cloth_physics.paused_edit_settle
     state["signature"] = signature
     if now >= state["deadline"]:
@@ -1216,6 +1243,8 @@ def _on_save_pre(*args):
 
 @persistent
 def _on_save_post(*args):
+    global _paused_edit_quiet_until
+    _paused_edit_quiet_until = time.perf_counter() + PAUSED_EDIT_QUIET
     if _last_display is None:
         return
     _report_once(_solve_pose_writes, _last_display)
