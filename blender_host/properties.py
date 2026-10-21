@@ -89,7 +89,7 @@ def _body_live_update(self, context):
         self.interactive = False
     if self.live:
         from . import runtime
-        runtime.live_refresh_begin()
+        runtime.ensure_step_timer()
         return
     if obj is None or obj.type != 'ARMATURE':
         return
@@ -1129,13 +1129,10 @@ class RCPSceneSettings(bpy.types.PropertyGroup):
         name="单帧最大步数", default=3, min=1, max=5,
         description="一帧之内最多跑几步物理。帧率低时需要的步数会变多, 这个上限用来防止卡顿雪崩; "
                     "被截断的步数会通过整体平移补偿, 不会导致布料落后于身体。")
-    live_refresh_frames: IntProperty(
-        name="改碰撞体后回溯帧数", default=12, min=0, max=60,
-        description="实时模拟开着、时间轴暂停时, 改了碰撞体或配置参数会自动从这么多帧之前重新模拟到当前帧。"
-                    "0 = 只在当前帧重新求解一次(布料状态沿用, 不重新积累); 越大越接近真实播放的结果, 但每次更新越慢")
     interactive_settle: FloatProperty(
         name="拖拽后继续模拟 (秒)", default=2.0, min=0.0, max=10.0,
-        description="拖拽模拟在最后一次操作之后继续求解多久, 让布料自然摆动到静止")
+        description="拖拽模拟, 以及实时模拟暂停时改碰撞体或参数之后, 在最后一次操作之后继续求解多久, "
+                    "让布料自然摆动到静止。两者都沿用上一帧的运动状态, 不重置")
     global_time_scale: FloatProperty(
         name="全局时间流速", default=1.0, min=0.0, max=1.0,
         description="所有布料的统一时间倍率, 会与每条配置自己的'时间流速'相乘。0 = 全部冻结。")

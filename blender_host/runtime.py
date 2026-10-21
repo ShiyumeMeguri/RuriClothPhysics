@@ -985,12 +985,16 @@ def _on_frame_change_post(scene, depsgraph=None):
 
 
 INTERACTIVE_REASON = (
-    "the interactive mode is a timer and not a frame handler because nothing about it is tied "
-    "to the timeline: it solves while the inputs are changing and for a settling time after, "
+    "the stepping is a timer and not a frame handler because nothing about it is tied to "
+    "the timeline: it solves while the inputs are changing and for a settling time after, "
     "with a step of the real time that passed, and it updates the animation by hand before "
     "each solve because the animation is what gives keyed driven bones back to the rest pose "
-    "the solver reads; the frame handler ignores the frame changes that update makes and the "
-    "mode is exclusive with the live switch, so one frame is never solved twice")
+    "the solver reads; the frame handler ignores the frame changes that update makes. The "
+    "drag mode is exclusive with the live switch, so one frame is never solved twice, and a "
+    "body that is live is stepped by the timer only while the timeline is paused and only "
+    "after an edit of a collider, a parameter or an unsolved bone: a frame change is not an "
+    "edit, the handler has already solved it. Neither path resets the cloth, the state the "
+    "last frame left is what the next step continues from")
 
 INTERACTIVE_POLL_INTERVAL = 0.1
 INTERACTIVE_STEP_INTERVAL = 1.0 / 60.0
@@ -999,7 +1003,13 @@ INTERACTIVE_MAXIMUM_DELTA = 0.1
 
 _interactive_stepping = False
 _interactive_dirty = False
-_interactive_state = {"signature": None, "deadline": 0.0, "last_tick": None}
+
+
+def _new_step_state():
+    return {"signature": None, "deadline": 0.0, "last_tick": None, "frame": None}
+
+
+_step_states = {"interactive": _new_step_state(), "live": _new_step_state()}
 
 
 def _interactive_signature(scene, bodies):
@@ -1020,24 +1030,48 @@ def _interactive_signature(scene, bodies):
         for config in obj.ruri_cloth_physics.configs:
             tokens.append(_params_token(obj, config))
     for target in scene_world.pool_targets(scene):
-        parts.append(armature.read_matrix(target.matrix_basis).tobytes())
-        parts.append(armature.read_matrix(target.matrix_world).tobytes())
+        settings = collider_geom.settings_of(target)
+        parts.append(repr(_rna_values(settings)).encode())
+        for obj in (target, collider_geom.end_object(settings)):
+            if obj is None:
+                continue
+            parts.append(armature.read_matrix(obj.matrix_basis).tobytes())
+            parts.append(armature.read_matrix(obj.matrix_world).tobytes())
+            parts.append(repr((obj.empty_display_size, obj.empty_display_type)).encode())
     return zlib.crc32(b"".join(parts)), tuple(tokens)
+
+
+def _rna_values(group):
+    values = []
+    for prop in group.bl_rna.properties:
+        if prop.identifier == "rna_type" or prop.type in {'POINTER', 'COLLECTION'}:
+            continue
+        value = getattr(group, prop.identifier)
+        values.append(tuple(value) if hasattr(value, "__len__") and not isinstance(value, str) else value)
+    return tuple(values)
 
 
 def _interactive_animated(bodies):
     return any(armature.animated_bone_names(obj) for obj in bodies)
 
 
-def interactive_begin(obj):
-    global _interactive_dirty
-    request_reset(obj, 'FULL')
-    _interactive_state["signature"] = None
-    _interactive_state["last_tick"] = None
-    _interactive_dirty = True
+def _any_stepping():
+    return any(scene_world.interactive_bodies(scene) or scene_world.live_bodies(scene)
+               for scene in bpy.data.scenes)
+
+
+def ensure_step_timer():
     if not bpy.app.timers.is_registered(_interactive_tick):
         bpy.app.timers.register(_interactive_tick, first_interval=INTERACTIVE_STEP_INTERVAL,
                                 persistent=True)
+
+
+def interactive_begin(obj):
+    global _interactive_dirty
+    request_reset(obj, 'FULL')
+    _step_states["interactive"] = _new_step_state()
+    _interactive_dirty = True
+    ensure_step_timer()
 
 
 def _interactive_step(scene, bodies, delta):
@@ -1052,138 +1086,71 @@ def _interactive_step(scene, bodies, delta):
         _interactive_stepping = False
 
 
-def _any_interactive():
-    return any(scene_world.interactive_bodies(scene) for scene in bpy.data.scenes)
-
-
-def _interactive_tick():
-    global _interactive_dirty
-    scene = bpy.context.scene
-    bodies = scene_world.interactive_bodies(scene) if scene is not None else ()
-    if not bodies:
-        _interactive_state["signature"] = None
-        return INTERACTIVE_POLL_INTERVAL if _any_interactive() else None
-    now = time.perf_counter()
+def _drive(scene, bodies, key, now, woken, rebaseline_on_frame_change):
+    state = _step_states[key]
     signature = _interactive_signature(scene, bodies)
-    if _interactive_dirty or signature != _interactive_state["signature"]:
-        _interactive_dirty = False
-        _interactive_state["deadline"] = now + scene.ruri_cloth_physics.interactive_settle
-    _interactive_state["signature"] = signature
-    if now >= _interactive_state["deadline"]:
-        _interactive_state["last_tick"] = None
-        return INTERACTIVE_POLL_INTERVAL
-    last = _interactive_state["last_tick"]
+    frame = scene.frame_current
+    if rebaseline_on_frame_change and frame != state["frame"]:
+        state.update(frame=frame, signature=signature, deadline=0.0, last_tick=None)
+        return False
+    state["frame"] = frame
+    if woken or signature != state["signature"]:
+        state["deadline"] = now + scene.ruri_cloth_physics.interactive_settle
+    state["signature"] = signature
+    if now >= state["deadline"]:
+        state["last_tick"] = None
+        return False
+    last = state["last_tick"]
     delta = INTERACTIVE_STEP_INTERVAL if last is None else min(
         max(now - last, INTERACTIVE_MINIMUM_DELTA), INTERACTIVE_MAXIMUM_DELTA)
-    _interactive_state["last_tick"] = now
+    state["last_tick"] = now
     try:
         _interactive_step(scene, bodies, delta)
     except Exception:
         for obj in bodies:
             entry = scene_world.body_entry(scene, obj)
             if entry is not None:
-                entry.interactive = False
+                if key == "interactive":
+                    entry.interactive = False
+                else:
+                    entry.live = False
         raise
-    _interactive_state["signature"] = _interactive_signature(scene, bodies)
-    return INTERACTIVE_STEP_INTERVAL
+    state["signature"] = _interactive_signature(scene, bodies)
+    return True
 
 
-LIVE_REFRESH_REASON = (
-    "editing a collider while the timeline is paused re-solves the current frame from a few "
-    "frames earlier by stepping the timeline, so the frame handler does the solving and the "
-    "result is what playback would have produced under the new collider; the edit is seen as "
-    "a change of what the collider itself stores (its local transform, size and settings) and "
-    "of the configuration parameters, never of its evaluated pose, because a collider that "
-    "follows a bone moves on every frame change and that is not an edit")
-
-LIVE_REFRESH_POLL_INTERVAL = 0.1
-LIVE_REFRESH_DEBOUNCE = 0.15
-
-_live_refresh_state = {"signature": None, "changed_at": None}
-
-
-def _rna_values(group):
-    values = []
-    for prop in group.bl_rna.properties:
-        if prop.identifier == "rna_type" or prop.type in {'POINTER', 'COLLECTION'}:
-            continue
-        value = getattr(group, prop.identifier)
-        values.append(tuple(value) if hasattr(value, "__len__") and not isinstance(value, str) else value)
-    return tuple(values)
-
-
-def _live_refresh_signature(scene, bodies):
-    parts = []
-    for target in scene_world.pool_targets(scene):
-        settings = collider_geom.settings_of(target)
-        for obj in (target, collider_geom.end_object(settings)):
-            if obj is None:
-                continue
-            parts.append(armature.read_matrix(obj.matrix_basis).tobytes())
-            parts.append(repr((obj.empty_display_size, obj.empty_display_type)).encode())
-        parts.append(repr(_rna_values(settings)).encode())
-    tokens = []
-    for obj in bodies:
-        for config in obj.ruri_cloth_physics.configs:
-            tokens.append(_params_token(obj, config))
-    return zlib.crc32(b"".join(parts)), tuple(tokens)
-
-
-def _any_live():
-    return any(scene_world.live_bodies(scene) for scene in bpy.data.scenes)
-
-
-def live_refresh_begin():
-    _live_refresh_state["signature"] = None
-    _live_refresh_state["changed_at"] = None
-    if not bpy.app.timers.is_registered(_live_refresh_tick):
-        bpy.app.timers.register(_live_refresh_tick, first_interval=LIVE_REFRESH_POLL_INTERVAL,
-                                persistent=True)
-
-
-def _live_refresh_resolve(scene):
-    frame = scene.frame_current
-    start = max(scene.frame_start, frame - int(scene.ruri_cloth_physics.live_refresh_frames))
-    scene.frame_set(start)
-    for step in range(start + 1, frame + 1):
-        scene.frame_set(step)
-    if start == frame:
-        scene.frame_set(frame)
-
-
-def _live_refresh_tick():
+def _interactive_tick():
+    global _interactive_dirty
     scene = bpy.context.scene
-    bodies = scene_world.live_bodies(scene) if scene is not None else ()
-    if not bodies:
-        _live_refresh_state["signature"] = None
-        return LIVE_REFRESH_POLL_INTERVAL if _any_live() else None
+    if scene is None:
+        return INTERACTIVE_POLL_INTERVAL if _any_stepping() else None
     screen = bpy.context.screen
-    if screen is not None and screen.is_animation_playing:
-        _live_refresh_state["signature"] = None
-        _live_refresh_state["changed_at"] = None
-        return LIVE_REFRESH_POLL_INTERVAL
+    playing = screen is not None and screen.is_animation_playing
+    interactive = scene_world.interactive_bodies(scene)
+    live = () if playing else scene_world.live_bodies(scene)
+    woken = _interactive_dirty
+    _interactive_dirty = False
+    if not interactive:
+        _step_states["interactive"] = _new_step_state()
+    if not live:
+        _step_states["live"] = _new_step_state()
+    if not interactive and not live:
+        return INTERACTIVE_POLL_INTERVAL if _any_stepping() else None
     now = time.perf_counter()
-    signature = _live_refresh_signature(scene, bodies)
-    previous = _live_refresh_state["signature"]
-    _live_refresh_state["signature"] = signature
-    if previous is None:
-        return LIVE_REFRESH_POLL_INTERVAL
-    if signature != previous:
-        _live_refresh_state["changed_at"] = now
-        return LIVE_REFRESH_POLL_INTERVAL
-    changed_at = _live_refresh_state["changed_at"]
-    if changed_at is not None and now - changed_at >= LIVE_REFRESH_DEBOUNCE:
-        _live_refresh_state["changed_at"] = None
-        _live_refresh_resolve(scene)
-    return LIVE_REFRESH_POLL_INTERVAL
+    stepped = False
+    if interactive:
+        stepped = _drive(scene, interactive, "interactive", now, woken, False) or stepped
+    if live:
+        stepped = _drive(scene, live, "live", now, False, True) or stepped
+    return INTERACTIVE_STEP_INTERVAL if stepped else INTERACTIVE_POLL_INTERVAL
 
 
 @persistent
 def _on_load_post(*args):
     clear_registry()
     bone_binding.invalidate()
-    if _any_live():
-        live_refresh_begin()
+    if _any_stepping():
+        ensure_step_timer()
 
 
 @persistent

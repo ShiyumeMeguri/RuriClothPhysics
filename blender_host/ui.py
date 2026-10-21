@@ -207,7 +207,6 @@ class RCP_PT_scene_settings(bpy.types.Panel):
         layout.prop(scene_settings, "max_simulation_count")
         layout.prop(scene_settings, "global_time_scale")
         layout.prop(scene_settings, "interactive_settle")
-        layout.prop(scene_settings, "live_refresh_frames")
         layout.prop(scene_settings, "overlay_enabled")
 
 
