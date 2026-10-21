@@ -105,7 +105,7 @@ def particle_radii(world, slot):
         kernel_io.team_display(world, slot, "scale_ratio"))
 
 
-RADIUS_ABSENT_NOT_LIVE = "碰撞半径需开启实时模拟"
+RADIUS_ABSENT_NOT_LIVE = "碰撞半径需开启实时模拟或拖拽模拟"
 RADIUS_ABSENT_NO_DATA = "这条配置还没有模拟数据, 走一帧即可"
 RADIUS_ABSENT_NO_COLLISION = "这条配置的碰撞方式是不碰撞, 没有碰撞体积可画"
 RADIUS_ABSENT_NO_BONES = "这条配置没有骨骼参与碰撞"
@@ -113,7 +113,7 @@ RADIUS_ABSENT_NO_BONES = "这条配置没有骨骼参与碰撞"
 
 def collision_volume_absence(scene, obj, entry):
     body = world.body_entry(scene, obj)
-    if body is None or not body.live:
+    if body is None or not (body.live or body.interactive):
         return RADIUS_ABSENT_NOT_LIVE
     if entry is None or entry.setup is None or entry.team is None:
         return RADIUS_ABSENT_NO_DATA
